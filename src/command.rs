@@ -49,6 +49,7 @@ pub enum Direction {
 #[serde(deny_unknown_fields)]
 #[serde(tag = "type")]
 pub enum CommandAction {
+    // --- Phase 1 commands ---
     Move {
         object_id: ObjectId,
         direction: Direction,
@@ -64,6 +65,8 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
+
+    // --- Phase 4+ commands (defined ahead of full implementation) ---
     Withdraw {
         object_id: ObjectId,
         target_id: ObjectId,
