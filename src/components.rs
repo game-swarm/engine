@@ -51,7 +51,7 @@ pub enum StructureType {
 
 pub const DEFAULT_ROOM_SIZE: i32 = 50;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TerrainType {
     Plain,
     Swamp,
