@@ -12,17 +12,17 @@ pub mod world;
 pub use command::*;
 pub use components::*;
 pub use mcp::{
-    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player, DeployParams,
-    DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer, StoredModule,
-    VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
+    DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer,
+    StoredModule, VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
     VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot, WorldRuleMod, WorldRules,
+    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player,
 };
 pub use realtime::*;
 pub use resources::*;
 pub use rule_module::*;
 pub use tick::*;
 pub use visibility::*;
-pub use world::{create_world, SwarmWorld};
+pub use world::{SwarmWorld, create_world};
 
 #[cfg(test)]
 mod tests {

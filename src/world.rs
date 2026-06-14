@@ -1,12 +1,12 @@
 use bevy::prelude::*;
 
 use crate::command::{
-    apply_command, source_gate, validate_command, CommandIntent, CommandResult, CommandSource,
-    RawCommand, Tick,
+    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
+    validate_command,
 };
 use crate::components::*;
 use crate::resources::ResourceRegistry;
-use crate::rule_module::{rhai_rule_module_tick_end_system, RhaiRuleModules};
+use crate::rule_module::{RhaiRuleModules, rhai_rule_module_tick_end_system, run_init_scripts};
 use crate::systems::*;
 
 pub struct SwarmWorld {
@@ -155,7 +155,9 @@ pub fn create_world() -> SwarmWorld {
         },
     ));
 
-    SwarmWorld { app }
+    let mut world = SwarmWorld { app };
+    run_init_scripts(world.app.world_mut());
+    world
 }
 
 /// Compute a deterministic, stable checksum over the full world state.
