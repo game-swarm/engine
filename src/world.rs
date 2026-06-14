@@ -159,25 +159,19 @@ pub fn create_world() -> SwarmWorld {
 
 /// Compute a deterministic, stable checksum over the full world state.
 ///
-/// Uses FNV-1a (64-bit) so the result is identical across runs and platforms —
-/// unlike `DefaultHasher` which is randomly seeded since Rust 1.36.
+/// The checksum is built from a canonical byte stream of tracked ECS components:
+/// each component group is tagged, each entity/component row is sorted into a
+/// deterministic order, and the resulting stream is hashed with BLAKE3. The
+/// first eight digest bytes are returned as a little-endian `u64` for compact
+/// tick traces and replay comparisons.
 pub fn state_checksum(world: &mut World) -> u64 {
-    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
-    const FNV_PRIME: u64 = 1_099_511_628_211;
-
-    fn fnv_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
-        for &b in bytes {
-            hash ^= b as u64;
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-        hash
+    fn hash_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
     }
 
-    fn tag(hash: u64, name: &str) -> u64 {
-        fnv_bytes(
-            fnv_bytes(hash, &(name.len() as u64).to_le_bytes()),
-            name.as_bytes(),
-        )
+    fn tag(hasher: &mut blake3::Hasher, name: &str) {
+        hash_bytes(hasher, name.as_bytes());
     }
 
     fn opt_u32_bytes(value: Option<u32>) -> [u8; 8] {
@@ -192,10 +186,10 @@ pub fn state_checksum(world: &mut World) -> u64 {
         }
     }
 
-    let mut hash = FNV_OFFSET;
+    let mut hasher = blake3::Hasher::new();
 
     // --- Terrain ---
-    hash = tag(hash, "terrain");
+    tag(&mut hasher, "terrain");
     let mut terrain = world
         .query::<(&Position, &Terrain)>()
         .iter(world)
@@ -203,14 +197,14 @@ pub fn state_checksum(world: &mut World) -> u64 {
         .collect::<Vec<_>>();
     terrain.sort_unstable();
     for (room, x, y, t) in &terrain {
-        hash = fnv_bytes(hash, &room.to_le_bytes());
-        hash = fnv_bytes(hash, &x.to_le_bytes());
-        hash = fnv_bytes(hash, &y.to_le_bytes());
-        hash = fnv_bytes(hash, &[*t]);
+        hasher.update(&room.to_le_bytes());
+        hasher.update(&x.to_le_bytes());
+        hasher.update(&y.to_le_bytes());
+        hasher.update(&[*t]);
     }
 
     // --- Sources ---
-    hash = tag(hash, "sources");
+    tag(&mut hasher, "sources");
     let mut sources = world
         .query::<(&Position, &Source)>()
         .iter(world)
@@ -235,21 +229,21 @@ pub fn state_checksum(world: &mut World) -> u64 {
         (*room, *x, *y, *amount, *capacity, *regen, *regen_time)
     });
     for (room, x, y, produces, amount, capacity, regen, regen_time) in &sources {
-        hash = fnv_bytes(hash, &room.to_le_bytes());
-        hash = fnv_bytes(hash, &x.to_le_bytes());
-        hash = fnv_bytes(hash, &y.to_le_bytes());
+        hasher.update(&room.to_le_bytes());
+        hasher.update(&x.to_le_bytes());
+        hasher.update(&y.to_le_bytes());
         for (k, v) in produces {
-            hash = fnv_bytes(hash, k.as_bytes());
-            hash = fnv_bytes(hash, &v.to_le_bytes());
+            hash_bytes(&mut hasher, k.as_bytes());
+            hasher.update(&v.to_le_bytes());
         }
-        hash = fnv_bytes(hash, &amount.to_le_bytes());
-        hash = fnv_bytes(hash, &capacity.to_le_bytes());
-        hash = fnv_bytes(hash, &regen.to_le_bytes());
-        hash = fnv_bytes(hash, &regen_time.to_le_bytes());
+        hasher.update(&amount.to_le_bytes());
+        hasher.update(&capacity.to_le_bytes());
+        hasher.update(&regen.to_le_bytes());
+        hasher.update(&regen_time.to_le_bytes());
     }
 
     // --- Drones ---
-    hash = tag(hash, "drones");
+    tag(&mut hasher, "drones");
     let mut drones = world
         .query::<(&Position, &Drone)>()
         .iter(world)
@@ -322,27 +316,26 @@ pub fn state_checksum(world: &mut World) -> u64 {
         lifespan,
     ) in &drones
     {
-        hash = fnv_bytes(hash, &room.to_le_bytes());
-        hash = fnv_bytes(hash, &x.to_le_bytes());
-        hash = fnv_bytes(hash, &y.to_le_bytes());
-        hash = fnv_bytes(hash, &owner.to_le_bytes());
-        hash = fnv_bytes(hash, body);
+        hasher.update(&room.to_le_bytes());
+        hasher.update(&x.to_le_bytes());
+        hasher.update(&y.to_le_bytes());
+        hasher.update(&owner.to_le_bytes());
+        hash_bytes(&mut hasher, body);
         for (name, amount) in carry {
-            hash = fnv_bytes(hash, &(name.len() as u64).to_le_bytes());
-            hash = fnv_bytes(hash, name.as_bytes());
-            hash = fnv_bytes(hash, &amount.to_le_bytes());
+            hash_bytes(&mut hasher, name.as_bytes());
+            hasher.update(&amount.to_le_bytes());
         }
-        hash = fnv_bytes(hash, &carry_capacity.to_le_bytes());
-        hash = fnv_bytes(hash, &fatigue.to_le_bytes());
-        hash = fnv_bytes(hash, &hits.to_le_bytes());
-        hash = fnv_bytes(hash, &hits_max.to_le_bytes());
-        hash = fnv_bytes(hash, &[*spawning]);
-        hash = fnv_bytes(hash, &age.to_le_bytes());
-        hash = fnv_bytes(hash, &lifespan.to_le_bytes());
+        hasher.update(&carry_capacity.to_le_bytes());
+        hasher.update(&fatigue.to_le_bytes());
+        hasher.update(&hits.to_le_bytes());
+        hasher.update(&hits_max.to_le_bytes());
+        hasher.update(&[*spawning]);
+        hasher.update(&age.to_le_bytes());
+        hasher.update(&lifespan.to_le_bytes());
     }
 
     // --- Structures ---
-    hash = tag(hash, "structures");
+    tag(&mut hasher, "structures");
     let mut structures = world
         .query::<(&Position, &Structure)>()
         .iter(world)
@@ -380,20 +373,20 @@ pub fn state_checksum(world: &mut World) -> u64 {
     for (room, x, y, structure_type, owner, hits, hits_max, energy, capacity, cooldown) in
         &structures
     {
-        hash = fnv_bytes(hash, &room.to_le_bytes());
-        hash = fnv_bytes(hash, &x.to_le_bytes());
-        hash = fnv_bytes(hash, &y.to_le_bytes());
-        hash = fnv_bytes(hash, &[*structure_type]);
-        hash = fnv_bytes(hash, &owner.to_le_bytes());
-        hash = fnv_bytes(hash, &hits.to_le_bytes());
-        hash = fnv_bytes(hash, &hits_max.to_le_bytes());
-        hash = fnv_bytes(hash, &opt_u32_bytes(*energy));
-        hash = fnv_bytes(hash, &opt_u32_bytes(*capacity));
-        hash = fnv_bytes(hash, &cooldown.to_le_bytes());
+        hasher.update(&room.to_le_bytes());
+        hasher.update(&x.to_le_bytes());
+        hasher.update(&y.to_le_bytes());
+        hasher.update(&[*structure_type]);
+        hasher.update(&owner.to_le_bytes());
+        hasher.update(&hits.to_le_bytes());
+        hasher.update(&hits_max.to_le_bytes());
+        hasher.update(&opt_u32_bytes(*energy));
+        hasher.update(&opt_u32_bytes(*capacity));
+        hasher.update(&cooldown.to_le_bytes());
     }
 
     // --- Controllers ---
-    hash = tag(hash, "controllers");
+    tag(&mut hasher, "controllers");
     let mut controllers = world
         .query::<(&Position, &Controller)>()
         .iter(world)
@@ -428,21 +421,21 @@ pub fn state_checksum(world: &mut World) -> u64 {
         safe_mode_cooldown,
     ) in &controllers
     {
-        hash = fnv_bytes(hash, &room.to_le_bytes());
-        hash = fnv_bytes(hash, &x.to_le_bytes());
-        hash = fnv_bytes(hash, &y.to_le_bytes());
-        hash = fnv_bytes(hash, &owner.to_le_bytes());
-        hash = fnv_bytes(hash, &[*level]);
-        hash = fnv_bytes(hash, &progress.to_le_bytes());
-        hash = fnv_bytes(hash, &progress_total.to_le_bytes());
-        hash = fnv_bytes(hash, &downgrade_timer.to_le_bytes());
-        hash = fnv_bytes(hash, &safe_mode.to_le_bytes());
-        hash = fnv_bytes(hash, &safe_mode_available.to_le_bytes());
-        hash = fnv_bytes(hash, &safe_mode_cooldown.to_le_bytes());
+        hasher.update(&room.to_le_bytes());
+        hasher.update(&x.to_le_bytes());
+        hasher.update(&y.to_le_bytes());
+        hasher.update(&owner.to_le_bytes());
+        hasher.update(&[*level]);
+        hasher.update(&progress.to_le_bytes());
+        hasher.update(&progress_total.to_le_bytes());
+        hasher.update(&downgrade_timer.to_le_bytes());
+        hasher.update(&safe_mode.to_le_bytes());
+        hasher.update(&safe_mode_available.to_le_bytes());
+        hasher.update(&safe_mode_cooldown.to_le_bytes());
     }
 
     // --- Dropped resources ---
-    hash = tag(hash, "resources");
+    tag(&mut hasher, "resources");
     let mut resources = world
         .query::<(&Position, &crate::components::Resource)>()
         .iter(world)
@@ -455,15 +448,19 @@ pub fn state_checksum(world: &mut World) -> u64 {
         .collect::<Vec<_>>();
     resources.sort_unstable_by_key(|(room, x, y, _)| (*room, *x, *y));
     for (room, x, y, amounts) in &resources {
-        hash = fnv_bytes(hash, &room.to_le_bytes());
-        hash = fnv_bytes(hash, &x.to_le_bytes());
-        hash = fnv_bytes(hash, &y.to_le_bytes());
+        hasher.update(&room.to_le_bytes());
+        hasher.update(&x.to_le_bytes());
+        hasher.update(&y.to_le_bytes());
         for (name, amount) in amounts {
-            hash = fnv_bytes(hash, &(name.len() as u64).to_le_bytes());
-            hash = fnv_bytes(hash, name.as_bytes());
-            hash = fnv_bytes(hash, &amount.to_le_bytes());
+            hash_bytes(&mut hasher, name.as_bytes());
+            hasher.update(&amount.to_le_bytes());
         }
     }
 
-    hash
+    let digest = hasher.finalize();
+    u64::from_le_bytes(
+        digest.as_bytes()[..8]
+            .try_into()
+            .expect("BLAKE3 digest has 32 bytes"),
+    )
 }

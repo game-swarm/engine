@@ -3928,6 +3928,7 @@ name = "swarm-engine"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "blake3",
  "indexmap",
  "serde",
  "serde_json",
