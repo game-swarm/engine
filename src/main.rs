@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use swarm_engine::{BodyPart, create_world};
+use swarm_engine::{BodyPart, Controller, Drone, Source, Structure, create_world};
 
 const DEFAULT_HEALTH_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_TICK_INTERVAL_MS: u64 = 3_000;
@@ -22,10 +22,22 @@ struct Endpoint {
 }
 
 fn main() {
-    match swarm_engine::mod_cli::try_run(env::args().skip(1)) {
+    let cli_args = env::args().skip(1).collect::<Vec<_>>();
+    if cli_args.first().map(|arg| arg.as_str()) == Some("sim") {
+        if let Err(error) = run_sim(&cli_args[1..]) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    match swarm_engine::mod_cli::try_run(cli_args) {
         Ok(true) => return,
         Ok(false) => {}
-        Err(error) => { eprintln!("{error}"); std::process::exit(1); }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
     }
 
     let fdb_cluster_file = env::var("FDB_CLUSTER_FILE")
@@ -104,6 +116,85 @@ fn main() {
         tick += 1;
         thread::sleep(tick_interval);
     }
+}
+
+fn run_sim(args: &[String]) -> Result<(), String> {
+    let mut ticks = 5_000_u64;
+    let mut speed = "100x".to_string();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--ticks" {
+            index += 1;
+            ticks = parse_sim_ticks(args.get(index).ok_or("missing value after --ticks")?)?;
+        } else if let Some(value) = arg.strip_prefix("--ticks=") {
+            ticks = parse_sim_ticks(value)?;
+        } else if arg == "--speed" {
+            index += 1;
+            speed = parse_sim_speed(args.get(index).ok_or("missing value after --speed")?)?;
+        } else if let Some(value) = arg.strip_prefix("--speed=") {
+            speed = parse_sim_speed(value)?;
+        } else {
+            return Err(format!(
+                "usage: sim [--ticks N|--ticks=N] [--speed MULTIPLIER|--speed=MULTIPLIER]; unknown argument: {arg}"
+            ));
+        }
+        index += 1;
+    }
+
+    println!(
+        "mode=local-sim caveat=training-only-not-authoritative-no-fdb-no-nats ticks={ticks} speed={speed}"
+    );
+    let started_at = std::time::Instant::now();
+    let mut world = create_world();
+    world.spawn_drone(
+        1,
+        10,
+        10,
+        vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
+    );
+    let mut checksum = world.state_checksum();
+    for tick in 1..=ticks {
+        world.run_tick();
+        checksum = world.state_checksum();
+        if tick == 1 || tick == ticks || tick % 1_000 == 0 {
+            println!("progress tick={tick}/{ticks} state_checksum={checksum}");
+        }
+    }
+    let elapsed_ms = started_at.elapsed().as_millis();
+    let ecs = world.app.world_mut();
+    let drones = ecs.query::<&Drone>().iter(ecs).count();
+    let sources = ecs.query::<&Source>().iter(ecs).count();
+    let structures = ecs.query::<&Structure>().iter(ecs).count();
+    let controllers = ecs.query::<&Controller>().iter(ecs).count();
+    println!(
+        "summary mode=local-sim caveat=training-only ticks={ticks} speed={speed} final_state_checksum={checksum} elapsed_ms={elapsed_ms} drones={drones} sources={sources} structures={structures} controllers={controllers}"
+    );
+    Ok(())
+}
+
+fn parse_sim_ticks(value: &str) -> Result<u64, String> {
+    let ticks = value
+        .parse::<u64>()
+        .map_err(|_| format!("--ticks must be a positive integer, got {value}"))?;
+    if ticks == 0 {
+        return Err("--ticks must be greater than zero".to_string());
+    }
+    Ok(ticks)
+}
+
+fn parse_sim_speed(value: &str) -> Result<String, String> {
+    let multiplier = value
+        .trim()
+        .strip_suffix('x')
+        .ok_or_else(|| format!("--speed must use an x multiplier like 100x, got {value}"))?;
+    let parsed = multiplier
+        .parse::<u64>()
+        .map_err(|_| format!("--speed multiplier must be a positive integer, got {value}"))?;
+    if parsed == 0 {
+        return Err("--speed multiplier must be greater than zero".to_string());
+    }
+    Ok(format!("{parsed}x"))
 }
 
 fn start_health_server(addr: String, healthy: Arc<AtomicBool>) {
