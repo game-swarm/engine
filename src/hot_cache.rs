@@ -155,6 +155,7 @@ mod tests {
             local_storage: Default::default(),
             global_storage: Default::default(),
             pending_global_transfers: Vec::new(),
+            market_orders: Vec::new(),
         }
     }
 

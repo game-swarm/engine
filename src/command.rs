@@ -5,8 +5,9 @@ use std::collections::HashSet;
 
 use crate::components::*;
 use crate::resources::{
-    GlobalStorageConfig, GlobalTransferDirection, PendingGlobalTransfer, PendingGlobalTransfers,
-    PlayerGlobalStorage, PlayerLocalStorage, ResourceRegistry,
+    GlobalStorageConfig, GlobalTransferDirection, MarketConfig, MarketOrder, MarketOrders,
+    PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
+    ResourceRegistry,
 };
 use crate::systems::{PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
 
@@ -103,6 +104,15 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
+    CreateMarketOrder {
+        resource: String,
+        amount: u32,
+        price_resource: String,
+        price_amount: u32,
+    },
+    BuyMarketOrder {
+        order_id: u64,
+    },
 }
 
 /// Untrusted command shape emitted by a player module. Envelope fields are not
@@ -186,6 +196,8 @@ pub enum RejectionReason {
     NotFriendly,
     GlobalStorageDisabled,
     TransferInProgress,
+    TerminalRequired,
+    OrderNotFound,
 }
 
 pub type CommandResult = Result<(), RejectionReason>;
@@ -346,6 +358,22 @@ pub fn validate_command(
         CommandAction::TransferFromGlobal { resource, amount } => {
             validate_transfer_from_global(world, raw.player_id, resource, *amount)
         }
+        CommandAction::CreateMarketOrder {
+            resource,
+            amount,
+            price_resource,
+            price_amount,
+        } => validate_create_market_order(
+            world,
+            raw.player_id,
+            resource,
+            *amount,
+            price_resource,
+            *price_amount,
+        ),
+        CommandAction::BuyMarketOrder { order_id } => {
+            validate_buy_market_order(world, raw.player_id, *order_id)
+        }
     }?;
 
     Ok(ValidatedCommand { raw })
@@ -469,7 +497,10 @@ fn action_triggers_combat(action: &CommandAction) -> bool {
 fn action_uses_global_storage(action: &CommandAction) -> bool {
     matches!(
         action,
-        CommandAction::TransferToGlobal { .. } | CommandAction::TransferFromGlobal { .. }
+        CommandAction::TransferToGlobal { .. }
+            | CommandAction::TransferFromGlobal { .. }
+            | CommandAction::CreateMarketOrder { .. }
+            | CommandAction::BuyMarketOrder { .. }
     )
 }
 
@@ -546,6 +577,8 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Build { .. } => "Build",
         CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
         CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
+        CommandAction::CreateMarketOrder { .. } => "CreateMarketOrder",
+        CommandAction::BuyMarketOrder { .. } => "BuyMarketOrder",
     };
 
     match rejection {
@@ -716,6 +749,22 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         }
         CommandAction::TransferFromGlobal { resource, amount } => {
             apply_transfer_from_global(world, command.raw.player_id, &resource, amount)
+        }
+        CommandAction::CreateMarketOrder {
+            resource,
+            amount,
+            price_resource,
+            price_amount,
+        } => apply_create_market_order(
+            world,
+            command.raw.player_id,
+            &resource,
+            amount,
+            &price_resource,
+            price_amount,
+        ),
+        CommandAction::BuyMarketOrder { order_id } => {
+            apply_buy_market_order(world, command.raw.player_id, order_id)
         }
     }
 }
@@ -997,6 +1046,60 @@ fn validate_transfer_from_global(
     Ok(())
 }
 
+fn validate_create_market_order(
+    world: &mut World,
+    player_id: PlayerId,
+    resource: &str,
+    amount: u32,
+    _price_resource: &str,
+    _price_amount: u32,
+) -> CommandResult {
+    ensure_market_enabled(world, player_id)?;
+    let available = player_global_amount(world, player_id, resource);
+    if available < amount {
+        return Err(RejectionReason::InsufficientResource {
+            resource: resource.to_string(),
+            required: amount,
+            available,
+        });
+    }
+    Ok(())
+}
+
+fn validate_buy_market_order(
+    world: &mut World,
+    player_id: PlayerId,
+    order_id: u64,
+) -> CommandResult {
+    ensure_market_enabled(world, player_id)?;
+    let order = world
+        .resource::<MarketOrders>()
+        .orders
+        .get(&order_id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+
+    let available = player_global_amount(world, player_id, &order.price_resource);
+    if available < order.price_amount {
+        return Err(RejectionReason::InsufficientResource {
+            resource: order.price_resource,
+            required: order.price_amount,
+            available,
+        });
+    }
+
+    let config = world.resource::<GlobalStorageConfig>();
+    if global_storage_committed(world, player_id).saturating_add(order.amount) > config.capacity {
+        return Err(RejectionReason::TargetFull);
+    }
+    if global_storage_committed(world, order.seller).saturating_add(order.price_amount)
+        > config.capacity
+    {
+        return Err(RejectionReason::TargetFull);
+    }
+    Ok(())
+}
+
 fn apply_move(world: &mut World, object_id: ObjectId, direction: Direction) -> CommandResult {
     let entity = entity(object_id)?;
     let current_position = *world
@@ -1241,6 +1344,67 @@ fn apply_transfer_from_global(
             )),
             remaining_ticks: config.transfer_from_global_ticks,
         });
+    Ok(())
+}
+
+fn apply_create_market_order(
+    world: &mut World,
+    player_id: PlayerId,
+    resource: &str,
+    amount: u32,
+    price_resource: &str,
+    price_amount: u32,
+) -> CommandResult {
+    subtract_player_resource(
+        world
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(player_id)
+            .or_default(),
+        resource,
+        amount,
+    );
+
+    let mut orders = world.resource_mut::<MarketOrders>();
+    let id = orders.next_order_id;
+    orders.next_order_id += 1;
+    orders.orders.insert(
+        id,
+        MarketOrder {
+            id,
+            seller: player_id,
+            resource: resource.to_string(),
+            amount,
+            price_resource: price_resource.to_string(),
+            price_amount,
+        },
+    );
+    Ok(())
+}
+
+fn apply_buy_market_order(world: &mut World, player_id: PlayerId, order_id: u64) -> CommandResult {
+    let order = world
+        .resource_mut::<MarketOrders>()
+        .orders
+        .shift_remove(&order_id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+
+    subtract_player_resource(
+        world
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(player_id)
+            .or_default(),
+        &order.price_resource,
+        order.price_amount,
+    );
+    add_player_resource(world, player_id, &order.resource, order.amount);
+    add_player_resource(
+        world,
+        order.seller,
+        &order.price_resource,
+        order.price_amount,
+    );
     Ok(())
 }
 
@@ -1559,6 +1723,44 @@ fn global_storage_committed(world: &World, player_id: PlayerId) -> u32 {
         .map(|transfer| transfer.deliver_amount)
         .sum();
     stored.saturating_add(pending)
+}
+
+fn ensure_market_enabled(world: &mut World, player_id: PlayerId) -> CommandResult {
+    if !world.resource::<GlobalStorageConfig>().enabled {
+        return Err(RejectionReason::GlobalStorageDisabled);
+    }
+    if world.resource::<MarketConfig>().market_requires_terminal && !owns_terminal(world, player_id)
+    {
+        return Err(RejectionReason::TerminalRequired);
+    }
+    Ok(())
+}
+
+fn owns_terminal(world: &mut World, player_id: PlayerId) -> bool {
+    world.query::<&Structure>().iter(world).any(|structure| {
+        structure.owner == Some(player_id)
+            && matches!(structure.structure_type, StructureType::Terminal)
+    })
+}
+
+fn player_global_amount(world: &World, player_id: PlayerId, resource: &str) -> u32 {
+    world
+        .resource::<PlayerGlobalStorage>()
+        .0
+        .get(&player_id)
+        .and_then(|storage| storage.get(resource))
+        .copied()
+        .unwrap_or_default()
+}
+
+fn add_player_resource(world: &mut World, player_id: PlayerId, resource: &str, amount: u32) {
+    *world
+        .resource_mut::<PlayerGlobalStorage>()
+        .0
+        .entry(player_id)
+        .or_default()
+        .entry(resource.to_string())
+        .or_default() += amount;
 }
 
 fn transfer_fee(amount: u32, fee_per_10_000: u32) -> u32 {

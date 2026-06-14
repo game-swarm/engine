@@ -98,6 +98,25 @@ mod tests {
             .id()
     }
 
+    fn spawn_terminal(world: &mut crate::SwarmWorld, owner: PlayerId, x: i32, y: i32) {
+        world.app.world_mut().spawn((
+            Position {
+                x,
+                y,
+                room: RoomId(0),
+            },
+            Structure {
+                structure_type: StructureType::Terminal,
+                owner: Some(owner),
+                hits: 5_000,
+                hits_max: 5_000,
+                energy: None,
+                energy_capacity: None,
+                cooldown: 0,
+            },
+        ));
+    }
+
     fn first_source_id(world: &mut crate::SwarmWorld) -> ObjectId {
         object_id(
             world
@@ -1191,6 +1210,232 @@ mod tests {
                 .get(&1)
                 .and_then(|storage| storage.get("Energy")),
             Some(&950)
+        );
+    }
+
+    #[test]
+    fn market_order_locks_seller_global_storage() {
+        let mut world = create_world();
+        spawn_terminal(&mut world, 1, 5, 5);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::CreateMarketOrder {
+                resource: "Energy".to_string(),
+                amount: 250,
+                price_resource: "Credits".to_string(),
+                price_amount: 50,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<PlayerGlobalStorage>()
+                .0
+                .get(&1)
+                .and_then(|storage| storage.get("Energy")),
+            Some(&750)
+        );
+        assert_eq!(
+            world.app.world().resource::<MarketOrders>().orders[&1].amount,
+            250
+        );
+    }
+
+    #[test]
+    fn market_buy_delivers_resource_to_buyer_and_payment_to_seller_global_storage() {
+        let mut world = create_world();
+        spawn_terminal(&mut world, 1, 5, 5);
+        spawn_terminal(&mut world, 2, 6, 5);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(2)
+            .or_default()
+            .insert("Credits".to_string(), 100);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::CreateMarketOrder {
+                resource: "Energy".to_string(),
+                amount: 250,
+                price_resource: "Credits".to_string(),
+                price_amount: 50,
+            },
+        )
+        .unwrap();
+        submit(
+            &mut world,
+            2,
+            2,
+            CommandAction::BuyMarketOrder { order_id: 1 },
+        )
+        .unwrap();
+
+        let storage = &world.app.world().resource::<PlayerGlobalStorage>().0;
+        assert_eq!(storage.get(&1).and_then(|s| s.get("Energy")), Some(&750));
+        assert_eq!(storage.get(&1).and_then(|s| s.get("Credits")), Some(&50));
+        assert_eq!(storage.get(&2).and_then(|s| s.get("Energy")), Some(&250));
+        assert_eq!(storage.get(&2).and_then(|s| s.get("Credits")), Some(&50));
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<MarketOrders>()
+                .orders
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn market_terminal_gate_is_configurable() {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 100);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::CreateMarketOrder {
+                    resource: "Energy".to_string(),
+                    amount: 10,
+                    price_resource: "Credits".to_string(),
+                    price_amount: 1,
+                },
+            ),
+            Err(RejectionReason::TerminalRequired)
+        );
+
+        world
+            .app
+            .world_mut()
+            .resource_mut::<MarketConfig>()
+            .market_requires_terminal = false;
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                2,
+                CommandAction::CreateMarketOrder {
+                    resource: "Energy".to_string(),
+                    amount: 10,
+                    price_resource: "Credits".to_string(),
+                    price_amount: 1,
+                },
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn snapshot_includes_market_orders() {
+        let mut world = create_world();
+        spawn_terminal(&mut world, 1, 5, 5);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 100);
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::CreateMarketOrder {
+                resource: "Energy".to_string(),
+                amount: 10,
+                price_resource: "Credits".to_string(),
+                price_amount: 1,
+            },
+        )
+        .unwrap();
+
+        let snapshot = crate::swarm_get_snapshot(
+            &mut world,
+            crate::McpContext {
+                player_id: 1,
+                tick: 1,
+            },
+        );
+
+        assert_eq!(snapshot.market_orders.len(), 1);
+        assert_eq!(snapshot.market_orders[0].id, 1);
+        assert_eq!(snapshot.market_orders[0].resource, "Energy");
+    }
+
+    #[test]
+    fn tick_state_capture_restore_includes_market_orders() {
+        let mut world = create_world();
+        spawn_terminal(&mut world, 1, 5, 5);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 100);
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::CreateMarketOrder {
+                resource: "Energy".to_string(),
+                amount: 10,
+                price_resource: "Credits".to_string(),
+                price_amount: 1,
+            },
+        )
+        .unwrap();
+
+        let state = crate::TickState::capture(world.app.world_mut());
+        world
+            .app
+            .world_mut()
+            .resource_mut::<MarketOrders>()
+            .orders
+            .clear();
+
+        state.restore(world.app.world_mut());
+
+        assert_eq!(
+            world.app.world().resource::<MarketOrders>().orders[&1].resource,
+            "Energy"
         );
     }
 

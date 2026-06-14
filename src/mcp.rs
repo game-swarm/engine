@@ -12,7 +12,9 @@ use crate::command::{
 };
 use crate::components::*;
 use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
-use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
+use crate::resources::{
+    MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
+};
 use crate::visibility::{
     VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
 };
@@ -84,6 +86,7 @@ pub struct VisibleWorldSnapshot {
     pub local_storage: BTreeMap<String, u32>,
     pub global_storage: BTreeMap<String, u32>,
     pub pending_global_transfers: Vec<VisiblePendingGlobalTransfer>,
+    pub market_orders: Vec<VisibleMarketOrder>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +97,16 @@ pub struct VisiblePendingGlobalTransfer {
     pub amount: u32,
     pub deliver_amount: u32,
     pub remaining_ticks: Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisibleMarketOrder {
+    pub id: u64,
+    pub seller: PlayerId,
+    pub resource: String,
+    pub amount: u32,
+    pub price_resource: String,
+    pub price_amount: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1344,7 +1357,25 @@ fn build_visible_snapshot(world: &mut SwarmWorld, context: McpContext) -> Visibl
                 remaining_ticks: transfer.remaining_ticks,
             })
             .collect(),
+        market_orders: market_orders_snapshot(world.app.world().resource::<MarketOrders>()),
     }
+}
+
+fn market_orders_snapshot(orders: &MarketOrders) -> Vec<VisibleMarketOrder> {
+    let mut visible = orders
+        .orders
+        .values()
+        .map(|order| VisibleMarketOrder {
+            id: order.id,
+            seller: order.seller,
+            resource: order.resource.clone(),
+            amount: order.amount,
+            price_resource: order.price_resource.clone(),
+            price_amount: order.price_amount,
+        })
+        .collect::<Vec<_>>();
+    visible.sort_by_key(|order| order.id);
+    visible
 }
 
 fn player_storage_snapshot(
