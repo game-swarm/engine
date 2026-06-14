@@ -6,7 +6,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::command::{ObjectId, Tick, object_id};
+use crate::command::{CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand, RejectionReason, Tick, object_id, validate_command};
 use crate::components::*;
 use crate::visibility::{
     VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
@@ -238,6 +238,87 @@ pub struct StoredModule {
     pub load_after_tick: Tick,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolInfo {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailableActionsResult {
+    pub tick: Tick,
+    pub player_id: PlayerId,
+    pub wasm_actions: Vec<String>,
+    pub mcp_tools: Vec<ToolInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickExplanation {
+    pub tick: Tick,
+    pub player_id: PlayerId,
+    pub state_checksum: u64,
+    pub visible_entity_count: usize,
+    pub visible_tile_count: usize,
+    pub accepted_commands: usize,
+    pub rejected_commands: usize,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileResult {
+    pub tick: Tick,
+    pub player_id: PlayerId,
+    pub deployed_modules: usize,
+    pub pending_modules: usize,
+    pub owned_visible_drones: usize,
+    pub owned_visible_structures: usize,
+    pub available_mcp_tools: usize,
+    pub direct_gameplay_tools_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DryRunCommandsParams {
+    pub commands: Vec<CommandIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DryRunCommandResult {
+    pub sequence: u32,
+    pub command: RawCommand,
+    pub accepted: bool,
+    pub rejection: Option<RejectionReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DryRunCommandsResult {
+    pub tick: Tick,
+    pub player_id: PlayerId,
+    pub commands: Vec<DryRunCommandResult>,
+    pub state_checksum_before: u64,
+    pub state_checksum_after: u64,
+    pub mutated_world: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocsParams {
+    #[serde(default = "default_docs_topic")]
+    pub topic: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocsSection {
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocsResult {
+    pub topic: String,
+    pub sections: Vec<DocsSection>,
+}
+
 #[derive(Debug, Default)]
 pub struct McpServer {
     modules: Vec<StoredModule>,
@@ -298,6 +379,34 @@ impl McpServer {
                 .map_err(|error| McpError::invalid_params(error.to_string())),
             "swarm_get_world_rules" => serde_json::to_value(swarm_get_world_rules())
                 .map_err(|error| McpError::invalid_params(error.to_string())),
+            "swarm_get_available_actions" => {
+                serde_json::to_value(swarm_get_available_actions(context))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_explain_last_tick" => {
+                serde_json::to_value(swarm_explain_last_tick(world, context))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_profile" => serde_json::to_value(self.swarm_profile(world, context))
+                .map_err(|error| McpError::invalid_params(error.to_string())),
+            "swarm_dry_run_commands" => {
+                let params: DryRunCommandsParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_dry_run_commands(world, context, params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_docs" => {
+                let params: DocsParams = if params.is_null() {
+                    DocsParams {
+                        topic: default_docs_topic(),
+                    }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(swarm_get_docs(params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_oauth2_login" => {
                 let params: OAuth2LoginParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -444,6 +553,10 @@ impl McpServer {
     fn now_seconds(&self) -> u64 {
         self.now_seconds.unwrap_or_else(unix_timestamp_seconds)
     }
+
+    pub fn swarm_profile(&self, world: &mut SwarmWorld, context: McpContext) -> ProfileResult {
+        swarm_profile(world, context, self.modules.len())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -488,6 +601,165 @@ impl CertificateIssuer {
             .verify(&payload_bytes, &signature)
             .map_err(|_| McpError::invalid_params("certificate signature is invalid"))
     }
+}
+
+fn mcp_tool_infos() -> Vec<ToolInfo> {
+    vec![
+        ToolInfo {
+            name: "swarm_get_snapshot".to_string(),
+            description: "Get the visible world state for a player at the current tick".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_world_rules".to_string(),
+            description: "Get the world rules and mods configuration".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_available_actions".to_string(),
+            description: "List all WASM actions and MCP tools available to the player".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_explain_last_tick".to_string(),
+            description: "Explain the last tick's results for a player".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_profile".to_string(),
+            description: "Profile a player's current world state".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_dry_run_commands".to_string(),
+            description: "Dry-run commands without mutating the world".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_docs".to_string(),
+            description: "Get Swarm documentation and reference material".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_deploy".to_string(),
+            description: "Deploy a WASM module for a player".to_string(),
+        },
+    ]
+}
+
+fn wasm_action_names() -> Vec<String> {
+    [
+        "Move", "Harvest", "Transfer", "Withdraw", "Attack", "Heal", "Spawn", "Build",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+pub fn swarm_get_available_actions(context: McpContext) -> AvailableActionsResult {
+    AvailableActionsResult {
+        tick: context.tick,
+        player_id: context.player_id,
+        wasm_actions: wasm_action_names(),
+        mcp_tools: mcp_tool_infos(),
+    }
+}
+
+pub fn swarm_explain_last_tick(world: &mut SwarmWorld, context: McpContext) -> TickExplanation {
+    let snapshot = swarm_get_snapshot(world, context.clone());
+    TickExplanation {
+        tick: context.tick.saturating_sub(1),
+        player_id: context.player_id,
+        state_checksum: world.state_checksum(),
+        visible_entity_count: snapshot.entities.len(),
+        visible_tile_count: snapshot.visible_tiles.len(),
+        accepted_commands: 0,
+        rejected_commands: 0,
+        notes: vec![
+            "No persisted tick trace is attached to this in-process MCP server yet".to_string(),
+            "Use swarm_dry_run_commands to validate candidate commands without mutating world"
+                .to_string(),
+        ],
+    }
+}
+
+pub fn swarm_profile(
+    world: &mut SwarmWorld,
+    context: McpContext,
+    deployed_modules: usize,
+) -> ProfileResult {
+    let snapshot = swarm_get_snapshot(world, context.clone());
+    let owned_visible_drones = snapshot.entities.iter().filter(|entity| matches!(entity, VisibleEntity::Drone(drone) if drone.owner == context.player_id)).count();
+    let owned_visible_structures = snapshot.entities.iter().filter(|entity| matches!(entity, VisibleEntity::Structure(structure) if structure.owner == Some(context.player_id))).count();
+    ProfileResult {
+        tick: context.tick,
+        player_id: context.player_id,
+        deployed_modules,
+        pending_modules: deployed_modules,
+        owned_visible_drones,
+        owned_visible_structures,
+        available_mcp_tools: mcp_tool_infos().len(),
+        direct_gameplay_tools_enabled: false,
+    }
+}
+
+pub fn swarm_dry_run_commands(
+    world: &mut SwarmWorld,
+    context: McpContext,
+    params: DryRunCommandsParams,
+) -> DryRunCommandsResult {
+    let state_checksum_before = world.state_checksum();
+    let mut results = Vec::new();
+    for intent in params.commands {
+        let raw = RawCommand {
+            player_id: context.player_id,
+            tick: context.tick,
+            source: CommandSource::DryRun,
+            auth: CommandAuth {
+                source: CommandSource::DryRun,
+                player_id: context.player_id,
+                tick_submitted: context.tick,
+                tick_target: context.tick,
+            },
+            sequence: intent.sequence,
+            action: intent.action,
+        };
+        let sequence = raw.sequence;
+        let cmd = raw.clone();
+        match validate_command(world.app.world_mut(), cmd) {
+            Ok(_) => results.push(DryRunCommandResult {
+                sequence,
+                command: raw,
+                accepted: true,
+                rejection: None,
+            }),
+            Err(rejection) => results.push(DryRunCommandResult {
+                sequence,
+                command: raw,
+                accepted: false,
+                rejection: Some(rejection),
+            }),
+        }
+    }
+    let state_checksum_after = world.state_checksum();
+    DryRunCommandsResult {
+        tick: context.tick,
+        player_id: context.player_id,
+        commands: results,
+        state_checksum_before,
+        state_checksum_after,
+        mutated_world: state_checksum_before != state_checksum_after,
+    }
+}
+
+pub fn swarm_get_docs(params: DocsParams) -> DocsResult {
+    let topic = params.topic;
+    let sections = match topic.as_str() {
+        "mcp" => vec![
+            DocsSection { title: "MCP contract".to_string(), body: "MCP exposes read/debug/deploy tools, but never direct gameplay actions such as move, attack, build, or spawn.".to_string() },
+            DocsSection { title: "Eight phase-2 tools".to_string(), body: mcp_tool_infos().iter().map(|tool| format!("{}: {}", tool.name, tool.description)).collect::<Vec<_>>().join("\n") },
+        ],
+        "commands" => vec![DocsSection { title: "WASM CommandIntent actions".to_string(), body: wasm_action_names().join(", ") }],
+        _ => vec![DocsSection { title: "Swarm docs".to_string(), body: "Topics: mcp, commands. See P0-3 MCP security contract and P0-8 Game API IDL.".to_string() }],
+    };
+    DocsResult { topic, sections }
+}
+
+fn default_docs_topic() -> String {
+    "overview".to_string()
 }
 
 pub fn swarm_get_snapshot(world: &mut SwarmWorld, context: McpContext) -> VisibleWorldSnapshot {
