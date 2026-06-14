@@ -139,7 +139,7 @@ fn decode_signed(value: u32) -> i32 {
     }
 }
 
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Position {
     pub x: i32,
     pub y: i32,
