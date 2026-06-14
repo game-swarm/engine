@@ -8,7 +8,10 @@ use crate::resources::{
     GlobalStorageConfig, GlobalTransferDirection, PendingGlobalTransfer, PendingGlobalTransfers,
     PlayerGlobalStorage, PlayerLocalStorage, ResourceRegistry,
 };
-use crate::systems::{PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
+use crate::systems::{
+    CombatRules, PendingCombat, PendingSpawn, PendingSpawnQueue, RoomDroneCounts, heal_amount,
+    melee_attack_damage, ranged_attack_damage,
+};
 
 pub type ObjectId = u64;
 pub type Tick = u64;
@@ -77,6 +80,10 @@ pub enum CommandAction {
         amount: u32,
     },
     Attack {
+        object_id: ObjectId,
+        target_id: ObjectId,
+    },
+    RangedAttack {
         object_id: ObjectId,
         target_id: ObjectId,
     },
@@ -327,6 +334,10 @@ pub fn validate_command(
             object_id,
             target_id,
         } => validate_attack(world, raw.player_id, *object_id, *target_id),
+        CommandAction::RangedAttack {
+            object_id,
+            target_id,
+        } => validate_ranged_attack(world, raw.player_id, *object_id, *target_id),
         CommandAction::Heal {
             object_id,
             target_id,
@@ -462,7 +473,9 @@ pub fn source_allows_action(source: CommandSource, action: &CommandAction) -> bo
 fn action_triggers_combat(action: &CommandAction) -> bool {
     matches!(
         action,
-        CommandAction::Attack { .. } | CommandAction::Heal { .. }
+        CommandAction::Attack { .. }
+            | CommandAction::RangedAttack { .. }
+            | CommandAction::Heal { .. }
     )
 }
 
@@ -541,6 +554,7 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Transfer { .. } => "Transfer",
         CommandAction::Withdraw { .. } => "Withdraw",
         CommandAction::Attack { .. } => "Attack",
+        CommandAction::RangedAttack { .. } => "RangedAttack",
         CommandAction::Heal { .. } => "Heal",
         CommandAction::SpawnDrone { .. } => "Spawn",
         CommandAction::Build { .. } => "Build",
@@ -698,6 +712,10 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             object_id,
             target_id,
         } => apply_attack(world, object_id, target_id),
+        CommandAction::RangedAttack {
+            object_id,
+            target_id,
+        } => apply_ranged_attack(world, object_id, target_id),
         CommandAction::Heal {
             object_id,
             target_id,
@@ -827,14 +845,41 @@ fn validate_attack(
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
+    validate_attack_with_part(world, player_id, object_id, target_id, BodyPart::Attack, 1)
+}
+
+fn validate_ranged_attack(
+    world: &mut World,
+    player_id: PlayerId,
+    object_id: ObjectId,
+    target_id: ObjectId,
+) -> CommandResult {
+    validate_attack_with_part(
+        world,
+        player_id,
+        object_id,
+        target_id,
+        BodyPart::RangedAttack,
+        3,
+    )
+}
+
+fn validate_attack_with_part(
+    world: &mut World,
+    player_id: PlayerId,
+    object_id: ObjectId,
+    target_id: ObjectId,
+    body_part: BodyPart,
+    range: u32,
+) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::Attack, true)?;
+    ensure_drone_can_act(&drone, body_part, true)?;
     let (target_position, target_owner) = attackable_snapshot(world, target_id)?;
     if target_owner == Some(player_id) {
         return Err(RejectionReason::FriendlyTarget);
     }
-    ensure_range(position, target_position, 1)
+    ensure_range(position, target_position, range)
 }
 
 fn validate_heal(
@@ -1092,36 +1137,46 @@ fn apply_withdraw(
 
 fn apply_attack(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> CommandResult {
     let (_, drone) = drone_snapshot(world, object_id)?;
-    let damage = drone
-        .body
-        .iter()
-        .filter(|part| **part == BodyPart::Attack)
-        .count() as u32
-        * 30;
+    let rules = *world.resource::<CombatRules>();
+    let damage = melee_attack_damage(count_body_parts(&drone, BodyPart::Attack), rules);
     let target = entity(target_id)?;
-    if let Some(mut target_drone) = world.entity_mut(target).get_mut::<Drone>() {
-        target_drone.hits = target_drone.hits.saturating_sub(damage);
-    } else if let Some(mut structure) = world.entity_mut(target).get_mut::<Structure>() {
-        structure.hits = structure.hits.saturating_sub(damage);
-    }
+    world
+        .resource_mut::<PendingCombat>()
+        .queue_damage(target, damage);
+    Ok(())
+}
+
+fn apply_ranged_attack(
+    world: &mut World,
+    object_id: ObjectId,
+    target_id: ObjectId,
+) -> CommandResult {
+    let (_, drone) = drone_snapshot(world, object_id)?;
+    let rules = *world.resource::<CombatRules>();
+    let damage = ranged_attack_damage(count_body_parts(&drone, BodyPart::RangedAttack), rules);
+    let target = entity(target_id)?;
+    world
+        .resource_mut::<PendingCombat>()
+        .queue_damage(target, damage);
     Ok(())
 }
 
 fn apply_heal(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> CommandResult {
     let (_, healer) = drone_snapshot(world, object_id)?;
-    let heal = healer
+    let heal = heal_amount(count_body_parts(&healer, BodyPart::Heal));
+    let target = entity(target_id)?;
+    world
+        .resource_mut::<PendingCombat>()
+        .queue_heal(target, heal);
+    Ok(())
+}
+
+fn count_body_parts(drone: &Drone, part: BodyPart) -> usize {
+    drone
         .body
         .iter()
-        .filter(|part| **part == BodyPart::Heal)
-        .count() as u32
-        * 12;
-    let target = entity(target_id)?;
-    let mut entity_mut = world.entity_mut(target);
-    let mut drone = entity_mut
-        .get_mut::<Drone>()
-        .ok_or(RejectionReason::ObjectNotFound)?;
-    drone.hits = (drone.hits + heal).min(drone.hits_max);
-    Ok(())
+        .filter(|body_part| **body_part == part)
+        .count()
 }
 
 fn apply_spawn_drone(

@@ -150,6 +150,7 @@ pub fn create_world() -> SwarmWorld {
     app.init_resource::<PendingSpawnQueue>();
     app.init_resource::<RoomDroneCounts>();
     app.init_resource::<PendingCombat>();
+    app.init_resource::<CombatRules>();
     app.init_resource::<ResourceRegistry>();
     app.init_resource::<GlobalStorageConfig>();
     app.init_resource::<PlayerLocalStorage>();
