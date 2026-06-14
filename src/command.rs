@@ -450,7 +450,7 @@ fn validate_harvest(
     }
 
     let (target_position, source) = source_snapshot(world, target_id)?;
-    if source.amount == 0 {
+    if source.capacity == 0 {
         return Err(RejectionReason::SourceEmpty);
     }
     ensure_range(position, target_position, 1)
@@ -656,7 +656,7 @@ fn apply_harvest(
         .entity(target)
         .get::<crate::components::Source>()
         .ok_or(RejectionReason::NotSource)?
-        .amount
+        .capacity
         .min(free_capacity)
         .min(work_parts.max(1) * 2);
 
@@ -664,7 +664,7 @@ fn apply_harvest(
         .entity_mut(target)
         .get_mut::<crate::components::Source>()
         .unwrap()
-        .amount -= amount;
+        .capacity -= amount;
     *world
         .entity_mut(object)
         .get_mut::<Drone>()

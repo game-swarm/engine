@@ -196,10 +196,8 @@ pub struct Resource {
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     pub produces: IndexMap<String, u32>,
-    pub amount: u32,
     pub capacity: u32,
     pub ticks_to_regeneration: u32,
-    pub regeneration_time: u32,
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]

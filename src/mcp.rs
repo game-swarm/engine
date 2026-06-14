@@ -126,10 +126,8 @@ pub struct VisibleSource {
     pub id: ObjectId,
     pub position: VisiblePosition,
     pub produces: BTreeMap<String, u32>,
-    pub amount: u32,
     pub capacity: u32,
     pub ticks_to_regeneration: u32,
-    pub regeneration_time: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -473,10 +471,8 @@ fn visible_entities(
                     .iter()
                     .map(|(k, v)| (k.clone(), *v))
                     .collect(),
-                amount: source.amount,
                 capacity: source.capacity,
                 ticks_to_regeneration: source.ticks_to_regeneration,
-                regeneration_time: source.regeneration_time,
             }));
         }
     }

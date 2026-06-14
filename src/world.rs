@@ -147,10 +147,8 @@ pub fn create_world() -> SwarmWorld {
         Position { x: 25, y: 25, room },
         Source {
             produces: source_def.produces,
-            amount: source_def.capacity,
             capacity: source_def.capacity,
             ticks_to_regeneration: source_def.regeneration,
-            regeneration_time: source_def.regeneration,
         },
     ));
 
@@ -218,17 +216,15 @@ pub fn state_checksum(world: &mut World) -> u64 {
                 p.x,
                 p.y,
                 produces,
-                s.amount,
                 s.capacity,
                 s.ticks_to_regeneration,
-                s.regeneration_time,
             )
         })
         .collect::<Vec<_>>();
-    sources.sort_unstable_by_key(|(room, x, y, _, amount, capacity, regen, regen_time)| {
-        (*room, *x, *y, *amount, *capacity, *regen, *regen_time)
+    sources.sort_unstable_by_key(|(room, x, y, _, capacity, regen)| {
+        (*room, *x, *y, *capacity, *regen)
     });
-    for (room, x, y, produces, amount, capacity, regen, regen_time) in &sources {
+    for (room, x, y, produces, capacity, regen) in &sources {
         hasher.update(&room.to_le_bytes());
         hasher.update(&x.to_le_bytes());
         hasher.update(&y.to_le_bytes());
@@ -236,10 +232,8 @@ pub fn state_checksum(world: &mut World) -> u64 {
             hash_bytes(&mut hasher, k.as_bytes());
             hasher.update(&v.to_le_bytes());
         }
-        hasher.update(&amount.to_le_bytes());
         hasher.update(&capacity.to_le_bytes());
         hasher.update(&regen.to_le_bytes());
-        hasher.update(&regen_time.to_le_bytes());
     }
 
     // --- Drones ---

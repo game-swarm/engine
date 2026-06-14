@@ -138,7 +138,6 @@ mod tests {
                 room: RoomId(0)
             }
         );
-        assert_eq!(sources[0].1.amount, 3_000);
         assert_eq!(sources[0].1.capacity, 3_000);
         assert_eq!(sources[0].1.produces.get("Energy"), Some(&1));
     }
@@ -732,7 +731,7 @@ mod tests {
             .entity_mut(source_entity)
             .get_mut::<crate::components::Source>()
             .unwrap()
-            .amount = 0;
+            .capacity = 0;
         assert_eq!(
             submit(
                 &mut world,
@@ -753,7 +752,7 @@ mod tests {
             .entity_mut(source_entity)
             .get_mut::<crate::components::Source>()
             .unwrap()
-            .amount = 10;
+            .capacity = 10;
         assert_eq!(
             submit(
                 &mut world,
