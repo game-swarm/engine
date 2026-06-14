@@ -693,7 +693,8 @@ fn validate_move(
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
     ensure_drone_can_act(&drone, BodyPart::Move, true)?;
-    let target = step(position, direction).ok_or(RejectionReason::InvalidDirection)?;
+    let target = step(world.resource::<RoomTerrains>(), position, direction)
+        .ok_or(RejectionReason::InvalidDirection)?;
 
     if !world.resource::<RoomTerrains>().is_passable(target) {
         return Err(RejectionReason::TileBlocked);
@@ -895,11 +896,20 @@ fn validate_build(
 
 fn apply_move(world: &mut World, object_id: ObjectId, direction: Direction) -> CommandResult {
     let entity = entity(object_id)?;
-    let mut entity = world.entity_mut(entity);
-    let mut position = entity
-        .get_mut::<Position>()
+    let current_position = *world
+        .entity(entity)
+        .get::<Position>()
         .ok_or(RejectionReason::ObjectNotFound)?;
-    *position = step(*position, direction).ok_or(RejectionReason::InvalidDirection)?;
+    let target = step(
+        world.resource::<RoomTerrains>(),
+        current_position,
+        direction,
+    )
+    .ok_or(RejectionReason::InvalidDirection)?;
+    *world
+        .entity_mut(entity)
+        .get_mut::<Position>()
+        .ok_or(RejectionReason::ObjectNotFound)? = target;
     Ok(())
 }
 
@@ -1242,20 +1252,52 @@ fn hex_distance(from: Position, to: Position) -> u32 {
     dx.abs().max(dy.abs()).max((dx + dy).abs()) as u32
 }
 
-fn step(position: Position, direction: Direction) -> Option<Position> {
-    let (dx, dy) = match direction {
+fn step(terrains: &RoomTerrains, position: Position, direction: Direction) -> Option<Position> {
+    let (dx, dy) = direction_delta(direction);
+    let room = terrains.0.get(&position.room)?;
+    let mut x = position.x + dx;
+    let mut y = position.y + dy;
+    let mut room_id = position.room;
+    let mut room_dx = 0;
+    let mut room_dy = 0;
+
+    if x < 0 {
+        room_dx = -1;
+        x = room.width - 1;
+    } else if x >= room.width {
+        room_dx = 1;
+        x = 0;
+    }
+
+    if y < 0 {
+        room_dy = -1;
+        y = room.height - 1;
+    } else if y >= room.height {
+        room_dy = 1;
+        y = 0;
+    }
+
+    if room_dx != 0 || room_dy != 0 {
+        room_id = room_id.adjacent(room_dx, room_dy)?;
+        terrains.0.get(&room_id)?;
+    }
+
+    Some(Position {
+        x,
+        y,
+        room: room_id,
+    })
+}
+
+fn direction_delta(direction: Direction) -> (i32, i32) {
+    match direction {
         Direction::Top => (0, -1),
         Direction::TopRight => (1, -1),
         Direction::BottomRight => (1, 0),
         Direction::Bottom => (0, 1),
         Direction::BottomLeft => (-1, 1),
         Direction::TopLeft => (-1, 0),
-    };
-    Some(Position {
-        x: position.x + dx,
-        y: position.y + dy,
-        room: position.room,
-    })
+    }
 }
 
 fn spawn_output_position(position: Position) -> Position {

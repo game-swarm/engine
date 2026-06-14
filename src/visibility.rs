@@ -51,12 +51,21 @@ pub fn visible_positions(world: &mut World, player_id: PlayerId) -> BTreeSet<Vis
     let terrains = world.resource::<RoomTerrains>();
     let mut visible = BTreeSet::new();
     for anchor in anchors {
-        if let Some(room) = terrains.0.get(&anchor.room) {
-            for y in (anchor.y - VISIBILITY_RADIUS)..=(anchor.y + VISIBILITY_RADIUS) {
-                for x in (anchor.x - VISIBILITY_RADIUS)..=(anchor.x + VISIBILITY_RADIUS) {
-                    if room.contains(x, y) {
-                        visible.insert((anchor.room, x, y));
+        for room in nearby_rooms(anchor.room) {
+            let Some(room_terrain) = terrains.0.get(&room) else {
+                continue;
+            };
+            if room == anchor.room {
+                for y in (anchor.y - VISIBILITY_RADIUS)..=(anchor.y + VISIBILITY_RADIUS) {
+                    for x in (anchor.x - VISIBILITY_RADIUS)..=(anchor.x + VISIBILITY_RADIUS) {
+                        if room_terrain.contains(x, y) {
+                            visible.insert((room, x, y));
+                        }
                     }
+                }
+            } else {
+                for (x, y, _) in room_terrain.iter() {
+                    visible.insert((room, x, y));
                 }
             }
         }
@@ -82,6 +91,10 @@ pub fn visible_object_ids(world: &mut World, player_id: PlayerId, tick: Tick) ->
         .into_iter()
         .map(object_id)
         .collect()
+}
+
+fn nearby_rooms(room: RoomId) -> impl Iterator<Item = RoomId> {
+    (-1..=1).flat_map(move |dy| (-1..=1).filter_map(move |dx| room.adjacent(dx, dy)))
 }
 
 fn is_owned_by(world: &World, entity: Entity, player_id: PlayerId) -> bool {
@@ -142,5 +155,33 @@ mod tests {
 
         assert!(is_visible_to(world.app.world_mut(), boundary, 1, 7));
         assert!(!is_visible_to(world.app.world_mut(), outside, 1, 7));
+    }
+    #[test]
+    fn visibility_includes_adjacent_room_but_not_far_room() {
+        let mut world = create_world();
+        let adjacent = RoomId::from_room_name("A0N1E").unwrap();
+        let far = RoomId::from_room_name("A0N2E").unwrap();
+        world.ensure_room(adjacent);
+        world.ensure_room(far);
+        world.spawn_drone(1, 25, 25, vec![BodyPart::Move]);
+
+        assert!(is_position_visible_to(
+            world.app.world_mut(),
+            1,
+            Position {
+                x: 10,
+                y: 10,
+                room: adjacent
+            }
+        ));
+        assert!(!is_position_visible_to(
+            world.app.world_mut(),
+            1,
+            Position {
+                x: 10,
+                y: 10,
+                room: far
+            }
+        ));
     }
 }

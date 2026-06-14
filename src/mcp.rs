@@ -83,6 +83,7 @@ pub struct VisibleWorldSnapshot {
 pub struct VisibleTile {
     pub x: i32,
     pub y: i32,
+    pub room_id: u32,
     pub terrain: TerrainType,
 }
 
@@ -787,11 +788,20 @@ fn build_visible_snapshot(world: &mut SwarmWorld, context: McpContext) -> Visibl
     let terrains = world.app.world().resource::<RoomTerrains>();
     let mut visible_tiles = terrains
         .0
-        .get(&room_id)
-        .into_iter()
-        .flat_map(|room| room.iter())
-        .filter(|(x, y, _)| visible_positions.contains(&(room_id, *x, *y)))
-        .map(|(x, y, terrain)| VisibleTile { x, y, terrain })
+        .iter()
+        .flat_map(|(room_id, room)| {
+            let visible_positions = &visible_positions;
+            room.iter().filter_map(move |(x, y, terrain)| {
+                visible_positions
+                    .contains(&(*room_id, x, y))
+                    .then_some(VisibleTile {
+                        x,
+                        y,
+                        room_id: room_id.0,
+                        terrain,
+                    })
+            })
+        })
         .collect::<Vec<_>>();
     visible_tiles.sort();
 

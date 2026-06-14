@@ -36,11 +36,19 @@ impl SwarmWorld {
     }
 
     pub fn spawn_drone(&mut self, owner: PlayerId, x: i32, y: i32, body: Vec<BodyPart>) -> Entity {
-        let position = Position {
-            x,
-            y,
-            room: RoomId(0),
-        };
+        self.spawn_drone_in_room(owner, RoomId(0), x, y, body)
+    }
+
+    pub fn spawn_drone_in_room(
+        &mut self,
+        owner: PlayerId,
+        room: RoomId,
+        x: i32,
+        y: i32,
+        body: Vec<BodyPart>,
+    ) -> Entity {
+        self.ensure_room(room);
+        let position = Position { x, y, room };
         let entity = self
             .app
             .world_mut()
@@ -49,6 +57,30 @@ impl SwarmWorld {
         let mut counts = self.app.world_mut().resource_mut::<RoomDroneCounts>();
         *counts.0.entry((position.room, owner)).or_default() += 1;
         entity
+    }
+
+    pub fn ensure_room(&mut self, room: RoomId) -> bool {
+        if self
+            .app
+            .world()
+            .resource::<RoomTerrains>()
+            .0
+            .contains_key(&room)
+        {
+            return false;
+        }
+        let terrain = RoomTerrain::default_room();
+        self.app
+            .world_mut()
+            .resource_mut::<RoomTerrains>()
+            .0
+            .insert(room, terrain.clone());
+        for (x, y, terrain_type) in terrain.iter() {
+            self.app
+                .world_mut()
+                .spawn((Position { x, y, room }, Terrain(terrain_type)));
+        }
+        true
     }
 
     pub fn queue_spawn(&mut self, owner: PlayerId, x: i32, y: i32, body: Vec<BodyPart>) {
