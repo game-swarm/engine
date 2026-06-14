@@ -6,7 +6,10 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::command::{CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand, RejectionReason, Tick, object_id, validate_command};
+use crate::command::{
+    CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand, RejectionReason, Tick,
+    object_id, validate_command,
+};
 use crate::components::*;
 use crate::visibility::{
     VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,

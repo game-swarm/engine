@@ -8,17 +8,17 @@ pub const DEFAULT_DRONE_LIFESPAN: u32 = 1500;
 
 pub type PlayerId = u32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RoomId(pub u32);
 
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Position {
     pub x: i32,
     pub y: i32,
     pub room: RoomId,
 }
 
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Owner(pub PlayerId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ impl TerrainType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomTerrain {
     pub width: i32,
     pub height: i32,
@@ -118,7 +118,7 @@ impl RoomTerrain {
     }
 }
 
-#[derive(BevyResource, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(BevyResource, Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RoomTerrains(pub BTreeMap<RoomId, RoomTerrain>);
 
 impl RoomTerrains {
@@ -141,7 +141,7 @@ impl RoomTerrains {
     }
 }
 
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Drone {
     pub owner: PlayerId,
     pub body: Vec<BodyPart>,
@@ -177,7 +177,7 @@ impl Drone {
     }
 }
 
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Structure {
     pub structure_type: StructureType,
     pub owner: Option<PlayerId>,
@@ -188,22 +188,22 @@ pub struct Structure {
     pub cooldown: u32,
 }
 
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resource {
     pub amounts: IndexMap<String, u32>,
 }
 
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub produces: IndexMap<String, u32>,
     pub capacity: u32,
     pub ticks_to_regeneration: u32,
 }
 
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Terrain(pub TerrainType);
 
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Controller {
     pub owner: Option<PlayerId>,
     pub level: u8,

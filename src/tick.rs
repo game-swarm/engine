@@ -1,6 +1,7 @@
 use std::{collections::HashMap, thread, time::Instant};
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::command::{
     CommandIntent, CommandRejection, CommandSource, RawCommand, RefundAccumulator, Tick,
@@ -45,7 +46,7 @@ pub trait TickBroadcaster {
     fn broadcast(&mut self, event: TickBroadcast) -> Result<(), BroadcastError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickTrace {
     pub tick: Tick,
     pub player_id: PlayerId,
@@ -73,7 +74,7 @@ pub struct TickBroadcast {
     pub state_checksum: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickMetrics {
     pub executor_errors: u64,
     pub executor_timeouts: u64,
@@ -592,6 +593,64 @@ impl TickCommitter for InMemoryTickCommitter {
     }
 }
 
+pub trait AtomicTickStore {
+    fn atomic_commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), CommitError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct FoundationDbTickCommitter<S> {
+    store: S,
+}
+
+impl<S> FoundationDbTickCommitter<S> {
+    pub fn new(store: S) -> Self {
+        Self { store }
+    }
+
+    pub fn into_inner(self) -> S {
+        self.store
+    }
+}
+
+impl<S> TickCommitter for FoundationDbTickCommitter<S>
+where
+    S: AtomicTickStore,
+{
+    fn commit(&mut self, trace: TickTrace) -> Result<(), CommitError> {
+        self.store.atomic_commit(tick_trace_writes(&trace)?)
+    }
+}
+
+pub fn tick_trace_writes(trace: &TickTrace) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommitError> {
+    fn encode<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, CommitError> {
+        serde_json::to_vec(value)
+            .map_err(|error| CommitError::Failed(format!("encode {label}: {error}")))
+    }
+
+    Ok(vec![
+        (
+            tick_key(trace.tick, "state"),
+            encode(&trace.state, "tick state")?,
+        ),
+        (
+            tick_key(trace.tick, "commands"),
+            encode(&trace.commands, "tick commands")?,
+        ),
+        (
+            tick_key(trace.tick, "rejections"),
+            encode(&trace.rejections, "tick rejections")?,
+        ),
+        (
+            tick_key(trace.tick, "metrics"),
+            encode(&trace.metrics, "tick metrics")?,
+        ),
+    ])
+}
+
+pub fn tick_key(tick: Tick, suffix: &str) -> Vec<u8> {
+    format!("/tick/{tick}/{suffix}").into_bytes()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeterministicExecution {
     pub commands: Vec<RawCommand>,
@@ -710,16 +769,31 @@ impl TickBroadcaster for InMemoryTickBroadcaster {
 
 pub type TickState = WorldSnapshot;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct SnapshotEntity(u64);
+
+impl From<Entity> for SnapshotEntity {
+    fn from(entity: Entity) -> Self {
+        Self(entity.to_bits())
+    }
+}
+
+impl From<SnapshotEntity> for Entity {
+    fn from(entity: SnapshotEntity) -> Self {
+        Entity::from_bits(entity.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldSnapshot {
-    entities: HashMap<Entity, EntitySnapshot>,
+    entities: HashMap<SnapshotEntity, EntitySnapshot>,
     terrains: RoomTerrains,
     pending_spawns: PendingSpawnQueue,
     room_counts: RoomDroneCounts,
     pending_combat: PendingCombat,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct EntitySnapshot {
     position: Option<Position>,
     owner: Option<Owner>,
@@ -772,7 +846,9 @@ impl WorldSnapshot {
                         controller: controller.cloned(),
                         marked_for_death: marked_for_death.is_some(),
                     };
-                    snapshot.has_any().then_some((entity, snapshot))
+                    snapshot
+                        .has_any()
+                        .then_some((SnapshotEntity::from(entity), snapshot))
                 },
             )
             .collect();
@@ -789,7 +865,7 @@ impl WorldSnapshot {
     pub fn restore(self, world: &mut World) {
         let current_entities = Self::tracked_entities(world);
         for entity in current_entities {
-            if !self.entities.contains_key(&entity) {
+            if !self.entities.contains_key(&SnapshotEntity::from(entity)) {
                 let _ = world.despawn(entity);
             }
         }
@@ -797,7 +873,7 @@ impl WorldSnapshot {
         for (entity, snapshot) in self.entities {
             #[allow(deprecated)]
             let mut entity_mut = world
-                .get_or_spawn(entity)
+                .get_or_spawn(Entity::from(entity))
                 .expect("snapshot entity should be spawnable during restore");
             restore_component(&mut entity_mut, snapshot.position);
             restore_component(&mut entity_mut, snapshot.owner);
@@ -931,6 +1007,81 @@ mod tests {
         ) -> Result<Vec<CommandIntent>, ExecutorError> {
             self.result.clone()
         }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct FakeAtomicStore {
+        writes: HashMap<Vec<u8>, Vec<u8>>,
+        fail_next: bool,
+    }
+
+    impl AtomicTickStore for FakeAtomicStore {
+        fn atomic_commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), CommitError> {
+            if self.fail_next {
+                self.fail_next = false;
+                return Err(CommitError::Failed("fake fdb commit failed".to_string()));
+            }
+
+            for (key, value) in writes {
+                self.writes.insert(key, value);
+            }
+            Ok(())
+        }
+    }
+
+    fn sample_trace() -> TickTrace {
+        let mut world = create_world();
+        let state = TickState::capture(world.app.world_mut());
+        TickTrace {
+            tick: 42,
+            player_id: 7,
+            commands: vec![raw_harvest(7, 1, 42, 100, 200)],
+            state,
+            rejections: Vec::new(),
+            metrics: TickMetrics {
+                accepted_commands: 1,
+                ..Default::default()
+            },
+            state_checksum: world.state_checksum(),
+        }
+    }
+
+    #[test]
+    fn fdb_tick_committer_writes_required_tick_keys_atomically() {
+        let trace = sample_trace();
+        let mut committer = FoundationDbTickCommitter::new(FakeAtomicStore::default());
+
+        committer
+            .commit(trace)
+            .expect("atomic tick commit should succeed");
+        let store = committer.into_inner();
+
+        assert_eq!(store.writes.len(), 4);
+        for suffix in ["state", "commands", "rejections", "metrics"] {
+            assert!(
+                store.writes.contains_key(&tick_key(42, suffix)),
+                "missing /tick/42/{suffix}"
+            );
+        }
+        assert!(serde_json::from_slice::<TickState>(&store.writes[&tick_key(42, "state")]).is_ok());
+        let commands: Vec<RawCommand> =
+            serde_json::from_slice(&store.writes[&tick_key(42, "commands")]).unwrap();
+        assert_eq!(commands.len(), 1);
+        let metrics: TickMetrics =
+            serde_json::from_slice(&store.writes[&tick_key(42, "metrics")]).unwrap();
+        assert_eq!(metrics.accepted_commands, 1);
+    }
+
+    #[test]
+    fn fdb_tick_committer_does_not_write_partial_trace_on_commit_failure() {
+        let trace = sample_trace();
+        let mut committer = FoundationDbTickCommitter::new(FakeAtomicStore {
+            fail_next: true,
+            ..Default::default()
+        });
+
+        assert!(committer.commit(trace).is_err());
+        assert!(committer.into_inner().writes.is_empty());
     }
 
     fn drone_count(world: &mut SwarmWorld) -> usize {
