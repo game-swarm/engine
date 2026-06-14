@@ -1,3 +1,4 @@
+pub mod arena;
 pub mod command;
 pub mod components;
 pub mod hot_cache;
@@ -12,6 +13,7 @@ pub mod tick;
 pub mod visibility;
 pub mod world;
 
+pub use arena::*;
 pub use command::*;
 pub use components::*;
 pub use hot_cache::*;
