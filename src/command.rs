@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::components::*;
+use crate::resources::ResourceRegistry;
 use crate::systems::{PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
 
 pub type ObjectId = u64;
@@ -565,7 +566,7 @@ fn validate_spawn_drone(
     if body.len() > MAX_BODY_PARTS {
         return Err(RejectionReason::BodyTooLarge);
     }
-    let cost = body_cost(body);
+    let cost = body_energy_cost(world, body);
     let energy = structure.energy.unwrap_or(0);
     if cost > structure.energy_capacity.unwrap_or(0) {
         return Err(RejectionReason::ExceedsRoomCapacity);
@@ -752,7 +753,7 @@ fn apply_spawn_drone(
         .entity(spawn)
         .get::<Position>()
         .ok_or(RejectionReason::ObjectNotFound)?;
-    let cost = body_cost(&body);
+    let cost = body_energy_cost(world, &body);
     {
         let mut entity_mut = world.entity_mut(spawn);
         let mut structure = entity_mut
@@ -1117,18 +1118,14 @@ fn take_from_target(
 }
 
 pub fn body_cost(body: &[BodyPart]) -> u32 {
-    body.iter()
-        .map(|part| match part {
-            BodyPart::Move => 50,
-            BodyPart::Work => 100,
-            BodyPart::Carry => 50,
-            BodyPart::Attack => 80,
-            BodyPart::RangedAttack => 100,
-            BodyPart::Heal => 250,
-            BodyPart::Claim => 600,
-            BodyPart::Tough => 10,
-        })
-        .sum()
+    ResourceRegistry::default().body_energy_cost(body)
+}
+
+fn body_energy_cost(world: &World, body: &[BodyPart]) -> u32 {
+    world
+        .get_resource::<ResourceRegistry>()
+        .map(|registry| registry.body_energy_cost(body))
+        .unwrap_or_else(|| body_cost(body))
 }
 
 fn entity(object_id: ObjectId) -> Result<Entity, RejectionReason> {

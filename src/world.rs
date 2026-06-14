@@ -1,11 +1,11 @@
 use bevy::prelude::*;
-use indexmap::IndexMap;
 
 use crate::command::{
     CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
     validate_command,
 };
 use crate::components::*;
+use crate::resources::ResourceRegistry;
 use crate::systems::*;
 
 pub struct SwarmWorld {
@@ -113,6 +113,7 @@ pub fn create_world() -> SwarmWorld {
     app.init_resource::<PendingSpawnQueue>();
     app.init_resource::<RoomDroneCounts>();
     app.init_resource::<PendingCombat>();
+    app.init_resource::<ResourceRegistry>();
     app.add_systems(
         Update,
         (
@@ -136,16 +137,20 @@ pub fn create_world() -> SwarmWorld {
             .spawn((Position { x, y, room }, Terrain(terrain)));
     }
 
-    let mut produces = IndexMap::new();
-    produces.insert("Energy".to_string(), 1);
+    let source_def = app
+        .world()
+        .resource::<ResourceRegistry>()
+        .source("EnergyField")
+        .cloned()
+        .expect("default ResourceRegistry must define EnergyField");
     app.world_mut().spawn((
         Position { x: 25, y: 25, room },
         Source {
-            produces,
-            amount: 3000,
-            capacity: 3000,
-            ticks_to_regeneration: 300,
-            regeneration_time: 300,
+            produces: source_def.produces,
+            amount: source_def.capacity,
+            capacity: source_def.capacity,
+            ticks_to_regeneration: source_def.regeneration,
+            regeneration_time: source_def.regeneration,
         },
     ));
 
