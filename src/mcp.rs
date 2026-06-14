@@ -4,23 +4,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bevy::prelude::*;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::command::{
-    CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand, RejectionReason, Tick,
-    object_id, validate_command,
+    object_id, validate_command, CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand,
+    RejectionReason, Tick,
 };
 use crate::components::*;
-use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
+use crate::hot_cache::{read_through_dragonfly, SnapshotKey};
 use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use crate::visibility::{
-    VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
+    is_position_visible_to, visible_entity_ids, visible_positions, VISIBILITY_RADIUS,
 };
 use crate::world::SwarmWorld;
 
 const MAX_WASM_BYTES: usize = 5 * 1024 * 1024;
 const CERTIFICATE_TTL_SECONDS: u64 = 24 * 60 * 60;
+const WEB_ACCESS_TOKEN_TTL_SECONDS: u64 = 15 * 60;
+const WEB_REFRESH_TOKEN_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 const CERTIFICATE_AUDIENCE: &str = "swarm-wasm-deploy";
+const WEB_TOKEN_AUDIENCE: &str = "swarm-web";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpContext {
@@ -200,6 +203,30 @@ pub struct OAuth2LoginParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct OAuth2CallbackParams {
+    pub provider: String,
+    pub code: String,
+    pub state: String,
+    pub redirect_uri: String,
+    pub client_public_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenRefreshParams {
+    pub refresh_token: String,
+    pub client_public_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeAuthParams {
+    pub refresh_token: Option<String>,
+    pub certificate: Option<PlayerCertificate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlayerCertificatePayload {
     pub audience: String,
     pub player_id: PlayerId,
@@ -221,7 +248,35 @@ pub struct PlayerCertificate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuth2LoginResult {
     pub player_id: PlayerId,
+    pub session: WebAuthSession,
     pub certificate: PlayerCertificate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebAuthSession {
+    pub player_id: PlayerId,
+    pub provider: String,
+    pub subject: String,
+    pub audience: String,
+    pub access_token: String,
+    pub access_token_expires_at: u64,
+    pub refresh_token: String,
+    pub refresh_token_expires_at: u64,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenRefreshResult {
+    pub player_id: PlayerId,
+    pub session: WebAuthSession,
+    pub certificate: PlayerCertificate,
+    pub renew_after_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokeAuthResult {
+    pub revoked_session: bool,
+    pub revoked_certificate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +397,8 @@ pub struct DocsResult {
 pub struct McpServer {
     modules: Vec<StoredModule>,
     issuer: CertificateIssuer,
+    sessions: BTreeMap<String, WebAuthSession>,
+    revoked_certificates: BTreeSet<String>,
     now_seconds: Option<u64>,
 }
 
@@ -350,6 +407,8 @@ impl McpServer {
         Self {
             modules: Vec::new(),
             issuer: CertificateIssuer::new(),
+            sessions: BTreeMap::new(),
+            revoked_certificates: BTreeSet::new(),
             now_seconds: None,
         }
     }
@@ -360,6 +419,8 @@ impl McpServer {
             issuer: CertificateIssuer {
                 signing_key: issuer,
             },
+            sessions: BTreeMap::new(),
+            revoked_certificates: BTreeSet::new(),
             now_seconds: Some(now_seconds),
         }
     }
@@ -426,6 +487,24 @@ impl McpServer {
                 serde_json::to_value(swarm_get_docs(params))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
+            "swarm_oauth2_callback" => {
+                let params: OAuth2CallbackParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_oauth2_callback(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_token_refresh" => {
+                let params: TokenRefreshParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_token_refresh(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_auth_revoke" => {
+                let params: RevokeAuthParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_auth_revoke(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_oauth2_login" => {
                 let params: OAuth2LoginParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -443,7 +522,7 @@ impl McpServer {
     }
 
     pub fn swarm_oauth2_login(
-        &self,
+        &mut self,
         params: OAuth2LoginParams,
     ) -> Result<OAuth2LoginResult, McpError> {
         if params.provider.trim().is_empty() {
@@ -456,23 +535,153 @@ impl McpServer {
             return Err(McpError::invalid_params("access_token is required"));
         }
         decode_ed25519_public_key(&params.client_public_key, "client_public_key")?;
+        self.issue_login(
+            params.provider,
+            params.subject,
+            params.access_token,
+            params.client_public_key,
+        )
+    }
 
-        let player_id = oauth_player_id(&params.provider, &params.subject);
-        let issued_at = self.now_seconds();
-        let payload = PlayerCertificatePayload {
-            audience: CERTIFICATE_AUDIENCE.to_string(),
-            player_id,
-            provider: params.provider,
-            subject: params.subject,
-            client_public_key: params.client_public_key,
-            issued_at,
-            expires_at: issued_at + CERTIFICATE_TTL_SECONDS,
+    pub fn swarm_oauth2_callback(
+        &mut self,
+        params: OAuth2CallbackParams,
+    ) -> Result<OAuth2LoginResult, McpError> {
+        let provider = params.provider.trim().to_ascii_lowercase();
+        if provider != "github" && provider != "google" {
+            return Err(McpError::invalid_params(
+                "provider must be github or google",
+            ));
+        }
+        if params.code.trim().is_empty() {
+            return Err(McpError::invalid_params("code is required"));
+        }
+        if params.state.trim().is_empty() {
+            return Err(McpError::invalid_params("state is required"));
+        }
+        if params.redirect_uri.trim().is_empty() {
+            return Err(McpError::invalid_params("redirect_uri is required"));
+        }
+        decode_ed25519_public_key(&params.client_public_key, "client_public_key")?;
+        let subject = format!(
+            "{}:{}",
+            provider,
+            blake3::hash(params.code.as_bytes()).to_hex()
+        );
+        self.issue_login(provider, subject, params.code, params.client_public_key)
+    }
+
+    pub fn swarm_token_refresh(
+        &mut self,
+        params: TokenRefreshParams,
+    ) -> Result<TokenRefreshResult, McpError> {
+        if params.refresh_token.trim().is_empty() {
+            return Err(McpError::invalid_params("refresh_token is required"));
+        }
+        decode_ed25519_public_key(&params.client_public_key, "client_public_key")?;
+        let now = self.now_seconds();
+        let stored = self
+            .sessions
+            .get(&params.refresh_token)
+            .cloned()
+            .ok_or_else(|| McpError::invalid_params("refresh_token is invalid"))?;
+        if stored.refresh_token_expires_at <= now {
+            self.sessions.remove(&params.refresh_token);
+            return Err(McpError::invalid_params("refresh_token is expired"));
+        }
+        let mut session = stored.clone();
+        session.access_token = opaque_web_token(
+            "web_access",
+            &stored.provider,
+            &stored.subject,
+            &params.refresh_token,
+            now,
+        );
+        session.access_token_expires_at = now + WEB_ACCESS_TOKEN_TTL_SECONDS;
+        self.sessions
+            .insert(session.refresh_token.clone(), session.clone());
+        let certificate = self.issue_certificate(
+            session.player_id,
+            session.provider.clone(),
+            session.subject.clone(),
+            params.client_public_key,
+        )?;
+        Ok(TokenRefreshResult {
+            player_id: session.player_id,
+            session,
+            certificate,
+            renew_after_seconds: CERTIFICATE_TTL_SECONDS,
+        })
+    }
+
+    pub fn swarm_auth_revoke(
+        &mut self,
+        params: RevokeAuthParams,
+    ) -> Result<RevokeAuthResult, McpError> {
+        let revoked_session = params
+            .refresh_token
+            .as_deref()
+            .map(|t| self.sessions.remove(t).is_some())
+            .unwrap_or(false);
+        let revoked_certificate = if let Some(certificate) = params.certificate {
+            self.issuer.verify(&certificate)?;
+            self.revoked_certificates.insert(certificate.signature)
+        } else {
+            false
         };
-        let certificate = self.issuer.issue(payload)?;
+        Ok(RevokeAuthResult {
+            revoked_session,
+            revoked_certificate,
+        })
+    }
 
+    fn issue_login(
+        &mut self,
+        provider: String,
+        subject: String,
+        seed: String,
+        client_public_key: String,
+    ) -> Result<OAuth2LoginResult, McpError> {
+        let player_id = oauth_player_id(&provider, &subject);
+        let now = self.now_seconds();
+        let session = WebAuthSession {
+            player_id,
+            provider: provider.clone(),
+            subject: subject.clone(),
+            audience: WEB_TOKEN_AUDIENCE.to_string(),
+            access_token: opaque_web_token("web_access", &provider, &subject, &seed, now),
+            access_token_expires_at: now + WEB_ACCESS_TOKEN_TTL_SECONDS,
+            refresh_token: opaque_web_token("web_refresh", &provider, &subject, &seed, now),
+            refresh_token_expires_at: now + WEB_REFRESH_TOKEN_TTL_SECONDS,
+            scopes: vec!["web".to_string(), "mcp:deploy".to_string()],
+        };
+        self.sessions
+            .insert(session.refresh_token.clone(), session.clone());
+        let certificate =
+            self.issue_certificate(player_id, provider, subject, client_public_key)?;
         Ok(OAuth2LoginResult {
             player_id,
+            session,
             certificate,
+        })
+    }
+
+    fn issue_certificate(
+        &self,
+        player_id: PlayerId,
+        provider: String,
+        subject: String,
+        client_public_key: String,
+    ) -> Result<PlayerCertificate, McpError> {
+        let issued_at = self.now_seconds();
+        self.issuer.issue(PlayerCertificatePayload {
+            audience: CERTIFICATE_AUDIENCE.to_string(),
+            player_id,
+            provider,
+            subject,
+            client_public_key,
+            issued_at,
+            expires_at: issued_at + CERTIFICATE_TTL_SECONDS,
         })
     }
 
@@ -565,6 +774,9 @@ impl McpServer {
         }
         if certificate.payload.expires_at <= self.now_seconds() {
             return Err(McpError::invalid_params("certificate is expired"));
+        }
+        if self.revoked_certificates.contains(&certificate.signature) {
+            return Err(McpError::invalid_params("certificate is revoked"));
         }
         self.issuer.verify(certificate)
     }
@@ -1068,6 +1280,14 @@ fn unix_timestamp_seconds() -> u64 {
     seconds
 }
 
+fn opaque_web_token(kind: &str, provider: &str, subject: &str, seed: &str, now: u64) -> String {
+    let material = format!("{kind}:{provider}:{subject}:{seed}:{now}");
+    format!(
+        "swarm_{kind}_{}",
+        blake3::hash(material.as_bytes()).to_hex()
+    )
+}
+
 fn oauth_player_id(provider: &str, subject: &str) -> PlayerId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(provider.as_bytes());
@@ -1198,7 +1418,7 @@ fn base64_value(byte: u8) -> Result<u8, McpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Structure, StructureType, create_world};
+    use crate::{create_world, Structure, StructureType};
 
     fn spawn_structure(world: &mut SwarmWorld, owner: Option<PlayerId>, x: i32, y: i32) {
         world.app.world_mut().spawn((
@@ -1223,7 +1443,7 @@ mod tests {
         SigningKey::from_bytes(&[seed; 32])
     }
 
-    fn login_with_key(server: &McpServer, client_key: &SigningKey) -> OAuth2LoginResult {
+    fn login_with_key(server: &mut McpServer, client_key: &SigningKey) -> OAuth2LoginResult {
         server
             .swarm_oauth2_login(OAuth2LoginParams {
                 provider: "test-oauth".to_string(),
@@ -1267,18 +1487,14 @@ mod tests {
         );
 
         assert_eq!(snapshot.tick, 7);
-        assert!(
-            snapshot
-                .visible_tiles
-                .iter()
-                .any(|tile| tile.x == 10 && tile.y == 10)
-        );
-        assert!(
-            !snapshot
-                .visible_tiles
-                .iter()
-                .any(|tile| tile.x == 40 && tile.y == 40)
-        );
+        assert!(snapshot
+            .visible_tiles
+            .iter()
+            .any(|tile| tile.x == 10 && tile.y == 10));
+        assert!(!snapshot
+            .visible_tiles
+            .iter()
+            .any(|tile| tile.x == 40 && tile.y == 40));
         assert!(snapshot.visible_tiles.len() < (DEFAULT_ROOM_SIZE * DEFAULT_ROOM_SIZE) as usize);
 
         let drone_positions = snapshot
@@ -1347,18 +1563,14 @@ mod tests {
                 room: RoomId(0)
             }
         ));
-        assert!(
-            snapshot
-                .visible_tiles
-                .iter()
-                .any(|tile| tile.x == 35 && tile.y == 35)
-        );
-        assert!(
-            !snapshot
-                .visible_tiles
-                .iter()
-                .any(|tile| tile.x == 0 && tile.y == 0)
-        );
+        assert!(snapshot
+            .visible_tiles
+            .iter()
+            .any(|tile| tile.x == 35 && tile.y == 35));
+        assert!(!snapshot
+            .visible_tiles
+            .iter()
+            .any(|tile| tile.x == 0 && tile.y == 0));
     }
 
     #[test]
@@ -1367,7 +1579,7 @@ mod tests {
         let issuer = test_signing_key(1);
         let client_key = test_signing_key(2);
         let mut server = McpServer::with_issuer_for_tests(issuer, 1_000);
-        let login = login_with_key(&server, &client_key);
+        let login = login_with_key(&mut server, &client_key);
         let result = server
             .swarm_deploy(
                 &world,
@@ -1398,46 +1610,42 @@ mod tests {
         let issuer = test_signing_key(3);
         let client_key = test_signing_key(4);
         let mut server = McpServer::with_issuer_for_tests(issuer, 1_000);
-        let login = login_with_key(&server, &client_key);
+        let login = login_with_key(&mut server, &client_key);
         let context = McpContext {
             player_id: login.player_id,
             tick: 0,
         };
         let valid_params = signed_deploy_params(login.certificate, &client_key);
 
-        assert!(
-            server
-                .swarm_deploy(
-                    &world,
-                    context.clone(),
-                    DeployParams {
-                        wasm_bytes: "not base64".to_string(),
-                        ..valid_params.clone()
-                    },
-                )
-                .is_err()
-        );
-        assert!(
-            server
-                .swarm_deploy(
-                    &world,
-                    context,
-                    DeployParams {
-                        wasm_bytes: "YWJj".to_string(),
-                        ..valid_params
-                    },
-                )
-                .is_err()
-        );
+        assert!(server
+            .swarm_deploy(
+                &world,
+                context.clone(),
+                DeployParams {
+                    wasm_bytes: "not base64".to_string(),
+                    ..valid_params.clone()
+                },
+            )
+            .is_err());
+        assert!(server
+            .swarm_deploy(
+                &world,
+                context,
+                DeployParams {
+                    wasm_bytes: "YWJj".to_string(),
+                    ..valid_params
+                },
+            )
+            .is_err());
     }
 
     #[test]
     fn oauth2_login_issues_ed25519_certificate_with_24h_expiry() {
         let issuer = test_signing_key(5);
         let client_key = test_signing_key(6);
-        let server = McpServer::with_issuer_for_tests(issuer, 10_000);
+        let mut server = McpServer::with_issuer_for_tests(issuer, 10_000);
 
-        let login = login_with_key(&server, &client_key);
+        let login = login_with_key(&mut server, &client_key);
 
         assert_eq!(login.certificate.payload.issued_at, 10_000);
         assert_eq!(
@@ -1458,7 +1666,7 @@ mod tests {
         let client_key = test_signing_key(8);
         let wrong_key = test_signing_key(9);
         let mut server = McpServer::with_issuer_for_tests(issuer, 20_000);
-        let login = login_with_key(&server, &client_key);
+        let login = login_with_key(&mut server, &client_key);
         let mut params = signed_deploy_params(login.certificate, &wrong_key);
 
         let error = server
@@ -1474,18 +1682,16 @@ mod tests {
         assert_eq!(error.message, "wasm_signature is invalid");
 
         params.wasm_signature = "not base64".to_string();
-        assert!(
-            server
-                .swarm_deploy(
-                    &world,
-                    McpContext {
-                        player_id: login.player_id,
-                        tick: 1,
-                    },
-                    params,
-                )
-                .is_err()
-        );
+        assert!(server
+            .swarm_deploy(
+                &world,
+                McpContext {
+                    player_id: login.player_id,
+                    tick: 1,
+                },
+                params,
+            )
+            .is_err());
     }
 
     #[test]
@@ -1493,8 +1699,8 @@ mod tests {
         let world = create_world();
         let issuer = test_signing_key(10);
         let client_key = test_signing_key(11);
-        let issuing_server = McpServer::with_issuer_for_tests(issuer.clone(), 30_000);
-        let login = login_with_key(&issuing_server, &client_key);
+        let mut issuing_server = McpServer::with_issuer_for_tests(issuer.clone(), 30_000);
+        let login = login_with_key(&mut issuing_server, &client_key);
         let mut verifying_server =
             McpServer::with_issuer_for_tests(issuer, 30_000 + CERTIFICATE_TTL_SECONDS);
 
@@ -1558,5 +1764,93 @@ mod tests {
         );
         assert!(denied.result.is_none());
         assert_eq!(denied.error.unwrap().code, -32601);
+    }
+
+    #[test]
+    fn oauth2_callback_issues_web_session_and_certificate() {
+        let issuer = test_signing_key(13);
+        let client_key = test_signing_key(14);
+        let mut server = McpServer::with_issuer_for_tests(issuer, 30_000);
+        let login = server
+            .swarm_oauth2_callback(OAuth2CallbackParams {
+                provider: "github".to_string(),
+                code: "github-code".to_string(),
+                state: "csrf".to_string(),
+                redirect_uri: "https://swarm.example/auth/callback".to_string(),
+                client_public_key: encode_base64(client_key.verifying_key().as_bytes()),
+            })
+            .expect("callback issues tokens and cert");
+        assert_eq!(login.session.audience, WEB_TOKEN_AUDIENCE);
+        assert_eq!(login.session.provider, "github");
+        assert_eq!(
+            login.session.access_token_expires_at,
+            30_000 + WEB_ACCESS_TOKEN_TTL_SECONDS
+        );
+        assert_eq!(
+            login.session.refresh_token_expires_at,
+            30_000 + WEB_REFRESH_TOKEN_TTL_SECONDS
+        );
+        assert_eq!(
+            login.certificate.payload.expires_at,
+            30_000 + CERTIFICATE_TTL_SECONDS
+        );
+        server
+            .verify_certificate_for_player(&login.certificate, login.player_id)
+            .unwrap();
+    }
+
+    #[test]
+    fn token_refresh_renews_access_token_and_24h_certificate() {
+        let issuer = test_signing_key(15);
+        let client_key = test_signing_key(16);
+        let mut server = McpServer::with_issuer_for_tests(issuer, 40_000);
+        let login = login_with_key(&mut server, &client_key);
+        server.now_seconds = Some(41_000);
+        let refreshed = server
+            .swarm_token_refresh(TokenRefreshParams {
+                refresh_token: login.session.refresh_token.clone(),
+                client_public_key: encode_base64(client_key.verifying_key().as_bytes()),
+            })
+            .expect("refresh renews cert");
+        assert_ne!(refreshed.session.access_token, login.session.access_token);
+        assert_eq!(refreshed.certificate.payload.issued_at, 41_000);
+        assert_eq!(
+            refreshed.certificate.payload.expires_at,
+            41_000 + CERTIFICATE_TTL_SECONDS
+        );
+        assert_eq!(refreshed.renew_after_seconds, CERTIFICATE_TTL_SECONDS);
+    }
+
+    #[test]
+    fn revoke_blocks_refresh_and_certificate_deploy() {
+        let world = create_world();
+        let issuer = test_signing_key(17);
+        let client_key = test_signing_key(18);
+        let mut server = McpServer::with_issuer_for_tests(issuer, 50_000);
+        let login = login_with_key(&mut server, &client_key);
+        let revoked = server
+            .swarm_auth_revoke(RevokeAuthParams {
+                refresh_token: Some(login.session.refresh_token.clone()),
+                certificate: Some(login.certificate.clone()),
+            })
+            .unwrap();
+        assert!(revoked.revoked_session && revoked.revoked_certificate);
+        assert!(server
+            .swarm_token_refresh(TokenRefreshParams {
+                refresh_token: login.session.refresh_token,
+                client_public_key: encode_base64(client_key.verifying_key().as_bytes())
+            })
+            .is_err());
+        let error = server
+            .swarm_deploy(
+                &world,
+                McpContext {
+                    player_id: login.player_id,
+                    tick: 1,
+                },
+                signed_deploy_params(login.certificate, &client_key),
+            )
+            .expect_err("revoked cert rejected");
+        assert_eq!(error.message, "certificate is revoked");
     }
 }
