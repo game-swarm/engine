@@ -738,7 +738,7 @@ fn restore_component<T: Component>(entity: &mut EntityWorldMut<'_>, component: O
 
 #[cfg(test)]
 mod tests {
-    use crate::command::{CommandAction, Direction, RejectionReason, object_id};
+    use crate::command::{CommandAction, CommandAuth, Direction, RejectionReason, object_id};
     use crate::systems::PendingSpawnQueue;
     use crate::{BodyPart, CommandIntent, Structure, StructureType, create_world};
     use std::sync::{Arc, Barrier, Mutex};
@@ -1362,6 +1362,12 @@ mod tests {
             player_id,
             tick,
             source: CommandSource::Wasm,
+            auth: CommandAuth {
+                source: CommandSource::Wasm,
+                player_id,
+                tick_submitted: tick,
+                tick_target: tick,
+            },
             sequence,
             action: CommandAction::Harvest {
                 object_id,
@@ -1383,6 +1389,12 @@ mod tests {
             player_id,
             tick,
             source: CommandSource::Wasm,
+            auth: CommandAuth {
+                source: CommandSource::Wasm,
+                player_id,
+                tick_submitted: tick,
+                tick_target: tick,
+            },
             sequence,
             action: CommandAction::Build {
                 object_id,
@@ -1405,6 +1417,12 @@ mod tests {
             player_id,
             tick,
             source: CommandSource::Wasm,
+            auth: CommandAuth {
+                source: CommandSource::Wasm,
+                player_id,
+                tick_submitted: tick,
+                tick_target: tick,
+            },
             sequence,
             action: CommandAction::Transfer {
                 object_id,
