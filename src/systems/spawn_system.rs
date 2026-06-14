@@ -11,10 +11,10 @@ pub struct PendingSpawn {
     pub position: Position,
 }
 
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Clone, Default)]
 pub struct PendingSpawnQueue(pub Vec<PendingSpawn>);
 
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Clone, Default)]
 pub struct RoomDroneCounts(pub HashMap<(RoomId, PlayerId), u32>);
 
 pub fn spawn_system(

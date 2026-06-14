@@ -9,7 +9,7 @@ use crate::components::{Drone, Structure};
 /// Using `IndexMap` keyed on Entity ensures deterministic iteration order —
 /// `Entity` is `(generation, index)` so sorted iteration is stable across
 /// identical world states.
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Clone, Default)]
 pub struct PendingCombat {
     pub damage: Vec<(Entity, u32)>,
     pub heal: Vec<(Entity, u32)>,

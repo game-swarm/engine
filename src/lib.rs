@@ -1,10 +1,12 @@
 pub mod command;
 pub mod components;
 pub mod systems;
+pub mod tick;
 pub mod world;
 
 pub use command::*;
 pub use components::*;
+pub use tick::*;
 pub use world::{SwarmWorld, create_world};
 
 #[cfg(test)]
