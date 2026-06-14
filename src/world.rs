@@ -5,6 +5,7 @@ use crate::command::{
     validate_command,
 };
 use crate::components::*;
+use crate::hot_cache::{InMemoryDragonfly, InMemoryFoundationDb};
 use crate::resources::ResourceRegistry;
 use crate::systems::*;
 
@@ -114,6 +115,8 @@ pub fn create_world() -> SwarmWorld {
     app.init_resource::<RoomDroneCounts>();
     app.init_resource::<PendingCombat>();
     app.init_resource::<ResourceRegistry>();
+    app.init_resource::<InMemoryFoundationDb>();
+    app.init_resource::<InMemoryDragonfly>();
     app.add_systems(
         Update,
         (

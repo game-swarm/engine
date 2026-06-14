@@ -1,5 +1,6 @@
 pub mod command;
 pub mod components;
+pub mod hot_cache;
 pub mod mcp;
 pub mod realtime;
 pub mod resources;
@@ -10,6 +11,7 @@ pub mod world;
 
 pub use command::*;
 pub use components::*;
+pub use hot_cache::*;
 pub use mcp::{
     DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer,
     StoredModule, VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
