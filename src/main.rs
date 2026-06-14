@@ -22,6 +22,12 @@ struct Endpoint {
 }
 
 fn main() {
+    match swarm_engine::mod_cli::try_run(env::args().skip(1)) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => { eprintln!("{error}"); std::process::exit(1); }
+    }
+
     let fdb_cluster_file = env::var("FDB_CLUSTER_FILE")
         .unwrap_or_else(|_| "/etc/foundationdb/fdb.cluster".to_string());
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());

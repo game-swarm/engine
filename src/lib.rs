@@ -1,6 +1,7 @@
 pub mod command;
 pub mod components;
 pub mod mcp;
+pub mod mod_cli;
 pub mod realtime;
 pub mod resources;
 pub mod rule_module;
