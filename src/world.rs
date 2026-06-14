@@ -1,11 +1,12 @@
 use bevy::prelude::*;
 
 use crate::command::{
-    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
-    validate_command,
+    apply_command, source_gate, validate_command, CommandIntent, CommandResult, CommandSource,
+    RawCommand, Tick,
 };
 use crate::components::*;
 use crate::resources::ResourceRegistry;
+use crate::rule_module::{rhai_rule_module_tick_end_system, RhaiRuleModules};
 use crate::systems::*;
 
 pub struct SwarmWorld {
@@ -114,6 +115,7 @@ pub fn create_world() -> SwarmWorld {
     app.init_resource::<RoomDroneCounts>();
     app.init_resource::<PendingCombat>();
     app.init_resource::<ResourceRegistry>();
+    app.init_resource::<RhaiRuleModules>();
     app.add_systems(
         Update,
         (
@@ -122,6 +124,7 @@ pub fn create_world() -> SwarmWorld {
             regeneration_system,
             combat_system,
             decay_system,
+            rhai_rule_module_tick_end_system,
             death_cleanup_system,
         )
             .chain(),
