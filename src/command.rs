@@ -82,6 +82,12 @@ pub enum CommandAction {
         spawn_id: ObjectId,
         body: Vec<BodyPart>,
     },
+    Build {
+        object_id: ObjectId,
+        x: i32,
+        y: i32,
+        structure: StructureType,
+    },
 }
 
 /// Untrusted command shape emitted by a player module. Envelope fields are not
@@ -291,6 +297,12 @@ pub fn validate_command(
         CommandAction::SpawnDrone { spawn_id, body } => {
             validate_spawn_drone(world, raw.player_id, *spawn_id, body)
         }
+        CommandAction::Build {
+            object_id,
+            x,
+            y,
+            structure,
+        } => validate_build(world, raw.player_id, *object_id, *x, *y, *structure),
     }?;
 
     Ok(ValidatedCommand { raw })
@@ -393,6 +405,12 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         CommandAction::SpawnDrone { spawn_id, body } => {
             apply_spawn_drone(world, command.raw.player_id, spawn_id, body)
         }
+        CommandAction::Build {
+            object_id,
+            x,
+            y,
+            structure,
+        } => apply_build(world, command.raw.player_id, object_id, x, y, structure),
     }
 }
 
@@ -579,6 +597,32 @@ fn validate_spawn_drone(
     Ok(())
 }
 
+fn validate_build(
+    world: &mut World,
+    player_id: PlayerId,
+    object_id: ObjectId,
+    x: i32,
+    y: i32,
+    _structure: StructureType,
+) -> CommandResult {
+    let (position, drone) = drone_snapshot(world, object_id)?;
+    ensure_owner(&drone, player_id)?;
+    ensure_drone_can_act(&drone, BodyPart::Work, true)?;
+
+    let target = Position {
+        x,
+        y,
+        room: position.room,
+    };
+    if !world.resource::<RoomTerrains>().is_passable(target) {
+        return Err(RejectionReason::InvalidTerrain);
+    }
+    if tile_has_any_object(world, target) {
+        return Err(RejectionReason::TileOccupied);
+    }
+    ensure_range(position, target, 1)
+}
+
 fn apply_move(world: &mut World, object_id: ObjectId, direction: Direction) -> CommandResult {
     let entity = entity(object_id)?;
     let mut entity = world.entity_mut(entity);
@@ -727,6 +771,27 @@ fn apply_spawn_drone(
             body,
             position: spawn_output_position(position),
         });
+    Ok(())
+}
+
+fn apply_build(
+    world: &mut World,
+    player_id: PlayerId,
+    object_id: ObjectId,
+    x: i32,
+    y: i32,
+    structure_type: StructureType,
+) -> CommandResult {
+    let (position, _) = drone_snapshot(world, object_id)?;
+    let position = Position {
+        x,
+        y,
+        room: position.room,
+    };
+    world.spawn((
+        position,
+        structure_defaults(structure_type, Some(player_id)),
+    ));
     Ok(())
 }
 
@@ -943,6 +1008,44 @@ fn tile_has_any_drone(world: &mut World, position: Position) -> bool {
         .query::<(&Position, &Drone)>()
         .iter(world)
         .any(|(drone_position, _)| *drone_position == position)
+}
+
+fn tile_has_any_object(world: &mut World, position: Position) -> bool {
+    tile_has_any_drone(world, position)
+        || world
+            .query::<(&Position, &Structure)>()
+            .iter(world)
+            .any(|(object_position, _)| *object_position == position)
+        || world
+            .query::<(&Position, &crate::components::Source)>()
+            .iter(world)
+            .any(|(object_position, _)| *object_position == position)
+        || world
+            .query::<(&Position, &crate::components::Resource)>()
+            .iter(world)
+            .any(|(object_position, _)| *object_position == position)
+        || world
+            .query::<(&Position, &Controller)>()
+            .iter(world)
+            .any(|(object_position, _)| *object_position == position)
+}
+
+fn structure_defaults(structure_type: StructureType, owner: Option<PlayerId>) -> Structure {
+    let (energy, energy_capacity) = match structure_type {
+        StructureType::Spawn => (Some(0), Some(300)),
+        StructureType::Extension => (Some(0), Some(50)),
+        StructureType::Tower => (Some(0), Some(1_000)),
+        _ => (None, None),
+    };
+    Structure {
+        structure_type,
+        owner,
+        hits: 1,
+        hits_max: 5_000,
+        energy,
+        energy_capacity,
+        cooldown: 0,
+    }
 }
 
 fn carry_used(carry: &IndexMap<String, u32>) -> u32 {

@@ -1042,4 +1042,103 @@ mod tests {
             Some(200)
         );
     }
+
+    #[test]
+    fn build_rejects_constraints_then_places_structure() {
+        let mut world = create_world();
+        let builder = world.spawn_drone(1, 10, 10, vec![BodyPart::Work]);
+        let mover = world.spawn_drone(1, 12, 10, vec![BodyPart::Move]);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::Build {
+                    object_id: object_id(mover),
+                    x: 13,
+                    y: 10,
+                    structure: StructureType::Extension,
+                }
+            ),
+            Err(RejectionReason::MissingBodyPart {
+                part: BodyPart::Work
+            })
+        );
+
+        assert!(world.set_terrain(RoomId(0), 10, 11, TerrainType::Wall));
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                2,
+                CommandAction::Build {
+                    object_id: object_id(builder),
+                    x: 10,
+                    y: 11,
+                    structure: StructureType::Extension,
+                }
+            ),
+            Err(RejectionReason::InvalidTerrain)
+        );
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                3,
+                CommandAction::Build {
+                    object_id: object_id(builder),
+                    x: 25,
+                    y: 25,
+                    structure: StructureType::Extension,
+                }
+            ),
+            Err(RejectionReason::TileOccupied)
+        );
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                4,
+                CommandAction::Build {
+                    object_id: object_id(builder),
+                    x: 11,
+                    y: 10,
+                    structure: StructureType::Extension,
+                }
+            ),
+            Ok(())
+        );
+
+        let built = world
+            .app
+            .world_mut()
+            .query::<(&Position, &Structure)>()
+            .iter(world.app.world())
+            .find(|(position, structure)| {
+                **position
+                    == Position {
+                        x: 11,
+                        y: 10,
+                        room: RoomId(0),
+                    }
+                    && structure.structure_type == StructureType::Extension
+            })
+            .map(|(_, structure)| structure.clone());
+
+        assert_eq!(
+            built,
+            Some(Structure {
+                structure_type: StructureType::Extension,
+                owner: Some(1),
+                hits: 1,
+                hits_max: 5_000,
+                energy: Some(0),
+                energy_capacity: Some(50),
+                cooldown: 0,
+            })
+        );
+    }
 }
