@@ -1,5 +1,6 @@
 pub mod command;
 pub mod components;
+pub mod hot_cache;
 pub mod mcp;
 pub mod mod_cli;
 pub mod realtime;
@@ -12,6 +13,7 @@ pub mod world;
 
 pub use command::*;
 pub use components::*;
+pub use hot_cache::*;
 pub use mcp::{
     swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player, DeployParams,
     DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer, StoredModule,

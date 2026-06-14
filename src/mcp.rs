@@ -11,6 +11,7 @@ use crate::command::{
     object_id, validate_command,
 };
 use crate::components::*;
+use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
 use crate::visibility::{
     VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
 };
@@ -766,6 +767,21 @@ fn default_docs_topic() -> String {
 }
 
 pub fn swarm_get_snapshot(world: &mut SwarmWorld, context: McpContext) -> VisibleWorldSnapshot {
+    let snapshot = build_visible_snapshot(world, context.clone());
+    let key = SnapshotKey::new(context.player_id, context.tick);
+    let authoritative = world
+        .app
+        .world_mut()
+        .resource_mut::<crate::hot_cache::InMemoryFoundationDb>()
+        .write_visible_snapshot(snapshot);
+    let mut cache = world
+        .app
+        .world_mut()
+        .resource_mut::<crate::hot_cache::InMemoryDragonfly>();
+    read_through_dragonfly(&mut *cache, key, authoritative)
+}
+
+fn build_visible_snapshot(world: &mut SwarmWorld, context: McpContext) -> VisibleWorldSnapshot {
     let room_id = RoomId(0);
     let visible_positions = visible_positions(world.app.world_mut(), context.player_id);
     let terrains = world.app.world().resource::<RoomTerrains>();
@@ -1215,6 +1231,35 @@ mod tests {
         assert!(drone_positions.contains(&(1, 10, 10)));
         assert!(drone_positions.contains(&(2, 12, 10)));
         assert!(!drone_positions.contains(&(2, 40, 40)));
+    }
+
+    #[test]
+    fn swarm_get_snapshot_uses_dragonfly_cache_after_fdb_backfill() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let context = McpContext {
+            player_id: 1,
+            tick: 11,
+        };
+
+        let first = swarm_get_snapshot(&mut world, context.clone());
+        let stats = world
+            .app
+            .world()
+            .resource::<crate::hot_cache::InMemoryDragonfly>()
+            .stats();
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.refreshes, 1);
+
+        let second = swarm_get_snapshot(&mut world, context);
+        let stats = world
+            .app
+            .world()
+            .resource::<crate::hot_cache::InMemoryDragonfly>()
+            .stats();
+        assert_eq!(second, first);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.refreshes, 1);
     }
 
     #[test]

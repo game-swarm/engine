@@ -5,6 +5,7 @@ use crate::command::{
     RawCommand, Tick,
 };
 use crate::components::*;
+use crate::hot_cache::{InMemoryDragonfly, InMemoryFoundationDb};
 use crate::resources::ResourceRegistry;
 use crate::rule_module::{rhai_rule_module_tick_end_system, RhaiRuleModules};
 use crate::systems::*;
@@ -116,6 +117,8 @@ pub fn create_world() -> SwarmWorld {
     app.init_resource::<PendingCombat>();
     app.init_resource::<ResourceRegistry>();
     app.init_resource::<RhaiRuleModules>();
+    app.init_resource::<InMemoryFoundationDb>();
+    app.init_resource::<InMemoryDragonfly>();
     app.add_systems(
         Update,
         (
