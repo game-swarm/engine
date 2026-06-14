@@ -9,13 +9,10 @@ blake3 = "1"
 ed25519-dalek = "2"
 getrandom = "0.2"
 indexmap = { version = "2", features = ["serde"] }
+rhai = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-<<<<<<< HEAD
 toml = "0.8"
-=======
-rhai = "1"
 
 [dev-dependencies]
 tempfile = "3"
->>>>>>> origin/task/t_a3b4cc44
