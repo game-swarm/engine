@@ -98,6 +98,39 @@ mod tests {
             .id()
     }
 
+    fn spawn_controller(
+        world: &mut crate::SwarmWorld,
+        owner: Option<PlayerId>,
+        x: i32,
+        y: i32,
+    ) -> bevy::prelude::Entity {
+        world
+            .app
+            .world_mut()
+            .spawn((
+                Position {
+                    x,
+                    y,
+                    room: RoomId(0),
+                },
+                Controller {
+                    owner,
+                    level: 1,
+                    progress: 0,
+                    progress_total: controller_progress_total(1),
+                    downgrade_timer: DEFAULT_CONTROLLER_DOWNGRADE_TIMER,
+                    safe_mode: 0,
+                    safe_mode_available: 0,
+                    safe_mode_cooldown: 0,
+                },
+            ))
+            .id()
+    }
+
+    fn controller_snapshot(world: &crate::SwarmWorld, entity: bevy::prelude::Entity) -> Controller {
+        world.app.world().get::<Controller>(entity).unwrap().clone()
+    }
+
     fn first_source_id(world: &mut crate::SwarmWorld) -> ObjectId {
         object_id(
             world
@@ -391,6 +424,152 @@ mod tests {
                 .get(&(RoomId(0), 42)),
             Some(&0)
         );
+    }
+
+    #[test]
+    fn claim_controller_requires_claim_body_and_sets_owner() {
+        let mut world = create_world();
+        let controller = spawn_controller(&mut world, None, 11, 10);
+        let worker = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Work]);
+        let claimer = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Claim]);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::ClaimController {
+                    object_id: object_id(worker),
+                    target_id: object_id(controller),
+                },
+            ),
+            Err(RejectionReason::MissingBodyPart {
+                part: BodyPart::Claim
+            })
+        );
+
+        submit(
+            &mut world,
+            1,
+            2,
+            CommandAction::ClaimController {
+                object_id: object_id(claimer),
+                target_id: object_id(controller),
+            },
+        )
+        .unwrap();
+
+        let controller = controller_snapshot(&world, controller);
+        assert_eq!(controller.owner, Some(1));
+        assert_eq!(controller.level, 1);
+        assert_eq!(controller.progress, 0);
+        assert_eq!(controller.progress_total, controller_progress_total(1));
+    }
+
+    #[test]
+    fn claim_controller_switches_enemy_room_owner() {
+        let mut world = create_world();
+        let controller = spawn_controller(&mut world, Some(2), 11, 10);
+        let claimer = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Claim]);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::ClaimController {
+                object_id: object_id(claimer),
+                target_id: object_id(controller),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(controller_snapshot(&world, controller).owner, Some(1));
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                2,
+                CommandAction::ClaimController {
+                    object_id: object_id(claimer),
+                    target_id: object_id(controller),
+                },
+            ),
+            Err(RejectionReason::ControllerAlreadyOwned)
+        );
+    }
+
+    #[test]
+    fn transfer_energy_to_owned_controller_upgrades_rcl() {
+        let mut world = create_world();
+        let controller = spawn_controller(&mut world, Some(1), 11, 10);
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Carry]);
+        world
+            .app
+            .world_mut()
+            .get_mut::<Drone>(drone)
+            .unwrap()
+            .carry
+            .insert("Energy".to_string(), 250);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::Transfer {
+                object_id: object_id(drone),
+                target_id: object_id(controller),
+                resource: "Energy".to_string(),
+                amount: 250,
+            },
+        )
+        .unwrap();
+
+        let controller = controller_snapshot(&world, controller);
+        assert_eq!(controller.owner, Some(1));
+        assert_eq!(controller.level, 2);
+        assert_eq!(controller.progress, 50);
+        assert_eq!(controller.progress_total, controller_progress_total(2));
+        assert_eq!(
+            world
+                .app
+                .world()
+                .get::<Drone>(drone)
+                .unwrap()
+                .carry
+                .get("Energy"),
+            Some(&0)
+        );
+    }
+
+    #[test]
+    fn non_owner_cannot_upgrade_controller() {
+        let mut world = create_world();
+        let controller = spawn_controller(&mut world, Some(2), 11, 10);
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Carry]);
+        world
+            .app
+            .world_mut()
+            .get_mut::<Drone>(drone)
+            .unwrap()
+            .carry
+            .insert("Energy".to_string(), 200);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::Transfer {
+                    object_id: object_id(drone),
+                    target_id: object_id(controller),
+                    resource: "Energy".to_string(),
+                    amount: 200,
+                },
+            ),
+            Err(RejectionReason::NotYourRoom)
+        );
+        assert_eq!(controller_snapshot(&world, controller).owner, Some(2));
+        assert_eq!(controller_snapshot(&world, controller).level, 1);
     }
 
     #[test]

@@ -103,6 +103,10 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
+    ClaimController {
+        object_id: ObjectId,
+        target_id: ObjectId,
+    },
 }
 
 /// Untrusted command shape emitted by a player module. Envelope fields are not
@@ -186,6 +190,8 @@ pub enum RejectionReason {
     NotFriendly,
     GlobalStorageDisabled,
     TransferInProgress,
+    NotController,
+    ControllerAlreadyOwned,
 }
 
 pub type CommandResult = Result<(), RejectionReason>;
@@ -346,6 +352,10 @@ pub fn validate_command(
         CommandAction::TransferFromGlobal { resource, amount } => {
             validate_transfer_from_global(world, raw.player_id, resource, *amount)
         }
+        CommandAction::ClaimController {
+            object_id,
+            target_id,
+        } => validate_claim_controller(world, raw.player_id, *object_id, *target_id),
     }?;
 
     Ok(ValidatedCommand { raw })
@@ -546,6 +556,7 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Build { .. } => "Build",
         CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
         CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
+        CommandAction::ClaimController { .. } => "ClaimController",
     };
 
     match rejection {
@@ -717,6 +728,10 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         CommandAction::TransferFromGlobal { resource, amount } => {
             apply_transfer_from_global(world, command.raw.player_id, &resource, amount)
         }
+        CommandAction::ClaimController {
+            object_id,
+            target_id,
+        } => apply_claim_controller(world, command.raw.player_id, object_id, target_id),
     }
 }
 
@@ -783,6 +798,9 @@ fn validate_transfer(
     }
 
     let (target_position, space) = target_resource_space(world, target_id, resource)?;
+    if is_controller(world, target_id) && controller_owner(world, target_id)? != Some(player_id) {
+        return Err(RejectionReason::NotYourRoom);
+    }
     if space < amount {
         return Err(RejectionReason::TargetFull);
     }
@@ -928,6 +946,22 @@ fn validate_build(
         return Err(RejectionReason::TileOccupied);
     }
     ensure_range(position, target, 1)
+}
+
+fn validate_claim_controller(
+    world: &mut World,
+    player_id: PlayerId,
+    object_id: ObjectId,
+    target_id: ObjectId,
+) -> CommandResult {
+    let (position, drone) = drone_snapshot(world, object_id)?;
+    ensure_owner(&drone, player_id)?;
+    ensure_drone_can_act(&drone, BodyPart::Claim, true)?;
+    let (target_position, controller) = controller_snapshot(world, target_id)?;
+    if controller.owner == Some(player_id) {
+        return Err(RejectionReason::ControllerAlreadyOwned);
+    }
+    ensure_range(position, target_position, 1)
 }
 
 fn validate_transfer_to_global(
@@ -1178,6 +1212,25 @@ fn apply_build(
     Ok(())
 }
 
+fn apply_claim_controller(
+    world: &mut World,
+    player_id: PlayerId,
+    _object_id: ObjectId,
+    target_id: ObjectId,
+) -> CommandResult {
+    let target = entity(target_id)?;
+    let mut entity_mut = world.entity_mut(target);
+    let mut controller = entity_mut
+        .get_mut::<Controller>()
+        .ok_or(RejectionReason::NotController)?;
+    controller.owner = Some(player_id);
+    controller.level = 1;
+    controller.progress = 0;
+    controller.progress_total = controller_progress_total(1);
+    controller.downgrade_timer = DEFAULT_CONTROLLER_DOWNGRADE_TIMER;
+    Ok(())
+}
+
 fn apply_transfer_to_global(
     world: &mut World,
     player_id: PlayerId,
@@ -1298,6 +1351,24 @@ fn structure_snapshot(
     Ok((position, structure))
 }
 
+fn controller_snapshot(
+    world: &mut World,
+    object_id: ObjectId,
+) -> Result<(Position, Controller), RejectionReason> {
+    let entity = entity(object_id)?;
+    let entity_ref = world
+        .get_entity(entity)
+        .map_err(|_| RejectionReason::ObjectNotFound)?;
+    let position = *entity_ref
+        .get::<Position>()
+        .ok_or(RejectionReason::ObjectNotFound)?;
+    let controller = entity_ref
+        .get::<Controller>()
+        .ok_or(RejectionReason::NotController)?
+        .clone();
+    Ok((position, controller))
+}
+
 fn attackable_snapshot(
     world: &mut World,
     object_id: ObjectId,
@@ -1376,6 +1447,15 @@ fn target_resource_space(
                 .unwrap_or(0)
                 .saturating_sub(structure.energy.unwrap_or(0)),
         ));
+    }
+    if let Some(controller) = entity_ref.get::<Controller>() {
+        if resource != "Energy" {
+            return Err(RejectionReason::TargetFull);
+        }
+        if controller.owner.is_none() {
+            return Err(RejectionReason::NotYourRoom);
+        }
+        return Ok((position, u32::MAX));
     }
     Err(RejectionReason::ObjectNotFound)
 }
@@ -1602,6 +1682,12 @@ fn add_to_target(world: &mut World, entity: Entity, resource: &str, amount: u32)
             }
         }
     }
+    if let Some(mut controller) = world.entity_mut(entity).get_mut::<Controller>() {
+        if resource == "Energy" {
+            add_controller_progress(&mut controller, amount);
+            return Ok(());
+        }
+    }
     Err(RejectionReason::ObjectNotFound)
 }
 
@@ -1636,6 +1722,54 @@ fn take_from_target(
         return Ok(());
     }
     Err(RejectionReason::ObjectNotFound)
+}
+
+pub const DEFAULT_CONTROLLER_DOWNGRADE_TIMER: u32 = 5_000;
+
+pub fn controller_progress_total(level: u8) -> u32 {
+    match level {
+        1 => 200,
+        2 => 500,
+        3 => 1_500,
+        4 => 5_000,
+        5 => 15_000,
+        6 => 50_000,
+        7 | 8 => 150_000,
+        _ => 200,
+    }
+}
+
+fn add_controller_progress(controller: &mut Controller, amount: u32) {
+    if controller.owner.is_none() || controller.level >= 8 {
+        return;
+    }
+    controller.progress = controller.progress.saturating_add(amount);
+    while controller.level < 8 && controller.progress >= controller.progress_total {
+        controller.progress -= controller.progress_total;
+        controller.level += 1;
+        controller.progress_total = controller_progress_total(controller.level);
+    }
+}
+
+fn is_controller(world: &mut World, object_id: ObjectId) -> bool {
+    entity(object_id)
+        .ok()
+        .and_then(|entity| world.get_entity(entity).ok())
+        .is_some_and(|entity_ref| entity_ref.contains::<Controller>())
+}
+
+fn controller_owner(
+    world: &mut World,
+    object_id: ObjectId,
+) -> Result<Option<PlayerId>, RejectionReason> {
+    let entity = entity(object_id)?;
+    let entity_ref = world
+        .get_entity(entity)
+        .map_err(|_| RejectionReason::ObjectNotFound)?;
+    Ok(entity_ref
+        .get::<Controller>()
+        .ok_or(RejectionReason::NotController)?
+        .owner)
 }
 
 pub fn body_cost(body: &[BodyPart]) -> u32 {
