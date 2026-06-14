@@ -1,21 +1,22 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::components::{BodyPart, Drone, Owner, PlayerId, Position, RoomId, RoomTerrains};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingSpawn {
     pub owner: PlayerId,
     pub body: Vec<BodyPart>,
     pub position: Position,
 }
 
-#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingSpawnQueue(pub Vec<PendingSpawn>);
 
-#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
-pub struct RoomDroneCounts(pub HashMap<(RoomId, PlayerId), u32>);
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomDroneCounts(pub BTreeMap<(RoomId, PlayerId), u32>);
 
 pub fn spawn_system(
     mut commands: Commands,

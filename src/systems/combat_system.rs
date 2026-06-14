@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 
 use crate::components::{Drone, Structure};
 
@@ -9,10 +10,10 @@ use crate::components::{Drone, Structure};
 /// Using `IndexMap` keyed on Entity ensures deterministic iteration order —
 /// `Entity` is `(generation, index)` so sorted iteration is stable across
 /// identical world states.
-#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCombat {
-    pub damage: Vec<(Entity, u32)>,
-    pub heal: Vec<(Entity, u32)>,
+    pub damage: Vec<(u64, u32)>,
+    pub heal: Vec<(u64, u32)>,
 }
 
 pub fn combat_system(
@@ -24,7 +25,9 @@ pub fn combat_system(
     // Accumulate total damage per target, then apply in deterministic order.
     let mut damage_by_target: IndexMap<Entity, u32> = IndexMap::new();
     for (entity, amount) in combat.damage.drain(..) {
-        *damage_by_target.entry(entity).or_default() += amount;
+        *damage_by_target
+            .entry(Entity::from_bits(entity))
+            .or_default() += amount;
     }
     // Sort by Entity bits for determinism.
     damage_by_target.sort_keys();
@@ -40,7 +43,7 @@ pub fn combat_system(
     // --- Heal phase (second, after damage) ---
     let mut heal_by_target: IndexMap<Entity, u32> = IndexMap::new();
     for (entity, amount) in combat.heal.drain(..) {
-        *heal_by_target.entry(entity).or_default() += amount;
+        *heal_by_target.entry(Entity::from_bits(entity)).or_default() += amount;
     }
     heal_by_target.sort_keys();
 

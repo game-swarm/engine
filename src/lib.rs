@@ -247,8 +247,8 @@ mod tests {
 
         {
             let mut combat = world.app.world_mut().resource_mut::<PendingCombat>();
-            combat.damage.push((drone, 60));
-            combat.heal.push((drone, 30));
+            combat.damage.push((drone.to_bits(), 60));
+            combat.heal.push((drone.to_bits(), 30));
         }
 
         world.run_tick();

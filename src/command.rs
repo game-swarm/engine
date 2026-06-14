@@ -187,7 +187,7 @@ pub enum TickValidationError {
     SchemaViolation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRejection {
     pub command: RawCommand,
     pub rejection: RejectionReason,
