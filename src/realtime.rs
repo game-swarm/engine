@@ -353,7 +353,11 @@ mod tests {
         let replay_entities = replay_visible_entities(&trace, 1);
 
         let snapshot_ids = snapshot.entities.iter().map(entity_id).collect::<Vec<_>>();
-        let ws_ids = delta.changed_entities.iter().map(entity_id).collect::<Vec<_>>();
+        let ws_ids = delta
+            .changed_entities
+            .iter()
+            .map(entity_id)
+            .collect::<Vec<_>>();
         let replay_ids = replay_entities.iter().map(entity_id).collect::<Vec<_>>();
 
         assert!(snapshot_ids.contains(&object_id(visible_enemy)));
