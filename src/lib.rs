@@ -119,6 +119,64 @@ mod tests {
     }
 
     #[test]
+    fn room_id_parses_formats_and_checks_adjacency() {
+        let room = RoomId::from_room_name("A12N34W").unwrap();
+        assert_eq!(room.room_name(), "A12N34W");
+        assert_eq!(RoomId(0).room_name(), "A0N0E");
+        assert!(RoomId(0).is_same_or_adjacent(RoomId::from_room_name("A0N1E").unwrap()));
+        assert!(!RoomId(0).is_same_or_adjacent(RoomId::from_room_name("A0N2E").unwrap()));
+        assert!(RoomId::from_room_name("A0N0E").is_ok());
+        assert!(RoomId::from_room_name("A0E0N").is_err());
+    }
+
+    #[test]
+    fn move_crosses_room_boundary_and_wraps_coordinates() {
+        let mut world = create_world();
+        let north = RoomId::from_room_name("A1S0E").unwrap();
+        world.ensure_room(north);
+        let drone = world.spawn_drone(1, 10, 0, vec![BodyPart::Move]);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::Move {
+                object_id: object_id(drone),
+                direction: Direction::Top,
+            },
+        )
+        .unwrap();
+
+        let position = *world.app.world().get::<Position>(drone).unwrap();
+        assert_eq!(
+            position,
+            Position {
+                x: 10,
+                y: 49,
+                room: north
+            }
+        );
+    }
+
+    #[test]
+    fn move_rejects_boundary_crossing_into_missing_room() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 0, vec![BodyPart::Move]);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::Move {
+                    object_id: object_id(drone),
+                    direction: Direction::Top,
+                },
+            ),
+            Err(RejectionReason::InvalidDirection)
+        );
+    }
+    #[test]
     fn default_world_has_plain_terrain_and_source() {
         let mut world = create_world();
 
