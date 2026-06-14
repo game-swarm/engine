@@ -10,10 +10,7 @@ use crate::resources::ResourceRegistry;
 /// and the countdown resets to the baseline (from ResourceRegistry).
 /// If the source already has max capacity the countdown is held steady
 /// (no wasted ticking while full).
-pub fn regeneration_system(
-    mut sources: Query<&mut Source>,
-    registry: Res<ResourceRegistry>,
-) {
+pub fn regeneration_system(mut sources: Query<&mut Source>, registry: Res<ResourceRegistry>) {
     // Determine the baseline regeneration interval from the first source definition.
     // All sources share the same baseline; this avoids per-entity lookups.
     let baseline = registry
@@ -23,10 +20,7 @@ pub fn regeneration_system(
 
     for mut source in sources.iter_mut() {
         // Calculate max capacity from produces sums.
-        let max_capacity = source
-            .produces
-            .values()
-            .sum::<u32>();
+        let max_capacity = source.produces.values().sum::<u32>();
 
         // Already at or above max — reset timer and skip.
         if source.capacity >= max_capacity {

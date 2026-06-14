@@ -1,16 +1,25 @@
 pub mod command;
 pub mod components;
 pub mod mcp;
+pub mod realtime;
 pub mod resources;
 pub mod systems;
 pub mod tick;
+pub mod visibility;
 pub mod world;
 
 pub use command::*;
 pub use components::*;
-pub use mcp::*;
+pub use mcp::{
+    DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer,
+    StoredModule, VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
+    VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot, WorldRuleMod, WorldRules,
+    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player,
+};
+pub use realtime::*;
 pub use resources::*;
 pub use tick::*;
+pub use visibility::*;
 pub use world::{SwarmWorld, create_world};
 
 #[cfg(test)]
@@ -400,6 +409,10 @@ mod tests {
         assert_eq!(raw.player_id, 42);
         assert_eq!(raw.tick, 99);
         assert_eq!(raw.source, CommandSource::Wasm);
+        assert_eq!(raw.auth.source, CommandSource::Wasm);
+        assert_eq!(raw.auth.player_id, 42);
+        assert_eq!(raw.auth.tick_submitted, 99);
+        assert_eq!(raw.auth.tick_target, 99);
         assert_eq!(raw.sequence, 7);
     }
 
@@ -415,6 +428,10 @@ mod tests {
         assert_eq!(commands[0].player_id, 42);
         assert_eq!(commands[0].tick, 4521);
         assert_eq!(commands[0].source, CommandSource::Wasm);
+        assert_eq!(commands[0].auth.source, CommandSource::Wasm);
+        assert_eq!(commands[0].auth.player_id, 42);
+        assert_eq!(commands[0].auth.tick_submitted, 4521);
+        assert_eq!(commands[0].auth.tick_target, 4521);
         assert_eq!(commands[0].sequence, 3);
         assert_eq!(
             commands[0].action,
@@ -469,7 +486,86 @@ mod tests {
     }
 
     #[test]
-    fn source_gate_rejects_non_gameplay_sources() {
+    fn source_gate_enforces_p0_9_gameplay_source_matrix() {
+        let move_intent = CommandIntent {
+            sequence: 1,
+            action: CommandAction::Move {
+                object_id: 1,
+                direction: Direction::Top,
+            },
+        };
+        let attack_intent = CommandIntent {
+            sequence: 1,
+            action: CommandAction::Attack {
+                object_id: 1,
+                target_id: 2,
+            },
+        };
+
+        let cases = [
+            (CommandSource::Wasm, true, true),
+            (CommandSource::McpDeploy, false, false),
+            (CommandSource::McpQuery, false, false),
+            (CommandSource::Admin, true, true),
+            (CommandSource::Replay, false, false),
+            (CommandSource::TestHarness, true, true),
+            (CommandSource::Tutorial, true, false),
+            (CommandSource::Deploy, false, false),
+            (CommandSource::Rollback, false, false),
+            (CommandSource::RuleMod, false, false),
+            (CommandSource::Simulate, false, false),
+            (CommandSource::DryRun, false, false),
+        ];
+
+        for (source, allows_move, allows_attack) in cases {
+            assert_eq!(
+                source_gate(1, 1, source, move_intent.clone()).is_ok(),
+                allows_move,
+                "{source:?} move capability"
+            );
+            assert_eq!(
+                source_gate(1, 1, source, attack_intent.clone()).is_ok(),
+                allows_attack,
+                "{source:?} combat capability"
+            );
+        }
+    }
+
+    #[test]
+    fn source_capabilities_match_p0_9_matrix() {
+        let cases = [
+            (CommandSource::Wasm, (true, true, false, true, true)),
+            (CommandSource::McpDeploy, (false, false, true, false, false)),
+            (CommandSource::McpQuery, (false, false, false, true, false)),
+            (CommandSource::Admin, (true, true, true, true, true)),
+            (CommandSource::Replay, (false, false, false, true, false)),
+            (CommandSource::TestHarness, (true, true, true, true, true)),
+            (CommandSource::Tutorial, (true, false, false, true, false)),
+            (CommandSource::Deploy, (false, false, true, false, false)),
+            (CommandSource::Rollback, (true, true, true, true, false)),
+            (CommandSource::RuleMod, (true, false, false, false, false)),
+            (CommandSource::Simulate, (false, false, false, true, true)),
+            (CommandSource::DryRun, (false, false, false, false, false)),
+        ];
+
+        for (source, expected) in cases {
+            let capabilities = source_capabilities(source);
+            assert_eq!(
+                (
+                    capabilities.write_world,
+                    capabilities.global_storage,
+                    capabilities.deploy_code,
+                    capabilities.query_world,
+                    capabilities.trigger_combat,
+                ),
+                expected,
+                "{source:?} capabilities"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_command_auth_context_must_match_source_gate_envelope() {
         let intent = CommandIntent {
             sequence: 1,
             action: CommandAction::Move {
@@ -477,12 +573,39 @@ mod tests {
                 direction: Direction::Top,
             },
         };
+        let raw = source_gate(7, 11, CommandSource::Wasm, intent).unwrap();
+        let mut world = create_world();
 
         assert_eq!(
-            source_gate(1, 1, CommandSource::McpDeploy, intent.clone()),
-            Err(RejectionReason::SourceNotAllowed)
+            validate_command(
+                world.app.world_mut(),
+                RawCommand {
+                    player_id: 8,
+                    ..raw.clone()
+                }
+            ),
+            Err(RejectionReason::AuthContextInvalid)
         );
-        assert!(source_gate(1, 1, CommandSource::Wasm, intent).is_ok());
+        assert_eq!(
+            validate_command(
+                world.app.world_mut(),
+                RawCommand {
+                    tick: 12,
+                    ..raw.clone()
+                }
+            ),
+            Err(RejectionReason::AuthContextInvalid)
+        );
+        assert_eq!(
+            validate_command(
+                world.app.world_mut(),
+                RawCommand {
+                    source: CommandSource::Admin,
+                    ..raw
+                }
+            ),
+            Err(RejectionReason::AuthContextInvalid)
+        );
     }
 
     #[test]
@@ -491,6 +614,12 @@ mod tests {
             player_id: 7,
             tick: 9,
             source: CommandSource::Wasm,
+            auth: CommandAuth {
+                source: CommandSource::Wasm,
+                player_id: 7,
+                tick_submitted: 9,
+                tick_target: 9,
+            },
             sequence: 1,
             action: CommandAction::Harvest {
                 object_id: 1,

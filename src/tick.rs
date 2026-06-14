@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, thread};
 
 use bevy::prelude::*;
 
@@ -23,7 +23,7 @@ pub enum ExecutorError {
     Timeout,
 }
 
-pub trait PlayerExecutor {
+pub trait PlayerExecutor: Send {
     fn collect(&mut self, snapshot: TickSnapshot) -> Result<Vec<CommandIntent>, ExecutorError>;
 }
 
@@ -103,6 +103,220 @@ pub struct TickReport {
     pub accepted: Vec<RawCommand>,
     pub rejections: Vec<CommandRejection>,
     pub metrics: TickMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CollectedPlayerCommands {
+    player_id: PlayerId,
+    commands: Vec<RawCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerCollectResult {
+    pub player_id: PlayerId,
+    pub commands: Vec<RawCommand>,
+    pub metrics: TickMetrics,
+}
+
+pub fn seeded_player_shuffle(
+    mut players: Vec<PlayerId>,
+    tick: Tick,
+    state_checksum: u64,
+) -> Vec<PlayerId> {
+    let mut seed_input = Vec::with_capacity(16);
+    seed_input.extend_from_slice(&tick.to_le_bytes());
+    seed_input.extend_from_slice(&state_checksum.to_le_bytes());
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&seed_input);
+    let mut reader = hasher.finalize_xof();
+
+    for i in 0..players.len() {
+        let remaining = players.len() - i;
+        let mut bytes = [0_u8; 8];
+        reader.fill(&mut bytes);
+        let offset = (u64::from_le_bytes(bytes) as usize) % remaining;
+        players.swap(i, i + offset);
+    }
+
+    players
+}
+
+fn collect_player_commands<E: PlayerExecutor + ?Sized>(
+    tick: Tick,
+    player_id: PlayerId,
+    state_checksum: u64,
+    executor: &mut E,
+) -> PlayerCollectResult {
+    let snapshot = TickSnapshot {
+        tick,
+        player_id,
+        state_checksum,
+    };
+    let mut metrics = TickMetrics::default();
+    let intents = match executor.collect(snapshot) {
+        Ok(intents) => intents,
+        Err(ExecutorError::Timeout) => {
+            metrics.executor_timeouts += 1;
+            Vec::new()
+        }
+        Err(ExecutorError::Error(_)) => {
+            metrics.executor_errors += 1;
+            Vec::new()
+        }
+    };
+    let commands = intents
+        .into_iter()
+        .filter_map(|intent| source_gate(player_id, tick, CommandSource::Wasm, intent).ok())
+        .collect::<Vec<_>>();
+
+    PlayerCollectResult {
+        player_id,
+        commands,
+        metrics,
+    }
+}
+
+fn serial_execution_queue(
+    collected: Vec<CollectedPlayerCommands>,
+    tick: Tick,
+    state_checksum: u64,
+) -> Vec<RawCommand> {
+    let mut by_player = collected
+        .into_iter()
+        .map(|mut collected| {
+            collected.commands.sort_by_key(|command| command.sequence);
+            (collected.player_id, collected.commands)
+        })
+        .collect::<HashMap<_, _>>();
+    let player_order =
+        seeded_player_shuffle(by_player.keys().copied().collect(), tick, state_checksum);
+    let mut queue = Vec::new();
+    for player_id in player_order {
+        if let Some(commands) = by_player.remove(&player_id) {
+            queue.extend(commands);
+        }
+    }
+    queue
+}
+
+pub struct MultiPlayerTickScheduler<C, B> {
+    pub world: SwarmWorld,
+    pub executors: HashMap<PlayerId, Box<dyn PlayerExecutor>>,
+    pub committer: C,
+    pub broadcaster: B,
+    pub tick_counter: Tick,
+    pub metrics: TickMetrics,
+}
+
+impl<C, B> MultiPlayerTickScheduler<C, B>
+where
+    C: TickCommitter,
+    B: TickBroadcaster,
+{
+    pub fn new(
+        world: SwarmWorld,
+        executors: HashMap<PlayerId, Box<dyn PlayerExecutor>>,
+        committer: C,
+        broadcaster: B,
+    ) -> Self {
+        Self {
+            world,
+            executors,
+            committer,
+            broadcaster,
+            tick_counter: 0,
+            metrics: TickMetrics::default(),
+        }
+    }
+
+    pub fn tick(&mut self) -> TickReport {
+        let tick = self.tick_counter;
+        let state_checksum = self.world.state_checksum();
+        let mut results = thread::scope(|scope| {
+            self.executors
+                .iter_mut()
+                .map(|(&player_id, executor)| {
+                    scope.spawn(move || {
+                        collect_player_commands(tick, player_id, state_checksum, executor.as_mut())
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().expect("player executor thread panicked"))
+                .collect::<Vec<_>>()
+        });
+        results.sort_by_key(|result| result.player_id);
+
+        for result in &results {
+            self.metrics.executor_errors += result.metrics.executor_errors;
+            self.metrics.executor_timeouts += result.metrics.executor_timeouts;
+        }
+
+        let collected = results
+            .into_iter()
+            .map(|result| CollectedPlayerCommands {
+                player_id: result.player_id,
+                commands: result.commands,
+            })
+            .collect::<Vec<_>>();
+        let raw_commands = serial_execution_queue(collected, tick, state_checksum);
+
+        let world_snapshot = WorldSnapshot::capture(self.world.app.world_mut());
+        let execution = execute_deterministic(&mut self.world, raw_commands);
+        let accepted = execution.commands;
+        let rejections = execution.rejections;
+        self.metrics.accepted_commands += accepted.len() as u64;
+        self.metrics.rejected_commands += rejections.len() as u64;
+
+        let checksum = self.world.state_checksum();
+        let state = TickState::capture(self.world.app.world_mut());
+        let trace = TickTrace {
+            tick,
+            player_id: 0,
+            commands: accepted.clone(),
+            state,
+            rejections: rejections.clone(),
+            metrics: self.metrics.clone(),
+            state_checksum: checksum,
+        };
+
+        if self.committer.commit(trace).is_err() {
+            world_snapshot.restore(self.world.app.world_mut());
+            self.metrics.commit_failures += 1;
+            return TickReport {
+                tick,
+                committed: false,
+                broadcasted: false,
+                accepted,
+                rejections,
+                metrics: self.metrics.clone(),
+            };
+        }
+
+        self.tick_counter += 1;
+        let broadcast = TickBroadcast {
+            tick,
+            player_id: 0,
+            accepted: accepted.clone(),
+            rejections: rejections.clone(),
+            state_checksum: checksum,
+        };
+        let broadcasted = if self.broadcaster.broadcast(broadcast).is_ok() {
+            true
+        } else {
+            self.metrics.broadcast_failures += 1;
+            false
+        };
+
+        TickReport {
+            tick,
+            committed: true,
+            broadcasted,
+            accepted,
+            rejections,
+            metrics: self.metrics.clone(),
+        }
+    }
 }
 
 pub struct TickScheduler<E, C, B> {
@@ -515,8 +729,33 @@ mod tests {
     use crate::command::{CommandAction, Direction, object_id};
     use crate::systems::PendingSpawnQueue;
     use crate::{BodyPart, CommandIntent, Structure, StructureType, create_world};
+    use std::sync::{Arc, Barrier, Mutex};
 
     use super::*;
+
+    #[derive(Debug)]
+    struct BarrierExecutor {
+        player_id: PlayerId,
+        sequence: u32,
+        action: CommandAction,
+        barrier: Arc<Barrier>,
+        arrivals: Arc<Mutex<Vec<PlayerId>>>,
+    }
+
+    impl PlayerExecutor for BarrierExecutor {
+        fn collect(&mut self, snapshot: TickSnapshot) -> Result<Vec<CommandIntent>, ExecutorError> {
+            assert_eq!(snapshot.player_id, self.player_id);
+            self.arrivals.lock().unwrap().push(self.player_id);
+            let wait = self.barrier.wait();
+            if wait.is_leader() {
+                assert_eq!(self.arrivals.lock().unwrap().len(), 2);
+            }
+            Ok(vec![CommandIntent {
+                sequence: self.sequence,
+                action: self.action.clone(),
+            }])
+        }
+    }
 
     #[derive(Debug, Clone)]
     struct StaticExecutor {
@@ -562,6 +801,90 @@ mod tests {
                 },
             ))
             .id()
+    }
+
+    #[test]
+    fn multi_player_tick_collects_players_in_parallel_and_executes_serially() {
+        let mut world = create_world();
+        let first = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let second = world.spawn_drone(2, 10, 12, vec![BodyPart::Move]);
+        let barrier = Arc::new(Barrier::new(2));
+        let arrivals = Arc::new(Mutex::new(Vec::new()));
+        let mut executors: HashMap<PlayerId, Box<dyn PlayerExecutor>> = HashMap::new();
+        executors.insert(
+            1,
+            Box::new(BarrierExecutor {
+                player_id: 1,
+                sequence: 1,
+                action: CommandAction::Move {
+                    object_id: object_id(first),
+                    direction: Direction::Top,
+                },
+                barrier: barrier.clone(),
+                arrivals: arrivals.clone(),
+            }),
+        );
+        executors.insert(
+            2,
+            Box::new(BarrierExecutor {
+                player_id: 2,
+                sequence: 1,
+                action: CommandAction::Move {
+                    object_id: object_id(second),
+                    direction: Direction::Top,
+                },
+                barrier,
+                arrivals,
+            }),
+        );
+        let mut scheduler = MultiPlayerTickScheduler::new(
+            world,
+            executors,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(report.committed);
+        assert!(report.broadcasted);
+        assert_eq!(scheduler.tick_counter, 1);
+        assert_eq!(scheduler.committer.records.len(), 1);
+        assert_eq!(scheduler.broadcaster.broadcasts.len(), 1);
+        assert_eq!(report.accepted.len(), 2);
+        assert_eq!(report.rejections.len(), 0);
+        assert_eq!(
+            scheduler
+                .world
+                .app
+                .world()
+                .entity(first)
+                .get::<Position>()
+                .unwrap()
+                .y,
+            9
+        );
+        assert_eq!(
+            scheduler
+                .world
+                .app
+                .world()
+                .entity(second)
+                .get::<Position>()
+                .unwrap()
+                .y,
+            11
+        );
+    }
+
+    #[test]
+    fn blake3_xof_player_shuffle_is_deterministic_per_tick_and_checksum() {
+        let players = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let first = seeded_player_shuffle(players.clone(), 7, 42);
+        let second = seeded_player_shuffle(players.clone(), 7, 42);
+
+        assert_eq!(first, second);
+        assert_ne!(first, players);
     }
 
     #[test]

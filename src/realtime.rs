@@ -1,0 +1,315 @@
+use std::collections::BTreeMap;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+
+use serde::{Deserialize, Serialize};
+
+use crate::command::{ObjectId, Tick};
+use crate::components::PlayerId;
+use crate::mcp::{VisibleEntity, visible_entities_for_player};
+use crate::world::SwarmWorld;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealtimeDelta {
+    pub tick: Tick,
+    pub last_tick: Tick,
+    pub player_id: PlayerId,
+    pub changed_entities: Vec<VisibleEntity>,
+    pub removed_entities: Vec<ObjectId>,
+    pub state_checksum: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum WebSocketMessage {
+    Connected {
+        player_id: PlayerId,
+    },
+    Delta(RealtimeDelta),
+    TickGap {
+        expected_tick: Tick,
+        actual_tick: Tick,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RealtimeError {
+    Serialize(String),
+    Publish(String),
+}
+
+pub trait NatsPublisher {
+    fn publish(&mut self, subject: &str, payload: Vec<u8>) -> Result<(), RealtimeError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryNats {
+    pub messages: Vec<(String, Vec<u8>)>,
+    pub fail_next: bool,
+}
+
+impl NatsPublisher for InMemoryNats {
+    fn publish(&mut self, subject: &str, payload: Vec<u8>) -> Result<(), RealtimeError> {
+        if self.fail_next {
+            self.fail_next = false;
+            return Err(RealtimeError::Publish(
+                "in-memory NATS publish failed".to_string(),
+            ));
+        }
+
+        self.messages.push((subject.to_string(), payload));
+        Ok(())
+    }
+}
+
+pub struct NatsRealtimePublisher<P> {
+    nats: P,
+}
+
+impl<P> NatsRealtimePublisher<P>
+where
+    P: NatsPublisher,
+{
+    pub fn new(nats: P) -> Self {
+        Self { nats }
+    }
+
+    pub fn into_inner(self) -> P {
+        self.nats
+    }
+
+    pub fn publish_delta(&mut self, delta: &RealtimeDelta) -> Result<(), RealtimeError> {
+        let payload = serde_json::to_vec(delta)
+            .map_err(|error| RealtimeError::Serialize(error.to_string()))?;
+        self.nats.publish(&format!("tick.{}", delta.tick), payload)
+    }
+}
+
+#[derive(Debug)]
+pub struct WebSocketClient {
+    player_id: PlayerId,
+    last_tick: Option<Tick>,
+    receiver: Receiver<WebSocketMessage>,
+}
+
+impl WebSocketClient {
+    pub fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub fn recv(&mut self) -> Option<WebSocketMessage> {
+        match self.receiver.try_recv() {
+            Ok(message) => {
+                match &message {
+                    WebSocketMessage::Delta(delta) => self.last_tick = Some(delta.tick),
+                    WebSocketMessage::TickGap { actual_tick, .. } => {
+                        self.last_tick = Some(*actual_tick)
+                    }
+                    WebSocketMessage::Connected { .. } => {}
+                }
+                Some(message)
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RealtimeGateway {
+    clients: Vec<WebSocketConnection>,
+}
+
+#[derive(Debug)]
+struct WebSocketConnection {
+    player_id: PlayerId,
+    last_tick: Option<Tick>,
+    sender: Sender<WebSocketMessage>,
+}
+
+impl RealtimeGateway {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn connect_websocket(&mut self, player_id: PlayerId) -> WebSocketClient {
+        let (sender, receiver) = mpsc::channel();
+        let _ = sender.send(WebSocketMessage::Connected { player_id });
+        self.clients.push(WebSocketConnection {
+            player_id,
+            last_tick: None,
+            sender,
+        });
+        WebSocketClient {
+            player_id,
+            last_tick: None,
+            receiver,
+        }
+    }
+
+    pub fn receive_nats(&mut self, payload: &[u8]) -> Result<(), RealtimeError> {
+        let delta: RealtimeDelta = serde_json::from_slice(payload)
+            .map_err(|error| RealtimeError::Serialize(error.to_string()))?;
+
+        self.clients.retain_mut(|client| {
+            if client.player_id != delta.player_id {
+                return true;
+            }
+
+            if let Some(last_tick) = client.last_tick {
+                let expected_tick = last_tick + 1;
+                if delta.tick != expected_tick {
+                    if client
+                        .sender
+                        .send(WebSocketMessage::TickGap {
+                            expected_tick,
+                            actual_tick: delta.tick,
+                        })
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            client.last_tick = Some(delta.tick);
+            client
+                .sender
+                .send(WebSocketMessage::Delta(delta.clone()))
+                .is_ok()
+        });
+        Ok(())
+    }
+}
+
+pub fn compute_realtime_delta(
+    world: &mut SwarmWorld,
+    player_id: PlayerId,
+    tick: Tick,
+    last_tick: Tick,
+    before: &[VisibleEntity],
+) -> RealtimeDelta {
+    let after = visible_entities_for_player(world.app.world_mut(), player_id);
+    let before_by_id = before
+        .iter()
+        .map(|entity| (entity_id(entity), entity))
+        .collect::<BTreeMap<_, _>>();
+    let after_by_id = after
+        .iter()
+        .map(|entity| (entity_id(entity), entity))
+        .collect::<BTreeMap<_, _>>();
+
+    let changed_entities = after_by_id
+        .iter()
+        .filter_map(|(id, entity)| {
+            (before_by_id.get(id).copied() != Some(*entity)).then_some((*entity).clone())
+        })
+        .collect::<Vec<_>>();
+    let removed_entities = before_by_id
+        .keys()
+        .filter(|id| !after_by_id.contains_key(id))
+        .copied()
+        .collect::<Vec<_>>();
+
+    RealtimeDelta {
+        tick,
+        last_tick,
+        player_id,
+        changed_entities,
+        removed_entities,
+        state_checksum: world.state_checksum(),
+    }
+}
+
+pub fn entity_id(entity: &VisibleEntity) -> ObjectId {
+    match entity {
+        VisibleEntity::Drone(entity) => entity.id,
+        VisibleEntity::Structure(entity) => entity.id,
+        VisibleEntity::Source(entity) => entity.id,
+        VisibleEntity::Resource(entity) => entity.id,
+        VisibleEntity::Controller(entity) => entity.id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::command::{CommandAction, CommandIntent, CommandSource, Direction, object_id};
+    use crate::components::BodyPart;
+    use crate::mcp::visible_entities_for_player;
+    use crate::{RealtimeGateway, WebSocketMessage, create_world};
+
+    use super::{InMemoryNats, NatsRealtimePublisher, compute_realtime_delta, entity_id};
+
+    #[test]
+    fn websocket_connection_sends_connected_message() {
+        let mut gateway = RealtimeGateway::new();
+        let mut client = gateway.connect_websocket(7);
+
+        assert_eq!(client.player_id(), 7);
+        assert_eq!(
+            client.recv(),
+            Some(WebSocketMessage::Connected { player_id: 7 })
+        );
+        assert_eq!(client.recv(), None);
+    }
+
+    #[test]
+    fn nats_gateway_pushes_delta_only_changed_entities_and_detects_gap() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let before = visible_entities_for_player(world.app.world_mut(), 1);
+
+        world
+            .submit_intent(
+                1,
+                1,
+                CommandSource::Wasm,
+                CommandIntent {
+                    sequence: 1,
+                    action: CommandAction::Move {
+                        object_id: object_id(drone),
+                        direction: Direction::Bottom,
+                    },
+                },
+            )
+            .expect("move command should be accepted");
+        let delta = compute_realtime_delta(&mut world, 1, 1, 0, &before);
+
+        assert_eq!(delta.changed_entities.len(), 1);
+        assert_eq!(entity_id(&delta.changed_entities[0]), object_id(drone));
+        assert!(delta.removed_entities.is_empty());
+
+        let mut publisher = NatsRealtimePublisher::new(InMemoryNats::default());
+        publisher.publish_delta(&delta).expect("publish delta");
+        let nats = publisher.into_inner();
+        assert_eq!(nats.messages[0].0, "tick.1");
+
+        let mut gateway = RealtimeGateway::new();
+        let mut client = gateway.connect_websocket(1);
+        assert!(matches!(
+            client.recv(),
+            Some(WebSocketMessage::Connected { player_id: 1 })
+        ));
+
+        gateway
+            .receive_nats(&nats.messages[0].1)
+            .expect("gateway consumes NATS payload");
+        assert_eq!(client.recv(), Some(WebSocketMessage::Delta(delta.clone())));
+
+        let gap_delta = super::RealtimeDelta {
+            tick: 3,
+            last_tick: 2,
+            ..delta
+        };
+        let payload = serde_json::to_vec(&gap_delta).expect("serialize gap delta");
+        gateway
+            .receive_nats(&payload)
+            .expect("gateway consumes gap payload");
+        assert_eq!(
+            client.recv(),
+            Some(WebSocketMessage::TickGap {
+                expected_tick: 2,
+                actual_tick: 3,
+            })
+        );
+        assert_eq!(client.recv(), Some(WebSocketMessage::Delta(gap_delta)));
+    }
+}

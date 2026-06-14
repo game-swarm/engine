@@ -105,10 +105,20 @@ pub struct CommandIntent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CommandAuth {
+    pub source: CommandSource,
+    pub player_id: PlayerId,
+    pub tick_submitted: Tick,
+    pub tick_target: Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawCommand {
     pub player_id: PlayerId,
     pub tick: Tick,
     pub source: CommandSource,
+    pub auth: CommandAuth,
     pub sequence: u32,
     pub action: CommandAction,
 }
@@ -121,6 +131,7 @@ pub struct ValidatedCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RejectionReason {
     SourceNotAllowed,
+    AuthContextInvalid,
     ObjectNotFound,
     NotOwner,
     NotMovable,
@@ -196,7 +207,7 @@ pub fn source_gate(
     source: CommandSource,
     intent: CommandIntent,
 ) -> Result<RawCommand, RejectionReason> {
-    if !source_allows_gameplay(source) {
+    if !source_allows_action(source, &intent.action) {
         return Err(RejectionReason::SourceNotAllowed);
     }
 
@@ -204,6 +215,12 @@ pub fn source_gate(
         player_id,
         tick,
         source,
+        auth: CommandAuth {
+            source,
+            player_id,
+            tick_submitted: tick,
+            tick_target: tick,
+        },
         sequence: intent.sequence,
         action: intent.action,
     })
@@ -250,7 +267,10 @@ pub fn validate_command(
     world: &mut World,
     raw: RawCommand,
 ) -> Result<ValidatedCommand, RejectionReason> {
-    if !source_allows_gameplay(raw.source) {
+    if !raw.auth.matches_raw_envelope(&raw) {
+        return Err(RejectionReason::AuthContextInvalid);
+    }
+    if !source_allows_action(raw.source, &raw.action) {
         return Err(RejectionReason::SourceNotAllowed);
     }
 
@@ -313,7 +333,125 @@ pub fn validate_command(
 }
 
 pub fn source_allows_gameplay(source: CommandSource) -> bool {
-    matches!(source, CommandSource::Wasm | CommandSource::TestHarness)
+    matches!(
+        source,
+        CommandSource::Wasm | CommandSource::Admin | CommandSource::TestHarness
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceCapabilities {
+    pub write_world: bool,
+    pub global_storage: bool,
+    pub deploy_code: bool,
+    pub query_world: bool,
+    pub trigger_combat: bool,
+}
+
+pub fn source_capabilities(source: CommandSource) -> SourceCapabilities {
+    match source {
+        CommandSource::Wasm => SourceCapabilities {
+            write_world: true,
+            global_storage: true,
+            deploy_code: false,
+            query_world: true,
+            trigger_combat: true,
+        },
+        CommandSource::McpDeploy | CommandSource::Deploy => SourceCapabilities {
+            write_world: false,
+            global_storage: false,
+            deploy_code: true,
+            query_world: false,
+            trigger_combat: false,
+        },
+        CommandSource::McpQuery => SourceCapabilities {
+            write_world: false,
+            global_storage: false,
+            deploy_code: false,
+            query_world: true,
+            trigger_combat: false,
+        },
+        CommandSource::Admin | CommandSource::TestHarness => SourceCapabilities {
+            write_world: true,
+            global_storage: true,
+            deploy_code: true,
+            query_world: true,
+            trigger_combat: true,
+        },
+        CommandSource::Replay => SourceCapabilities {
+            write_world: false,
+            global_storage: false,
+            deploy_code: false,
+            query_world: true,
+            trigger_combat: false,
+        },
+        CommandSource::Tutorial => SourceCapabilities {
+            write_world: true,
+            global_storage: false,
+            deploy_code: false,
+            query_world: true,
+            trigger_combat: false,
+        },
+        CommandSource::Rollback => SourceCapabilities {
+            write_world: true,
+            global_storage: true,
+            deploy_code: true,
+            query_world: true,
+            trigger_combat: false,
+        },
+        CommandSource::RuleMod => SourceCapabilities {
+            write_world: true,
+            global_storage: false,
+            deploy_code: false,
+            query_world: false,
+            trigger_combat: false,
+        },
+        CommandSource::Simulate => SourceCapabilities {
+            write_world: false,
+            global_storage: false,
+            deploy_code: false,
+            query_world: true,
+            trigger_combat: true,
+        },
+        CommandSource::DryRun => SourceCapabilities {
+            write_world: false,
+            global_storage: false,
+            deploy_code: false,
+            query_world: false,
+            trigger_combat: false,
+        },
+    }
+}
+
+pub fn source_allows_action(source: CommandSource, action: &CommandAction) -> bool {
+    match source {
+        CommandSource::Wasm | CommandSource::Admin | CommandSource::TestHarness => true,
+        CommandSource::Tutorial => !action_triggers_combat(action),
+        CommandSource::McpDeploy
+        | CommandSource::McpQuery
+        | CommandSource::Replay
+        | CommandSource::Deploy
+        | CommandSource::Rollback
+        | CommandSource::RuleMod
+        | CommandSource::Simulate
+        | CommandSource::DryRun => false,
+    }
+}
+
+fn action_triggers_combat(action: &CommandAction) -> bool {
+    matches!(
+        action,
+        CommandAction::Attack { .. } | CommandAction::Heal { .. }
+    )
+}
+
+impl CommandAuth {
+    fn matches_raw_envelope(&self, raw: &RawCommand) -> bool {
+        self.source == raw.source
+            && self.player_id == raw.player_id
+            && self.tick_target == raw.tick
+            && self.tick_submitted <= self.tick_target
+    }
 }
 
 pub fn refund_for_rejection(reason: &RejectionReason, consumed_fuel: u64) -> u64 {

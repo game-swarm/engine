@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -11,6 +12,8 @@ use crate::world::SwarmWorld;
 
 const VISIBILITY_RADIUS: i32 = 5;
 const MAX_WASM_BYTES: usize = 5 * 1024 * 1024;
+const CERTIFICATE_TTL_SECONDS: u64 = 24 * 60 * 60;
+const CERTIFICATE_AUDIENCE: &str = "swarm-wasm-deploy";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpContext {
@@ -167,8 +170,45 @@ pub struct WorldRuleMod {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct OAuth2LoginParams {
+    pub provider: String,
+    pub subject: String,
+    pub access_token: String,
+    pub client_public_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerCertificatePayload {
+    pub audience: String,
+    pub player_id: PlayerId,
+    pub provider: String,
+    pub subject: String,
+    pub client_public_key: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerCertificate {
+    pub payload: PlayerCertificatePayload,
+    pub issuer_public_key: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuth2LoginResult {
+    pub player_id: PlayerId,
+    pub certificate: PlayerCertificate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeployParams {
     pub wasm_bytes: String,
+    pub certificate: PlayerCertificate,
+    pub wasm_signature: String,
     pub language: String,
     pub version_tag: String,
     pub room_id: u32,
@@ -187,6 +227,9 @@ pub struct StoredModule {
     pub player_id: PlayerId,
     pub room_id: RoomId,
     pub wasm_bytes: Vec<u8>,
+    pub wasm_hash: String,
+    pub certificate: PlayerCertificate,
+    pub wasm_signature: String,
     pub language: String,
     pub version_tag: String,
     pub deployed_at: String,
@@ -196,11 +239,27 @@ pub struct StoredModule {
 #[derive(Debug, Default)]
 pub struct McpServer {
     modules: Vec<StoredModule>,
+    issuer: CertificateIssuer,
+    now_seconds: Option<u64>,
 }
 
 impl McpServer {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            modules: Vec::new(),
+            issuer: CertificateIssuer::new(),
+            now_seconds: None,
+        }
+    }
+
+    pub fn with_issuer_for_tests(issuer: SigningKey, now_seconds: u64) -> Self {
+        Self {
+            modules: Vec::new(),
+            issuer: CertificateIssuer {
+                signing_key: issuer,
+            },
+            now_seconds: Some(now_seconds),
+        }
     }
 
     pub fn handle_json_rpc(
@@ -237,6 +296,12 @@ impl McpServer {
                 .map_err(|error| McpError::invalid_params(error.to_string())),
             "swarm_get_world_rules" => serde_json::to_value(swarm_get_world_rules())
                 .map_err(|error| McpError::invalid_params(error.to_string())),
+            "swarm_oauth2_login" => {
+                let params: OAuth2LoginParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_oauth2_login(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_deploy" => {
                 let params: DeployParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -245,6 +310,40 @@ impl McpServer {
             }
             method => Err(McpError::method_not_found(method)),
         }
+    }
+
+    pub fn swarm_oauth2_login(
+        &self,
+        params: OAuth2LoginParams,
+    ) -> Result<OAuth2LoginResult, McpError> {
+        if params.provider.trim().is_empty() {
+            return Err(McpError::invalid_params("provider is required"));
+        }
+        if params.subject.trim().is_empty() {
+            return Err(McpError::invalid_params("subject is required"));
+        }
+        if params.access_token.trim().is_empty() {
+            return Err(McpError::invalid_params("access_token is required"));
+        }
+        decode_ed25519_public_key(&params.client_public_key, "client_public_key")?;
+
+        let player_id = oauth_player_id(&params.provider, &params.subject);
+        let issued_at = self.now_seconds();
+        let payload = PlayerCertificatePayload {
+            audience: CERTIFICATE_AUDIENCE.to_string(),
+            player_id,
+            provider: params.provider,
+            subject: params.subject,
+            client_public_key: params.client_public_key,
+            issued_at,
+            expires_at: issued_at + CERTIFICATE_TTL_SECONDS,
+        };
+        let certificate = self.issuer.issue(payload)?;
+
+        Ok(OAuth2LoginResult {
+            player_id,
+            certificate,
+        })
     }
 
     pub fn swarm_deploy(
@@ -281,6 +380,13 @@ impl McpServer {
         if !wasm_bytes.starts_with(b"\0asm") {
             return Err(McpError::invalid_params("wasm_bytes must be a wasm module"));
         }
+        self.verify_certificate_for_player(&params.certificate, context.player_id)?;
+        let wasm_hash = blake3::hash(&wasm_bytes);
+        verify_wasm_signature(
+            &params.certificate,
+            wasm_hash.as_bytes(),
+            &params.wasm_signature,
+        )?;
 
         let module_id = format!(
             "mod_{}_{}_{}",
@@ -294,6 +400,9 @@ impl McpServer {
             player_id: context.player_id,
             room_id,
             wasm_bytes,
+            wasm_hash: wasm_hash.to_hex().to_string(),
+            certificate: params.certificate,
+            wasm_signature: params.wasm_signature,
             language: params.language,
             version_tag: params.version_tag,
             deployed_at: deployed_at.clone(),
@@ -309,6 +418,73 @@ impl McpServer {
 
     pub fn modules(&self) -> &[StoredModule] {
         &self.modules
+    }
+
+    fn verify_certificate_for_player(
+        &self,
+        certificate: &PlayerCertificate,
+        player_id: PlayerId,
+    ) -> Result<(), McpError> {
+        if certificate.payload.player_id != player_id {
+            return Err(McpError::invalid_params(
+                "certificate player_id does not match context",
+            ));
+        }
+        if certificate.payload.audience != CERTIFICATE_AUDIENCE {
+            return Err(McpError::invalid_params("certificate audience is invalid"));
+        }
+        if certificate.payload.expires_at <= self.now_seconds() {
+            return Err(McpError::invalid_params("certificate is expired"));
+        }
+        self.issuer.verify(certificate)
+    }
+
+    fn now_seconds(&self) -> u64 {
+        self.now_seconds.unwrap_or_else(unix_timestamp_seconds)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CertificateIssuer {
+    signing_key: SigningKey,
+}
+
+impl Default for CertificateIssuer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CertificateIssuer {
+    fn new() -> Self {
+        let mut seed = [0_u8; 32];
+        getrandom::getrandom(&mut seed).expect("OS randomness is required for certificate issuer");
+        Self {
+            signing_key: SigningKey::from_bytes(&seed),
+        }
+    }
+
+    fn issue(&self, payload: PlayerCertificatePayload) -> Result<PlayerCertificate, McpError> {
+        let payload_bytes = certificate_payload_bytes(&payload)?;
+        let signature = self.signing_key.sign(&payload_bytes);
+        Ok(PlayerCertificate {
+            payload,
+            issuer_public_key: encode_base64(self.signing_key.verifying_key().as_bytes()),
+            signature: encode_base64(&signature.to_bytes()),
+        })
+    }
+
+    fn verify(&self, certificate: &PlayerCertificate) -> Result<(), McpError> {
+        let expected_issuer = encode_base64(self.signing_key.verifying_key().as_bytes());
+        if certificate.issuer_public_key != expected_issuer {
+            return Err(McpError::invalid_params("certificate issuer is invalid"));
+        }
+        let payload_bytes = certificate_payload_bytes(&certificate.payload)?;
+        let signature = decode_ed25519_signature(&certificate.signature, "certificate signature")?;
+        self.signing_key
+            .verifying_key()
+            .verify(&payload_bytes, &signature)
+            .map_err(|_| McpError::invalid_params("certificate signature is invalid"))
     }
 }
 
@@ -386,6 +562,13 @@ pub fn swarm_get_world_rules() -> WorldRules {
 
 pub fn is_visible_to(world: &mut World, player_id: PlayerId, position: Position) -> bool {
     visible_positions(world, player_id).contains(&(position.room, position.x, position.y))
+}
+
+pub fn visible_entities_for_player(world: &mut World, player_id: PlayerId) -> Vec<VisibleEntity> {
+    let visible_positions = visible_positions(world, player_id);
+    let mut entities = visible_entities(world, player_id, &visible_positions);
+    entities.sort_by_key(entity_sort_key);
+    entities
 }
 
 fn visible_positions(world: &mut World, player_id: PlayerId) -> BTreeSet<(RoomId, i32, i32)> {
@@ -542,11 +725,91 @@ fn error_response(id: Value, error: McpError) -> JsonRpcResponse {
 }
 
 fn unix_timestamp_string() -> String {
+    unix_timestamp_seconds().to_string()
+}
+
+fn unix_timestamp_seconds() -> u64 {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
-    seconds.to_string()
+    seconds
+}
+
+fn oauth_player_id(provider: &str, subject: &str) -> PlayerId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(provider.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(subject.as_bytes());
+    let bytes = hasher.finalize();
+    let mut id_bytes = [0_u8; 4];
+    id_bytes.copy_from_slice(&bytes.as_bytes()[0..4]);
+    u32::from_le_bytes(id_bytes)
+}
+
+fn certificate_payload_bytes(payload: &PlayerCertificatePayload) -> Result<Vec<u8>, McpError> {
+    serde_json::to_vec(payload).map_err(|error| McpError::invalid_params(error.to_string()))
+}
+
+fn verify_wasm_signature(
+    certificate: &PlayerCertificate,
+    wasm_hash: &[u8],
+    wasm_signature: &str,
+) -> Result<(), McpError> {
+    let verifying_key = decode_ed25519_public_key(
+        &certificate.payload.client_public_key,
+        "certificate client_public_key",
+    )?;
+    let signature = decode_ed25519_signature(wasm_signature, "wasm_signature")?;
+    verifying_key
+        .verify(wasm_hash, &signature)
+        .map_err(|_| McpError::invalid_params("wasm_signature is invalid"))
+}
+
+fn decode_ed25519_public_key(input: &str, field: &str) -> Result<VerifyingKey, McpError> {
+    let bytes = decode_base64_with_message(input, field)?;
+    let key_bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| McpError::invalid_params(format!("{field} must be 32 bytes")))?;
+    VerifyingKey::from_bytes(&key_bytes)
+        .map_err(|_| McpError::invalid_params(format!("{field} is invalid")))
+}
+
+fn decode_ed25519_signature(input: &str, field: &str) -> Result<Signature, McpError> {
+    let bytes = decode_base64_with_message(input, field)?;
+    let signature_bytes: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| McpError::invalid_params(format!("{field} must be 64 bytes")))?;
+    Ok(Signature::from_bytes(&signature_bytes))
+}
+
+fn decode_base64_with_message(input: &str, field: &str) -> Result<Vec<u8>, McpError> {
+    decode_base64(input)
+        .map_err(|_| McpError::invalid_params(format!("{field} is not valid base64")))
+}
+
+fn encode_base64(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let a = chunk[0];
+        let b = *chunk.get(1).unwrap_or(&0);
+        let c = *chunk.get(2).unwrap_or(&0);
+
+        output.push(ALPHABET[(a >> 2) as usize] as char);
+        output.push(ALPHABET[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(ALPHABET[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(ALPHABET[(c & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
 }
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, McpError> {
@@ -622,6 +885,38 @@ mod tests {
                 cooldown: 0,
             },
         ));
+    }
+
+    fn test_signing_key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn login_with_key(server: &McpServer, client_key: &SigningKey) -> OAuth2LoginResult {
+        server
+            .swarm_oauth2_login(OAuth2LoginParams {
+                provider: "test-oauth".to_string(),
+                subject: "player@example.com".to_string(),
+                access_token: "opaque-test-token".to_string(),
+                client_public_key: encode_base64(client_key.verifying_key().as_bytes()),
+            })
+            .expect("login should issue certificate")
+    }
+
+    fn signed_deploy_params(
+        certificate: PlayerCertificate,
+        client_key: &SigningKey,
+    ) -> DeployParams {
+        let wasm_bytes = b"\0asm\x01\0\0\0";
+        let wasm_hash = blake3::hash(wasm_bytes);
+        let wasm_signature = client_key.sign(wasm_hash.as_bytes());
+        DeployParams {
+            wasm_bytes: encode_base64(wasm_bytes),
+            certificate,
+            wasm_signature: encode_base64(&wasm_signature.to_bytes()),
+            language: "rust".to_string(),
+            version_tag: "v1".to_string(),
+            room_id: 0,
+        }
     }
 
     #[test]
@@ -708,20 +1003,18 @@ mod tests {
     #[test]
     fn deploy_validates_and_stores_wasm_for_next_tick_loading() {
         let world = create_world();
-        let mut server = McpServer::new();
+        let issuer = test_signing_key(1);
+        let client_key = test_signing_key(2);
+        let mut server = McpServer::with_issuer_for_tests(issuer, 1_000);
+        let login = login_with_key(&server, &client_key);
         let result = server
             .swarm_deploy(
                 &world,
                 McpContext {
-                    player_id: 42,
+                    player_id: login.player_id,
                     tick: 11,
                 },
-                DeployParams {
-                    wasm_bytes: "AGFzbQEAAAA=".to_string(),
-                    language: "rust".to_string(),
-                    version_tag: "v1".to_string(),
-                    room_id: 0,
-                },
+                signed_deploy_params(login.certificate.clone(), &client_key),
             )
             .expect("deploy should succeed");
 
@@ -730,16 +1023,26 @@ mod tests {
         assert_eq!(server.modules()[0].module_id, result.module_id);
         assert_eq!(server.modules()[0].load_after_tick, 12);
         assert_eq!(server.modules()[0].wasm_bytes, b"\0asm\x01\0\0\0");
+        assert_eq!(server.modules()[0].certificate, login.certificate);
+        assert!(!server.modules()[0].wasm_signature.is_empty());
+        assert_eq!(
+            server.modules()[0].wasm_hash,
+            blake3::hash(b"\0asm\x01\0\0\0").to_hex().to_string()
+        );
     }
 
     #[test]
     fn deploy_rejects_invalid_base64_and_non_wasm() {
         let world = create_world();
-        let mut server = McpServer::new();
+        let issuer = test_signing_key(3);
+        let client_key = test_signing_key(4);
+        let mut server = McpServer::with_issuer_for_tests(issuer, 1_000);
+        let login = login_with_key(&server, &client_key);
         let context = McpContext {
-            player_id: 1,
+            player_id: login.player_id,
             tick: 0,
         };
+        let valid_params = signed_deploy_params(login.certificate, &client_key);
 
         assert!(
             server
@@ -748,9 +1051,7 @@ mod tests {
                     context.clone(),
                     DeployParams {
                         wasm_bytes: "not base64".to_string(),
-                        language: "rust".to_string(),
-                        version_tag: "v1".to_string(),
-                        room_id: 0,
+                        ..valid_params.clone()
                     },
                 )
                 .is_err()
@@ -762,13 +1063,92 @@ mod tests {
                     context,
                     DeployParams {
                         wasm_bytes: "YWJj".to_string(),
-                        language: "rust".to_string(),
-                        version_tag: "v1".to_string(),
-                        room_id: 0,
+                        ..valid_params
                     },
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn oauth2_login_issues_ed25519_certificate_with_24h_expiry() {
+        let issuer = test_signing_key(5);
+        let client_key = test_signing_key(6);
+        let server = McpServer::with_issuer_for_tests(issuer, 10_000);
+
+        let login = login_with_key(&server, &client_key);
+
+        assert_eq!(login.certificate.payload.issued_at, 10_000);
+        assert_eq!(
+            login.certificate.payload.expires_at,
+            10_000 + CERTIFICATE_TTL_SECONDS
+        );
+        assert_eq!(login.certificate.payload.player_id, login.player_id);
+        assert_eq!(login.certificate.payload.audience, CERTIFICATE_AUDIENCE);
+        server
+            .verify_certificate_for_player(&login.certificate, login.player_id)
+            .expect("issued certificate should verify");
+    }
+
+    #[test]
+    fn deploy_rejects_invalid_wasm_signature() {
+        let world = create_world();
+        let issuer = test_signing_key(7);
+        let client_key = test_signing_key(8);
+        let wrong_key = test_signing_key(9);
+        let mut server = McpServer::with_issuer_for_tests(issuer, 20_000);
+        let login = login_with_key(&server, &client_key);
+        let mut params = signed_deploy_params(login.certificate, &wrong_key);
+
+        let error = server
+            .swarm_deploy(
+                &world,
+                McpContext {
+                    player_id: login.player_id,
+                    tick: 1,
+                },
+                params.clone(),
+            )
+            .expect_err("wrong key must not verify against certificate public key");
+        assert_eq!(error.message, "wasm_signature is invalid");
+
+        params.wasm_signature = "not base64".to_string();
+        assert!(
+            server
+                .swarm_deploy(
+                    &world,
+                    McpContext {
+                        player_id: login.player_id,
+                        tick: 1,
+                    },
+                    params,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn deploy_rejects_expired_certificate() {
+        let world = create_world();
+        let issuer = test_signing_key(10);
+        let client_key = test_signing_key(11);
+        let issuing_server = McpServer::with_issuer_for_tests(issuer.clone(), 30_000);
+        let login = login_with_key(&issuing_server, &client_key);
+        let mut verifying_server =
+            McpServer::with_issuer_for_tests(issuer, 30_000 + CERTIFICATE_TTL_SECONDS);
+
+        let error = verifying_server
+            .swarm_deploy(
+                &world,
+                McpContext {
+                    player_id: login.player_id,
+                    tick: 1,
+                },
+                signed_deploy_params(login.certificate, &client_key),
+            )
+            .expect_err("expired certificate should be rejected");
+
+        assert_eq!(error.message, "certificate is expired");
     }
 
     #[test]
