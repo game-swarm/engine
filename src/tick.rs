@@ -33,7 +33,7 @@ pub enum CommitError {
 }
 
 pub trait TickCommitter {
-    fn commit(&mut self, record: TickCommitRecord) -> Result<(), CommitError>;
+    fn commit(&mut self, trace: TickTrace) -> Result<(), CommitError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,13 +46,23 @@ pub trait TickBroadcaster {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TickCommitRecord {
+pub struct TickTrace {
     pub tick: Tick,
     pub player_id: PlayerId,
-    pub accepted: Vec<RawCommand>,
+    pub commands: Vec<RawCommand>,
+    pub state: TickState,
     pub rejections: Vec<CommandRejection>,
+    pub metrics: TickMetrics,
     pub state_checksum: u64,
 }
+
+impl TickTrace {
+    pub fn accepted(&self) -> &[RawCommand] {
+        &self.commands
+    }
+}
+
+pub type TickCommitRecord = TickTrace;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickBroadcast {
@@ -71,6 +81,18 @@ pub struct TickMetrics {
     pub rejected_commands: u64,
     pub commit_failures: u64,
     pub broadcast_failures: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayError {
+    MissingPreviousState {
+        tick: Tick,
+    },
+    StateMismatch {
+        tick: Tick,
+        expected_checksum: u64,
+        actual_checksum: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,39 +167,25 @@ where
             .collect::<Vec<_>>();
         raw_commands.sort_by_key(|command| command.sequence);
 
-        let mut accepted = Vec::new();
-        let mut rejections = Vec::new();
-        for raw in raw_commands {
-            match validate_command(self.world.app.world_mut(), raw.clone()) {
-                Ok(validated) => match apply_command(self.world.app.world_mut(), validated) {
-                    Ok(()) => accepted.push(raw),
-                    Err(rejection) => rejections.push(CommandRejection::new(
-                        raw,
-                        rejection,
-                        serde_json::Value::Null,
-                    )),
-                },
-                Err(rejection) => rejections.push(CommandRejection::new(
-                    raw,
-                    rejection,
-                    serde_json::Value::Null,
-                )),
-            }
-        }
+        let execution = execute_deterministic(&mut self.world, raw_commands);
+        let accepted = execution.commands;
+        let rejections = execution.rejections;
         self.metrics.accepted_commands += accepted.len() as u64;
         self.metrics.rejected_commands += rejections.len() as u64;
 
-        self.world.run_tick();
         let checksum = self.world.state_checksum();
-        let commit = TickCommitRecord {
+        let state = TickState::capture(self.world.app.world_mut());
+        let trace = TickTrace {
             tick,
             player_id: self.player_id,
-            accepted: accepted.clone(),
+            commands: accepted.clone(),
+            state,
             rejections: rejections.clone(),
+            metrics: self.metrics.clone(),
             state_checksum: checksum,
         };
 
-        if self.committer.commit(commit).is_err() {
+        if self.committer.commit(trace).is_err() {
             world_snapshot.restore(self.world.app.world_mut());
             self.metrics.commit_failures += 1;
             return TickReport {
@@ -218,20 +226,90 @@ where
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryTickCommitter {
-    pub records: Vec<TickCommitRecord>,
+    pub records: Vec<TickTrace>,
     pub fail_next: bool,
 }
 
 impl TickCommitter for InMemoryTickCommitter {
-    fn commit(&mut self, record: TickCommitRecord) -> Result<(), CommitError> {
+    fn commit(&mut self, trace: TickTrace) -> Result<(), CommitError> {
         if self.fail_next {
             self.fail_next = false;
             return Err(CommitError::Failed("in-memory commit failed".to_string()));
         }
 
-        self.records.push(record);
+        self.records.push(trace);
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeterministicExecution {
+    pub commands: Vec<RawCommand>,
+    pub rejections: Vec<CommandRejection>,
+    pub state: TickState,
+    pub state_checksum: u64,
+}
+
+pub fn execute_deterministic(
+    world: &mut SwarmWorld,
+    commands: Vec<RawCommand>,
+) -> DeterministicExecution {
+    let mut accepted = Vec::new();
+    let mut rejections = Vec::new();
+    for raw in commands {
+        match validate_command(world.app.world_mut(), raw.clone()) {
+            Ok(validated) => match apply_command(world.app.world_mut(), validated) {
+                Ok(()) => accepted.push(raw),
+                Err(rejection) => rejections.push(CommandRejection::new(
+                    raw,
+                    rejection,
+                    serde_json::Value::Null,
+                )),
+            },
+            Err(rejection) => rejections.push(CommandRejection::new(
+                raw,
+                rejection,
+                serde_json::Value::Null,
+            )),
+        }
+    }
+
+    world.run_tick();
+    let state_checksum = world.state_checksum();
+    let state = TickState::capture(world.app.world_mut());
+    DeterministicExecution {
+        commands: accepted,
+        rejections,
+        state,
+        state_checksum,
+    }
+}
+
+pub fn replay_tick(
+    previous_state: &TickState,
+    trace: &TickTrace,
+) -> Result<TickState, ReplayError> {
+    let mut world = crate::world::create_world();
+    previous_state.clone().restore(world.app.world_mut());
+    let replayed = execute_deterministic(&mut world, trace.commands.clone());
+    if replayed.state != trace.state {
+        return Err(ReplayError::StateMismatch {
+            tick: trace.tick,
+            expected_checksum: trace.state_checksum,
+            actual_checksum: replayed.state_checksum,
+        });
+    }
+
+    Ok(replayed.state)
+}
+
+pub fn replay(initial_state: &TickState, traces: &[TickTrace]) -> Result<TickState, ReplayError> {
+    let mut state = initial_state.clone();
+    for trace in traces {
+        state = replay_tick(&state, trace)?;
+    }
+
+    Ok(state)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -254,8 +332,10 @@ impl TickBroadcaster for InMemoryTickBroadcaster {
     }
 }
 
-#[derive(Debug, Clone)]
-struct WorldSnapshot {
+pub type TickState = WorldSnapshot;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldSnapshot {
     entities: HashMap<Entity, EntitySnapshot>,
     terrains: RoomTerrains,
     pending_spawns: PendingSpawnQueue,
@@ -263,7 +343,7 @@ struct WorldSnapshot {
     pending_combat: PendingCombat,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct EntitySnapshot {
     position: Option<Position>,
     owner: Option<Owner>,
@@ -277,7 +357,7 @@ struct EntitySnapshot {
 }
 
 impl WorldSnapshot {
-    fn capture(world: &mut World) -> Self {
+    pub fn capture(world: &mut World) -> Self {
         let mut query = world.query::<(
             Entity,
             Option<&Position>,
@@ -330,7 +410,7 @@ impl WorldSnapshot {
         }
     }
 
-    fn restore(self, world: &mut World) {
+    pub fn restore(self, world: &mut World) {
         let current_entities = Self::tracked_entities(world);
         for entity in current_entities {
             if !self.entities.contains_key(&entity) {
@@ -558,8 +638,154 @@ mod tests {
             assert!(report.committed);
             assert!(report.accepted.is_empty());
             assert!(report.rejections.is_empty());
-            assert_eq!(scheduler.committer.records[0].accepted.len(), 0);
+            assert_eq!(scheduler.committer.records[0].commands.len(), 0);
         }
+    }
+
+    #[test]
+    fn tick_trace_records_commands_state_rejections_and_metrics() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let executor = StaticExecutor {
+            result: Ok(vec![
+                CommandIntent {
+                    sequence: 1,
+                    action: CommandAction::Move {
+                        object_id: object_id(drone),
+                        direction: Direction::Top,
+                    },
+                },
+                CommandIntent {
+                    sequence: 2,
+                    action: CommandAction::Harvest {
+                        object_id: object_id(drone),
+                        target_id: 0,
+                        resource: None,
+                    },
+                },
+            ]),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+        let trace = &scheduler.committer.records[0];
+
+        assert!(report.committed);
+        assert_eq!(trace.commands.len(), 1);
+        assert_eq!(trace.rejections.len(), 1);
+        assert_eq!(trace.metrics.accepted_commands, 1);
+        assert_eq!(trace.metrics.rejected_commands, 1);
+        assert_eq!(
+            trace.state,
+            TickState::capture(scheduler.world.app.world_mut())
+        );
+        assert_eq!(trace.state_checksum, scheduler.world.state_checksum());
+    }
+
+    #[test]
+    fn replay_tick_succeeds_from_previous_state_and_recorded_commands() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let previous_state = TickState::capture(world.app.world_mut());
+        let executor = StaticExecutor {
+            result: Ok(vec![CommandIntent {
+                sequence: 1,
+                action: CommandAction::Move {
+                    object_id: object_id(drone),
+                    direction: Direction::Top,
+                },
+            }]),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        scheduler.tick();
+        let trace = scheduler.committer.records[0].clone();
+
+        let replayed = replay_tick(&previous_state, &trace).expect("replay should match trace");
+
+        assert_eq!(replayed, trace.state);
+    }
+
+    #[test]
+    fn replay_tick_fails_when_recorded_state_does_not_match() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let previous_state = TickState::capture(world.app.world_mut());
+        let executor = StaticExecutor {
+            result: Ok(vec![CommandIntent {
+                sequence: 1,
+                action: CommandAction::Move {
+                    object_id: object_id(drone),
+                    direction: Direction::Top,
+                },
+            }]),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        scheduler.tick();
+        let mut trace = scheduler.committer.records[0].clone();
+        trace.state = previous_state.clone();
+
+        let error =
+            replay_tick(&previous_state, &trace).expect_err("replay should detect mismatch");
+
+        assert!(matches!(error, ReplayError::StateMismatch { tick: 0, .. }));
+    }
+
+    #[test]
+    fn replay_replays_multiple_traces_in_order() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let initial_state = TickState::capture(world.app.world_mut());
+        let executor = StaticExecutor {
+            result: Ok(vec![CommandIntent {
+                sequence: 1,
+                action: CommandAction::Move {
+                    object_id: object_id(drone),
+                    direction: Direction::Top,
+                },
+            }]),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        scheduler.tick();
+        scheduler.executor.result = Ok(vec![CommandIntent {
+            sequence: 1,
+            action: CommandAction::Move {
+                object_id: object_id(drone),
+                direction: Direction::Top,
+            },
+        }]);
+        scheduler.tick();
+
+        let replayed = replay(&initial_state, &scheduler.committer.records)
+            .expect("trace sequence should replay");
+
+        assert_eq!(replayed, scheduler.committer.records[1].state);
     }
 
     #[test]

@@ -4,17 +4,17 @@ use bevy::prelude::*;
 
 use crate::components::{BodyPart, Drone, Owner, PlayerId, Position, RoomId, RoomTerrains};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSpawn {
     pub owner: PlayerId,
     pub body: Vec<BodyPart>,
     pub position: Position,
 }
 
-#[derive(Resource, Debug, Clone, Default)]
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
 pub struct PendingSpawnQueue(pub Vec<PendingSpawn>);
 
-#[derive(Resource, Debug, Clone, Default)]
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoomDroneCounts(pub HashMap<(RoomId, PlayerId), u32>);
 
 pub fn spawn_system(
