@@ -4,17 +4,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bevy::prelude::*;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::command::{
-    object_id, validate_command, CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand,
-    RejectionReason, Tick,
+    CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand, RejectionReason, Tick,
+    object_id, validate_command,
 };
 use crate::components::*;
-use crate::hot_cache::{read_through_dragonfly, SnapshotKey};
+use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
 use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use crate::visibility::{
-    is_position_visible_to, visible_entity_ids, visible_positions, VISIBILITY_RADIUS,
+    VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
 };
 use crate::world::SwarmWorld;
 
@@ -393,6 +393,12 @@ pub struct DocsResult {
     pub sections: Vec<DocsSection>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceReadParams {
+    pub uri: String,
+}
+
 #[derive(Debug, Default)]
 pub struct McpServer {
     modules: Vec<StoredModule>,
@@ -486,6 +492,12 @@ impl McpServer {
                 };
                 serde_json::to_value(swarm_get_docs(params))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "resources/list" => Ok(docs_resources_list()),
+            "resources/read" => {
+                let params: ResourceReadParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                docs_resources_read(params)
             }
             "swarm_oauth2_callback" => {
                 let params: OAuth2CallbackParams = serde_json::from_value(params)
@@ -977,16 +989,282 @@ pub fn swarm_dry_run_commands(
 }
 
 pub fn swarm_get_docs(params: DocsParams) -> DocsResult {
-    let topic = params.topic;
+    let topic = normalize_docs_topic(&params.topic);
     let sections = match topic.as_str() {
         "mcp" => vec![
-            DocsSection { title: "MCP contract".to_string(), body: "MCP exposes read/debug/deploy tools, but never direct gameplay actions such as move, attack, build, or spawn.".to_string() },
-            DocsSection { title: "Eight phase-2 tools".to_string(), body: mcp_tool_infos().iter().map(|tool| format!("{}: {}", tool.name, tool.description)).collect::<Vec<_>>().join("\n") },
+            docs_section(
+                "MCP contract",
+                "MCP exposes read/debug/deploy tools, but never direct gameplay actions such as move, attack, build, or spawn. MCP is not a game controller; world state changes only through validated WASM CommandIntent output.",
+            ),
+            docs_section(
+                "Eight phase-2 tools",
+                &mcp_tool_infos()
+                    .iter()
+                    .map(|tool| format!("{}: {}", tool.name, tool.description))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            docs_section("Resource tree", &docs_resource_uris().join("\n")),
         ],
-        "commands" => vec![DocsSection { title: "WASM CommandIntent actions".to_string(), body: wasm_action_names().join(", ") }],
-        _ => vec![DocsSection { title: "Swarm docs".to_string(), body: "Topics: mcp, commands. See P0-3 MCP security contract and P0-8 Game API IDL.".to_string() }],
+        "commands" => vec![docs_section(
+            "WASM CommandIntent actions",
+            &wasm_action_names().join(", "),
+        )],
+        "api" => api_reference_sections(),
+        "basic-agent" => basic_agent_tutorial_sections(),
+        _ => vec![
+            docs_section(
+                "Swarm docs",
+                "Topics: mcp, commands, api, basic-agent. MCP resources include swarm://docs/tutorials/basic-agent for a complete 30-minute AI player deployment tutorial.",
+            ),
+            docs_section("Resource URIs", &docs_resource_uris().join("\n")),
+        ],
     };
     DocsResult { topic, sections }
+}
+
+fn normalize_docs_topic(topic: &str) -> String {
+    match topic.trim() {
+        "swarm://docs/tutorials/basic-agent"
+        | "swarm://docs/tutorial/quickstart.md"
+        | "tutorials/basic-agent"
+        | "tutorial/basic-agent"
+        | "basic-agent" => "basic-agent".to_string(),
+        "swarm://docs/api/reference.md" | "api/reference" | "api" => "api".to_string(),
+        "swarm://docs/security/mcp-contract.md" | "security/mcp-contract" | "mcp" => {
+            "mcp".to_string()
+        }
+        "swarm://docs/api/commands" | "commands" => "commands".to_string(),
+        "" | "swarm://docs/README.md" | "overview" => "overview".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn docs_section(title: &str, body: &str) -> DocsSection {
+    DocsSection {
+        title: title.to_string(),
+        body: body.to_string(),
+    }
+}
+
+fn docs_resources_list() -> Value {
+    json!({
+        "resources": docs_resource_uris().into_iter().map(|uri| json!({
+            "uri": uri,
+            "name": docs_resource_name(uri),
+            "description": docs_resource_description(uri),
+            "mimeType": "text/markdown",
+        })).collect::<Vec<_>>()
+    })
+}
+
+fn docs_resources_read(params: ResourceReadParams) -> Result<Value, McpError> {
+    let text = docs_markdown_for_uri(&params.uri).ok_or_else(|| {
+        McpError::invalid_params(format!("unknown docs resource uri: {}", params.uri))
+    })?;
+    Ok(json!({"contents": [{"uri": params.uri, "mimeType": "text/markdown", "text": text}]}))
+}
+
+fn docs_resource_uris() -> Vec<&'static str> {
+    vec![
+        "swarm://docs/README.md",
+        "swarm://docs/tutorial/quickstart.md",
+        "swarm://docs/tutorials/basic-agent",
+        "swarm://docs/api/reference.md",
+        "swarm://docs/api/commands/Move.md",
+        "swarm://docs/api/commands/Harvest.md",
+        "swarm://docs/api/commands/Transfer.md",
+        "swarm://docs/api/commands/Spawn.md",
+        "swarm://docs/api/commands/Build.md",
+        "swarm://docs/security/mcp-contract.md",
+    ]
+}
+
+fn docs_resource_name(uri: &str) -> &'static str {
+    match uri {
+        "swarm://docs/tutorials/basic-agent" => "Basic AI agent tutorial",
+        "swarm://docs/api/reference.md" => "Game API reference",
+        "swarm://docs/security/mcp-contract.md" => "MCP security contract",
+        "swarm://docs/tutorial/quickstart.md" => "Quickstart",
+        "swarm://docs/README.md" => "Documentation index",
+        "swarm://docs/api/commands/Move.md" => "Move command",
+        "swarm://docs/api/commands/Harvest.md" => "Harvest command",
+        "swarm://docs/api/commands/Transfer.md" => "Transfer command",
+        "swarm://docs/api/commands/Spawn.md" => "Spawn command",
+        "swarm://docs/api/commands/Build.md" => "Build command",
+        _ => "Swarm docs resource",
+    }
+}
+
+fn docs_resource_description(uri: &str) -> &'static str {
+    match uri {
+        "swarm://docs/tutorials/basic-agent" => {
+            "Complete zero-to-deploy tutorial for an AI player agent, designed for completion within 30 minutes."
+        }
+        "swarm://docs/api/reference.md" => {
+            "CommandIntent and MCP API reference derived from the Phase 0 IDL contract."
+        }
+        "swarm://docs/security/mcp-contract.md" => {
+            "Safety boundary: MCP read/debug/deploy tools only; no direct gameplay actions."
+        }
+        _ => "Markdown documentation for Swarm AI agents.",
+    }
+}
+
+fn docs_markdown_for_uri(uri: &str) -> Option<String> {
+    match uri {
+        "swarm://docs/README.md" => Some(docs_sections_markdown(&swarm_get_docs(DocsParams {
+            topic: "overview".to_string(),
+        }))),
+        "swarm://docs/tutorial/quickstart.md" | "swarm://docs/tutorials/basic-agent" => {
+            Some(docs_sections_markdown(&swarm_get_docs(DocsParams {
+                topic: "basic-agent".to_string(),
+            })))
+        }
+        "swarm://docs/api/reference.md" => {
+            Some(docs_sections_markdown(&swarm_get_docs(DocsParams {
+                topic: "api".to_string(),
+            })))
+        }
+        "swarm://docs/security/mcp-contract.md" => {
+            Some(docs_sections_markdown(&swarm_get_docs(DocsParams {
+                topic: "mcp".to_string(),
+            })))
+        }
+        "swarm://docs/api/commands/Move.md" => Some(command_doc(
+            "Move",
+            "params: object_id: ObjectId, direction: Direction",
+            "validator: exists, owner, drone, fatigue, body_part(Move), passable, !spawning",
+            "MCP cannot call Move directly. Emit this as a WASM CommandIntent action from tick().",
+        )),
+        "swarm://docs/api/commands/Harvest.md" => Some(command_doc(
+            "Harvest",
+            "params: object_id: ObjectId, target_id: ObjectId, resource: ResourceName?",
+            "validator: exists, owner, drone, body_part(Work,Carry), carry_space, is_source, source_not_empty, in_range(1)",
+            "MCP cannot call Harvest directly. Use swarm_dry_run_commands, then return CommandIntent from WASM.",
+        )),
+        "swarm://docs/api/commands/Transfer.md" => Some(command_doc(
+            "Transfer",
+            "params: object_id: ObjectId, target_id: ObjectId, resource: ResourceName, amount: ResourceAmount",
+            "validator: exists, owner, drone, body_part(Carry), has_resource, target_has_space, in_range(1)",
+            "MCP cannot call Transfer directly. Use validated WASM CommandIntent output.",
+        )),
+        "swarm://docs/api/commands/Spawn.md" => Some(command_doc(
+            "Spawn",
+            "params: spawn_id: ObjectId, body: BodyPart[]",
+            "validator: owned spawn, body size, resource cost, room capacity, cooldown",
+            "MCP cannot call Spawn directly; deploy a WASM agent that emits a Spawn CommandIntent.",
+        )),
+        "swarm://docs/api/commands/Build.md" => Some(command_doc(
+            "Build",
+            "params: object_id: ObjectId, x: i32, y: i32, structure: StructureType",
+            "validator: exists, owner, drone, body_part(Work,Carry), in_your_room, tile_empty, plain_terrain, in_range(3)",
+            "MCP cannot call Build directly; use dry-run feedback before deploying build logic.",
+        )),
+        _ => None,
+    }
+}
+
+fn docs_sections_markdown(docs: &DocsResult) -> String {
+    docs.sections
+        .iter()
+        .map(|section| format!("# {}\n\n{}", section.title, section.body))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn command_doc(name: &str, params: &str, validator: &str, note: &str) -> String {
+    format!(
+        "# {name}\n\n{params}\n\n{validator}\n\nSecurity note: {note}\n\nCommandIntent shape: {{\"sequence\":1,\"action\":{{\"type\":\"{name}\"}}}}"
+    )
+}
+
+fn api_reference_sections() -> Vec<DocsSection> {
+    vec![
+        docs_section(
+            "Game API IDL v1.0.0",
+            "P0-8 Game API IDL is the source of truth for WASM host functions, CommandIntent, validators, SDK types, MCP schemas, and docs resources. CommandIntent has exactly sequence + action; RawCommand envelope fields are injected by the server Source Gate.",
+        ),
+        docs_section(
+            "CommandIntent",
+            "WASM tick() returns CommandIntent objects, not RawCommand envelopes. Each object has only sequence and action. The server injects player_id, source, auth, and tick before validation.",
+        ),
+        docs_section(
+            "Move",
+            "object_id: ObjectId\ndirection: Direction\nvalidator: exists, owner, drone, fatigue, body_part(Move), passable, !spawning",
+        ),
+        docs_section(
+            "Harvest",
+            "object_id: ObjectId\ntarget_id: ObjectId\nresource: ResourceName?\nvalidator: exists, owner, drone, body_part(Work,Carry), carry_space, is_source, source_not_empty, in_range(1)",
+        ),
+        docs_section(
+            "Transfer",
+            "object_id: ObjectId\ntarget_id: ObjectId\nresource: ResourceName\namount: ResourceAmount\nvalidator: exists, owner, drone, body_part(Carry), has_resource, target_has_space, in_range(1)",
+        ),
+        docs_section(
+            "Deploy security",
+            "Deploy requires OAuth-derived player certificate, Ed25519 wasm_signature over the BLAKE3 wasm hash, max module size enforcement, and next-tick loading.",
+        ),
+    ]
+}
+
+fn basic_agent_tutorial_sections() -> Vec<DocsSection> {
+    vec![
+        docs_section(
+            "Goal",
+            "Build and deploy a safe AI player from zero within 30 minutes. The loop is LEARN -> DECIDE -> ACT -> UNDERSTAND: read MCP resources, inspect visible state, dry-run CommandIntent candidates, deploy a signed WASM module, then use explanations and P0-6 feedback to improve.",
+        ),
+        docs_section(
+            "30 minute checklist",
+            "0-5 min: call resources/list and read swarm://docs/tutorials/basic-agent plus api/reference. 5-10 min: call swarm_oauth2_login and swarm_get_available_actions. 10-15 min: inspect swarm_get_snapshot and swarm_profile. 15-20 min: dry-run Spawn/Harvest/Transfer/Build CommandIntent JSON. 20-25 min: compile/sign a WASM module. 25-30 min: call swarm_deploy and confirm pending_next_tick, then inspect swarm_explain_last_tick.",
+        ),
+        docs_section(
+            "1. Learn the contract",
+            r#"MCP is not a game controller. There are no direct gameplay MCP tools. world state changes only through WASM sandbox execution. Use swarm_get_docs({topic:"api"}) or swarm://docs/api/reference.md for P0-8 CommandIntent details."#,
+        ),
+        docs_section(
+            "2. Authenticate for deploy",
+            "Generate an Ed25519 client key, then call swarm_oauth2_login with provider, subject, access_token, and client_public_key. The result is a 24h player certificate for audience swarm-wasm-deploy. Keep the private key local; sign the BLAKE3 hash of the wasm bytes for swarm_deploy.",
+        ),
+        docs_section(
+            "3. Inspect state",
+            "Call swarm_get_snapshot for visible tiles, entities, local_storage, global_storage, and pending_global_transfers. Call swarm_profile for owned visible drones/structures and deployed module count. The snapshot respects fog_of_war/player_view visibility.",
+        ),
+        docs_section(
+            "4. Plan CommandIntent output",
+            r#"WASM tick() returns CommandIntent objects, not RawCommand envelopes. Each object has only sequence and action. The server injects player_id, source, and tick. Example Spawn: {"sequence":1,"action":{"type":"Spawn","spawn_id":42,"body":["Move","Work","Carry"]}}."#,
+        ),
+        docs_section(
+            "5. Starter harvesting loop",
+            r#"For each tick: choose the nearest visible source or resource drop; if a Work+Carry drone is adjacent and has free capacity, emit {"action":{"type":"Harvest","object_id":100,"target_id":200,"resource":"Energy"}}. If carrying Energy and adjacent to spawn/storage, emit {"action":{"type":"Transfer","object_id":100,"target_id":42,"resource":"Energy","amount":50}}."#,
+        ),
+        docs_section(
+            "6. Dry-run before deploy",
+            "Call swarm_dry_run_commands with candidate CommandIntent objects. Dry-run validates commands and returns accepted/rejection without applying a tick. Treat rejection reasons as compiler errors for behavior: ObjectNotFound, NotOwner, OutOfRange, InsufficientResource, TargetFull, SpawnOnCooldown, or RoomDroneCapReached.",
+        ),
+        docs_section(
+            "7. Deploy",
+            "Compile a small WASM module exporting tick(). Base64 encode bytes, compute BLAKE3 hash, sign the hash with the Ed25519 client key in the certificate, and call swarm_deploy with language, version_tag, room_id, wasm_bytes, certificate, and wasm_signature. Success returns status pending_next_tick.",
+        ),
+        docs_section(
+            "8. Understand feedback (P0-6)",
+            "After the next tick, call swarm_explain_last_tick. Use accepted/rejected command counts, rejection detail, resource deltas, timeout/fuel signals, onboarding achievements, and replay tools to close the P0-6 MVP feedback loop.",
+        ),
+        docs_section(
+            "Security invariants",
+            "Direct gameplay MCP tools remain disabled: no swarm_move, swarm_harvest, swarm_build, swarm_spawn, swarm_attack, swarm_heal, swarm_transfer, or swarm_withdraw. MCP may read, dry-run, explain, authenticate, and deploy only. All real actions come from validated WASM CommandIntent output.",
+        ),
+        docs_section(
+            "Minimal JSON examples",
+            r#"Spawn: {"sequence":1,"action":{"type":"Spawn","spawn_id":42,"body":["Move","Work","Carry"]}}
+Harvest: {"sequence":2,"action":{"type":"Harvest","object_id":100,"target_id":200,"resource":"Energy"}}
+Transfer: {"sequence":3,"action":{"type":"Transfer","object_id":100,"target_id":42,"resource":"Energy","amount":50}}"#,
+        ),
+        docs_section(
+            "Done criteria",
+            "The agent has read docs, authenticated, inspected visible state, dry-run at least one command, deployed a signed WASM module, observed pending_next_tick, then used swarm_explain_last_tick or replay feedback to improve its next tick. This is the intended 30-minute zero-to-deploy path.",
+        ),
+    ]
 }
 
 fn default_docs_topic() -> String {
@@ -1418,7 +1696,7 @@ fn base64_value(byte: u8) -> Result<u8, McpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{create_world, Structure, StructureType};
+    use crate::{Structure, StructureType, create_world};
 
     fn spawn_structure(world: &mut SwarmWorld, owner: Option<PlayerId>, x: i32, y: i32) {
         world.app.world_mut().spawn((
@@ -1487,14 +1765,18 @@ mod tests {
         );
 
         assert_eq!(snapshot.tick, 7);
-        assert!(snapshot
-            .visible_tiles
-            .iter()
-            .any(|tile| tile.x == 10 && tile.y == 10));
-        assert!(!snapshot
-            .visible_tiles
-            .iter()
-            .any(|tile| tile.x == 40 && tile.y == 40));
+        assert!(
+            snapshot
+                .visible_tiles
+                .iter()
+                .any(|tile| tile.x == 10 && tile.y == 10)
+        );
+        assert!(
+            !snapshot
+                .visible_tiles
+                .iter()
+                .any(|tile| tile.x == 40 && tile.y == 40)
+        );
         assert!(snapshot.visible_tiles.len() < (DEFAULT_ROOM_SIZE * DEFAULT_ROOM_SIZE) as usize);
 
         let drone_positions = snapshot
@@ -1563,14 +1845,18 @@ mod tests {
                 room: RoomId(0)
             }
         ));
-        assert!(snapshot
-            .visible_tiles
-            .iter()
-            .any(|tile| tile.x == 35 && tile.y == 35));
-        assert!(!snapshot
-            .visible_tiles
-            .iter()
-            .any(|tile| tile.x == 0 && tile.y == 0));
+        assert!(
+            snapshot
+                .visible_tiles
+                .iter()
+                .any(|tile| tile.x == 35 && tile.y == 35)
+        );
+        assert!(
+            !snapshot
+                .visible_tiles
+                .iter()
+                .any(|tile| tile.x == 0 && tile.y == 0)
+        );
     }
 
     #[test]
@@ -1617,26 +1903,30 @@ mod tests {
         };
         let valid_params = signed_deploy_params(login.certificate, &client_key);
 
-        assert!(server
-            .swarm_deploy(
-                &world,
-                context.clone(),
-                DeployParams {
-                    wasm_bytes: "not base64".to_string(),
-                    ..valid_params.clone()
-                },
-            )
-            .is_err());
-        assert!(server
-            .swarm_deploy(
-                &world,
-                context,
-                DeployParams {
-                    wasm_bytes: "YWJj".to_string(),
-                    ..valid_params
-                },
-            )
-            .is_err());
+        assert!(
+            server
+                .swarm_deploy(
+                    &world,
+                    context.clone(),
+                    DeployParams {
+                        wasm_bytes: "not base64".to_string(),
+                        ..valid_params.clone()
+                    },
+                )
+                .is_err()
+        );
+        assert!(
+            server
+                .swarm_deploy(
+                    &world,
+                    context,
+                    DeployParams {
+                        wasm_bytes: "YWJj".to_string(),
+                        ..valid_params
+                    },
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1682,16 +1972,18 @@ mod tests {
         assert_eq!(error.message, "wasm_signature is invalid");
 
         params.wasm_signature = "not base64".to_string();
-        assert!(server
-            .swarm_deploy(
-                &world,
-                McpContext {
-                    player_id: login.player_id,
-                    tick: 1,
-                },
-                params,
-            )
-            .is_err());
+        assert!(
+            server
+                .swarm_deploy(
+                    &world,
+                    McpContext {
+                        player_id: login.player_id,
+                        tick: 1,
+                    },
+                    params,
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1728,6 +2020,110 @@ mod tests {
             module.id == "mcp_security_contract"
                 && module.config.get("mcp_direct_gameplay_actions") == Some(&json!(false))
         }));
+    }
+
+    #[test]
+    fn docs_expose_complete_basic_agent_tutorial_resource() {
+        let docs = swarm_get_docs(DocsParams {
+            topic: "swarm://docs/tutorials/basic-agent".to_string(),
+        });
+        let text = docs_sections_markdown(&docs);
+        assert_eq!(docs.topic, "basic-agent");
+        assert!(docs.sections.len() >= 10);
+        assert!(text.contains("LEARN -> DECIDE -> ACT -> UNDERSTAND"));
+        assert!(text.contains("swarm_get_snapshot"));
+        assert!(text.contains("swarm_get_available_actions"));
+        assert!(text.contains("swarm_dry_run_commands"));
+        assert!(text.contains("swarm_oauth2_login"));
+        assert!(text.contains("swarm_deploy"));
+        assert!(text.contains("pending_next_tick"));
+        assert!(text.contains("BLAKE3"));
+        assert!(text.contains("Ed25519"));
+        assert!(text.contains("P0-6"));
+        assert!(text.contains("P0-8"));
+    }
+
+    #[test]
+    fn mcp_lists_and_reads_basic_agent_docs_resource() {
+        let mut world = create_world();
+        let mut server = McpServer::new();
+        let context = McpContext {
+            player_id: 1,
+            tick: 0,
+        };
+        let list = server.handle_json_rpc(
+            &mut world,
+            context.clone(),
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!("docs-list"),
+                method: "resources/list".to_string(),
+                params: Value::Null,
+            },
+        );
+        assert!(list.error.is_none(), "{:?}", list.error);
+        let list_result = list.result.expect("resources/list result");
+        let resources = list_result["resources"]
+            .as_array()
+            .expect("resources array");
+        assert!(
+            resources
+                .iter()
+                .any(|resource| resource["uri"].as_str()
+                    == Some("swarm://docs/tutorials/basic-agent"))
+        );
+        let read = server.handle_json_rpc(
+            &mut world,
+            context,
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!("basic-agent-doc"),
+                method: "resources/read".to_string(),
+                params: json!({ "uri": "swarm://docs/tutorials/basic-agent" }),
+            },
+        );
+        assert!(read.error.is_none(), "{:?}", read.error);
+        let read_result = read.result.expect("resources/read result");
+        let contents = read_result["contents"].as_array().expect("contents array");
+        let text = contents[0]["text"].as_str().expect("markdown text");
+        assert!(text.contains("# Goal"));
+        assert!(text.contains("30 minute checklist"));
+        assert!(text.contains("WASM sandbox execution"));
+    }
+
+    #[test]
+    fn basic_agent_tutorial_preserves_mcp_security_and_idl_contracts() {
+        let docs = swarm_get_docs(DocsParams {
+            topic: "basic-agent".to_string(),
+        });
+        let text = docs_sections_markdown(&docs);
+        assert!(text.contains("MCP is not a game controller"));
+        assert!(text.contains("Direct gameplay MCP tools remain disabled"));
+        assert!(
+            text.contains("WASM tick() returns CommandIntent objects, not RawCommand envelopes")
+        );
+        assert!(text.contains("Each object has only sequence and action"));
+        assert!(text.contains("The server injects player_id, source, and tick"));
+        assert!(text.contains(r#""action":{"type":"Spawn""#));
+        assert!(text.contains(r#""action":{"type":"Harvest""#));
+        assert!(text.contains(r#""action":{"type":"Transfer""#));
+    }
+
+    #[test]
+    fn docs_api_reference_and_command_resource_cover_p0_8() {
+        let docs = swarm_get_docs(DocsParams {
+            topic: "api".to_string(),
+        });
+        let text = docs_sections_markdown(&docs);
+        assert!(text.contains("Game API IDL v1.0.0"));
+        assert!(text.contains("CommandIntent"));
+        assert!(text.contains("object_id: ObjectId"));
+        assert!(text.contains("validator: exists, owner, drone"));
+        let command_text =
+            docs_markdown_for_uri("swarm://docs/api/commands/Move.md").expect("Move command docs");
+        assert!(command_text.contains("# Move"));
+        assert!(command_text.contains("direction: Direction"));
+        assert!(command_text.contains("MCP cannot call Move directly"));
     }
 
     #[test]
@@ -1835,12 +2231,14 @@ mod tests {
             })
             .unwrap();
         assert!(revoked.revoked_session && revoked.revoked_certificate);
-        assert!(server
-            .swarm_token_refresh(TokenRefreshParams {
-                refresh_token: login.session.refresh_token,
-                client_public_key: encode_base64(client_key.verifying_key().as_bytes())
-            })
-            .is_err());
+        assert!(
+            server
+                .swarm_token_refresh(TokenRefreshParams {
+                    refresh_token: login.session.refresh_token,
+                    client_public_key: encode_base64(client_key.verifying_key().as_bytes())
+                })
+                .is_err()
+        );
         let error = server
             .swarm_deploy(
                 &world,
