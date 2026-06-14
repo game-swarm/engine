@@ -494,8 +494,9 @@ impl RefundAccumulator {
 }
 
 impl CommandRejection {
-    pub fn new(command: RawCommand, rejection: RejectionReason, detail: serde_json::Value) -> Self {
+    pub fn new(command: RawCommand, rejection: RejectionReason) -> Self {
         let tick = command.tick;
+        let detail = rejection_detail(&command, &rejection);
         Self {
             command,
             rejection,
@@ -503,6 +504,133 @@ impl CommandRejection {
             tick,
         }
     }
+}
+
+fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_json::Value {
+    let action = match &command.action {
+        CommandAction::Move { .. } => "Move",
+        CommandAction::Harvest { .. } => "Harvest",
+        CommandAction::Transfer { .. } => "Transfer",
+        CommandAction::Withdraw { .. } => "Withdraw",
+        CommandAction::Attack { .. } => "Attack",
+        CommandAction::Heal { .. } => "Heal",
+        CommandAction::SpawnDrone { .. } => "Spawn",
+        CommandAction::Build { .. } => "Build",
+    };
+
+    match rejection {
+        RejectionReason::SourceEmpty => match &command.action {
+            CommandAction::Harvest {
+                object_id,
+                target_id,
+                resource,
+            } => serde_json::json!({
+                "reason": "SourceEmpty",
+                "action": action,
+                "conflict": "first_come_first_served",
+                "refund_policy": { "fuel_percent": 50 },
+                "object_id": object_id,
+                "target_id": target_id,
+                "resource": resource.as_deref().unwrap_or("Energy"),
+            }),
+            _ => default_rejection_detail(command, rejection, action),
+        },
+        RejectionReason::TileOccupied => match &command.action {
+            CommandAction::Build {
+                object_id,
+                x,
+                y,
+                structure,
+            } => serde_json::json!({
+                "reason": "TileOccupied",
+                "action": action,
+                "conflict": "first_come_first_served",
+                "refund_policy": { "fuel_percent": 50 },
+                "object_id": object_id,
+                "position": { "x": x, "y": y },
+                "structure": structure,
+            }),
+            CommandAction::SpawnDrone { spawn_id, body } => serde_json::json!({
+                "reason": "TileOccupied",
+                "action": action,
+                "conflict": "first_come_first_served",
+                "refund_policy": { "fuel_percent": 50 },
+                "spawn_id": spawn_id,
+                "body_parts": body,
+            }),
+            _ => default_rejection_detail(command, rejection, action),
+        },
+        RejectionReason::TargetFull => match &command.action {
+            CommandAction::Transfer {
+                object_id,
+                target_id,
+                resource,
+                amount,
+            } => serde_json::json!({
+                "reason": "TargetFull",
+                "action": action,
+                "conflict": "first_come_first_served",
+                "refund_policy": { "fuel_percent": 50 },
+                "object_id": object_id,
+                "target_id": target_id,
+                "resource": resource,
+                "amount": amount,
+            }),
+            CommandAction::Withdraw {
+                object_id,
+                target_id,
+                resource,
+                amount,
+            } => serde_json::json!({
+                "reason": "TargetFull",
+                "action": action,
+                "conflict": "first_come_first_served",
+                "refund_policy": { "fuel_percent": 50 },
+                "object_id": object_id,
+                "target_id": target_id,
+                "resource": resource,
+                "amount": amount,
+            }),
+            _ => default_rejection_detail(command, rejection, action),
+        },
+        RejectionReason::OutOfRange { distance, max } => serde_json::json!({
+            "reason": "OutOfRange",
+            "action": action,
+            "distance": distance,
+            "max": max,
+        }),
+        RejectionReason::MissingBodyPart { part } => serde_json::json!({
+            "reason": "MissingBodyPart",
+            "action": action,
+            "part": part,
+        }),
+        RejectionReason::InsufficientResource {
+            resource,
+            required,
+            available,
+        } => serde_json::json!({
+            "reason": "InsufficientResource",
+            "action": action,
+            "resource": resource,
+            "required": required,
+            "available": available,
+        }),
+        _ => default_rejection_detail(command, rejection, action),
+    }
+}
+
+fn default_rejection_detail(
+    command: &RawCommand,
+    rejection: &RejectionReason,
+    action: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "reason": rejection,
+        "action": action,
+        "player_id": command.player_id,
+        "sequence": command.sequence,
+        "source": command.source,
+    })
 }
 
 fn json_depth(value: &serde_json::Value) -> usize {

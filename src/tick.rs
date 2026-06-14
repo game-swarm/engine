@@ -3,8 +3,8 @@ use std::{collections::HashMap, thread};
 use bevy::prelude::*;
 
 use crate::command::{
-    CommandIntent, CommandRejection, CommandSource, RawCommand, Tick, apply_command, source_gate,
-    validate_command,
+    CommandIntent, CommandRejection, CommandSource, RawCommand, RefundAccumulator, Tick,
+    apply_command, source_gate, validate_command,
 };
 use crate::components::*;
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
@@ -460,9 +460,12 @@ impl TickCommitter for InMemoryTickCommitter {
 pub struct DeterministicExecution {
     pub commands: Vec<RawCommand>,
     pub rejections: Vec<CommandRejection>,
+    pub next_tick_fuel_credit: u64,
     pub state: TickState,
     pub state_checksum: u64,
 }
+
+const COMMAND_REJECTION_FUEL_COST: u64 = 10_000;
 
 pub fn execute_deterministic(
     world: &mut SwarmWorld,
@@ -470,21 +473,20 @@ pub fn execute_deterministic(
 ) -> DeterministicExecution {
     let mut accepted = Vec::new();
     let mut rejections = Vec::new();
+    let mut refunds = RefundAccumulator::default();
     for raw in commands {
         match validate_command(world.app.world_mut(), raw.clone()) {
             Ok(validated) => match apply_command(world.app.world_mut(), validated) {
                 Ok(()) => accepted.push(raw),
-                Err(rejection) => rejections.push(CommandRejection::new(
-                    raw,
-                    rejection,
-                    serde_json::Value::Null,
-                )),
+                Err(rejection) => {
+                    refunds.record_rejection(&raw, &rejection, COMMAND_REJECTION_FUEL_COST);
+                    rejections.push(CommandRejection::new(raw, rejection));
+                }
             },
-            Err(rejection) => rejections.push(CommandRejection::new(
-                raw,
-                rejection,
-                serde_json::Value::Null,
-            )),
+            Err(rejection) => {
+                refunds.record_rejection(&raw, &rejection, COMMAND_REJECTION_FUEL_COST);
+                rejections.push(CommandRejection::new(raw, rejection));
+            }
         }
     }
 
@@ -494,6 +496,7 @@ pub fn execute_deterministic(
     DeterministicExecution {
         commands: accepted,
         rejections,
+        next_tick_fuel_credit: refunds.next_tick_fuel_credit,
         state,
         state_checksum,
     }
@@ -735,7 +738,7 @@ fn restore_component<T: Component>(entity: &mut EntityWorldMut<'_>, component: O
 
 #[cfg(test)]
 mod tests {
-    use crate::command::{CommandAction, Direction, object_id};
+    use crate::command::{CommandAction, Direction, RejectionReason, object_id};
     use crate::systems::PendingSpawnQueue;
     use crate::{BodyPart, CommandIntent, Structure, StructureType, create_world};
     use std::sync::{Arc, Barrier, Mutex};
@@ -1245,5 +1248,170 @@ mod tests {
             0
         );
         assert_eq!(drone_count(&mut scheduler.world), 1);
+    }
+
+    #[test]
+    fn fcfs_harvest_conflict_rejects_source_empty_with_refund_and_structured_detail() {
+        let mut world = create_world();
+        let first = world.spawn_drone(1, 24, 25, vec![BodyPart::Work, BodyPart::Carry]);
+        let second = world.spawn_drone(2, 26, 25, vec![BodyPart::Work, BodyPart::Carry]);
+        let source = world
+            .app
+            .world_mut()
+            .query::<(Entity, &mut Source)>()
+            .iter_mut(world.app.world_mut())
+            .map(|(entity, mut source)| {
+                source.capacity = 2;
+                source.ticks_to_regeneration = 300;
+                entity
+            })
+            .next()
+            .expect("expected source");
+        let source_id = object_id(source);
+
+        let execution = execute_deterministic(
+            &mut world,
+            vec![
+                raw_harvest(1, 1, 1, object_id(first), source_id),
+                raw_harvest(2, 2, 1, object_id(second), source_id),
+            ],
+        );
+
+        assert_eq!(execution.commands.len(), 1);
+        assert_eq!(execution.rejections.len(), 1);
+        assert_eq!(execution.next_tick_fuel_credit, 5_000);
+        let rejection = &execution.rejections[0];
+        assert_eq!(rejection.rejection, RejectionReason::SourceEmpty);
+        assert_eq!(rejection.detail["reason"], "SourceEmpty");
+        assert_eq!(rejection.detail["conflict"], "first_come_first_served");
+        assert_eq!(rejection.detail["refund_policy"]["fuel_percent"], 50);
+        assert_eq!(rejection.detail["target_id"], source_id);
+    }
+
+    #[test]
+    fn fcfs_build_conflict_rejects_tile_occupied_with_refund_and_structured_detail() {
+        let mut world = create_world();
+        let first = world.spawn_drone(1, 10, 10, vec![BodyPart::Work]);
+        let second = world.spawn_drone(2, 12, 10, vec![BodyPart::Work]);
+
+        let execution = execute_deterministic(
+            &mut world,
+            vec![
+                raw_build(1, 1, 1, object_id(first), 11, 10),
+                raw_build(2, 2, 1, object_id(second), 11, 10),
+            ],
+        );
+
+        assert_eq!(execution.commands.len(), 1);
+        assert_eq!(execution.rejections.len(), 1);
+        assert_eq!(execution.next_tick_fuel_credit, 5_000);
+        let rejection = &execution.rejections[0];
+        assert_eq!(rejection.rejection, RejectionReason::TileOccupied);
+        assert_eq!(rejection.detail["reason"], "TileOccupied");
+        assert_eq!(rejection.detail["conflict"], "first_come_first_served");
+        assert_eq!(rejection.detail["refund_policy"]["fuel_percent"], 50);
+        assert_eq!(rejection.detail["position"]["x"], 11);
+        assert_eq!(rejection.detail["position"]["y"], 10);
+    }
+
+    #[test]
+    fn fcfs_transfer_conflict_rejects_target_full_with_refund_and_structured_detail() {
+        let mut world = create_world();
+        let first = world.spawn_drone(1, 10, 10, vec![BodyPart::Carry]);
+        let second = world.spawn_drone(2, 12, 10, vec![BodyPart::Carry]);
+        let target = world.spawn_drone(3, 11, 10, vec![BodyPart::Carry]);
+        for drone in [first, second] {
+            world
+                .app
+                .world_mut()
+                .entity_mut(drone)
+                .get_mut::<Drone>()
+                .unwrap()
+                .carry
+                .insert("Energy".to_string(), 40);
+        }
+
+        let execution = execute_deterministic(
+            &mut world,
+            vec![
+                raw_transfer(1, 1, 1, object_id(first), object_id(target), 30),
+                raw_transfer(2, 2, 1, object_id(second), object_id(target), 30),
+            ],
+        );
+
+        assert_eq!(execution.commands.len(), 1);
+        assert_eq!(execution.rejections.len(), 1);
+        assert_eq!(execution.next_tick_fuel_credit, 5_000);
+        let rejection = &execution.rejections[0];
+        assert_eq!(rejection.rejection, RejectionReason::TargetFull);
+        assert_eq!(rejection.detail["reason"], "TargetFull");
+        assert_eq!(rejection.detail["conflict"], "first_come_first_served");
+        assert_eq!(rejection.detail["refund_policy"]["fuel_percent"], 50);
+        assert_eq!(rejection.detail["target_id"], object_id(target));
+        assert_eq!(rejection.detail["amount"], 30);
+    }
+
+    fn raw_harvest(
+        player_id: PlayerId,
+        sequence: u32,
+        tick: Tick,
+        object_id: u64,
+        target_id: u64,
+    ) -> RawCommand {
+        RawCommand {
+            player_id,
+            tick,
+            source: CommandSource::Wasm,
+            sequence,
+            action: CommandAction::Harvest {
+                object_id,
+                target_id,
+                resource: None,
+            },
+        }
+    }
+
+    fn raw_build(
+        player_id: PlayerId,
+        sequence: u32,
+        tick: Tick,
+        object_id: u64,
+        x: i32,
+        y: i32,
+    ) -> RawCommand {
+        RawCommand {
+            player_id,
+            tick,
+            source: CommandSource::Wasm,
+            sequence,
+            action: CommandAction::Build {
+                object_id,
+                x,
+                y,
+                structure: StructureType::Extension,
+            },
+        }
+    }
+
+    fn raw_transfer(
+        player_id: PlayerId,
+        sequence: u32,
+        tick: Tick,
+        object_id: u64,
+        target_id: u64,
+        amount: u32,
+    ) -> RawCommand {
+        RawCommand {
+            player_id,
+            tick,
+            source: CommandSource::Wasm,
+            sequence,
+            action: CommandAction::Transfer {
+                object_id,
+                target_id,
+                resource: "Energy".to_string(),
+                amount,
+            },
+        }
     }
 }
