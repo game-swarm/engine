@@ -1,4 +1,4 @@
-use std::{collections::HashMap, thread};
+use std::{collections::HashMap, thread, time::Instant};
 
 use bevy::prelude::*;
 
@@ -81,7 +81,139 @@ pub struct TickMetrics {
     pub rejected_commands: u64,
     pub commit_failures: u64,
     pub broadcast_failures: u64,
+    pub total_commands: u64,
+    pub refund_events: u64,
+    pub refund_fuel: u64,
+    pub duration_ms: u64,
 }
+
+impl TickMetrics {
+    pub fn record_execution(&mut self, accepted_count: usize, rejections: &[CommandRejection]) {
+        self.accepted_commands += accepted_count as u64;
+        self.rejected_commands += rejections.len() as u64;
+        self.total_commands += (accepted_count + rejections.len()) as u64;
+        for rejection in rejections {
+            if let Some(refund_fuel) = rejection
+                .detail
+                .get("refund_fuel")
+                .and_then(serde_json::Value::as_u64)
+            {
+                if refund_fuel > 0 {
+                    self.refund_events += 1;
+                    self.refund_fuel += refund_fuel;
+                }
+            }
+        }
+    }
+
+    pub fn command_rejection_rate(&self) -> f64 {
+        ratio(self.rejected_commands, self.total_commands)
+    }
+
+    pub fn refund_abuse_rate(&self) -> f64 {
+        ratio(self.refund_events, self.total_commands)
+    }
+}
+
+fn ratio(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClickHouseTickMetricsRow {
+    pub tick: Tick,
+    pub player_id: PlayerId,
+    pub collect_timeout_rate: f64,
+    pub tick_abandon_rate: f64,
+    pub refund_abuse_rate: f64,
+    pub command_rejection_rate: f64,
+    pub tick_duration_p99: u64,
+    pub accepted_commands: u64,
+    pub rejected_commands: u64,
+    pub refund_events: u64,
+    pub refund_fuel: u64,
+}
+
+impl ClickHouseTickMetricsRow {
+    pub fn from_trace(trace: &TickTrace, recent_durations_ms: &[u64]) -> Self {
+        let mut durations = recent_durations_ms.to_vec();
+        if durations.is_empty() && trace.metrics.duration_ms > 0 {
+            durations.push(trace.metrics.duration_ms);
+        }
+        Self {
+            tick: trace.tick,
+            player_id: trace.player_id,
+            collect_timeout_rate: trace.metrics.executor_timeouts.min(1) as f64,
+            tick_abandon_rate: trace.metrics.commit_failures.min(1) as f64,
+            refund_abuse_rate: trace.metrics.refund_abuse_rate(),
+            command_rejection_rate: trace.metrics.command_rejection_rate(),
+            tick_duration_p99: percentile_nearest_rank(&mut durations, 99),
+            accepted_commands: trace.metrics.accepted_commands,
+            rejected_commands: trace.metrics.rejected_commands,
+            refund_events: trace.metrics.refund_events,
+            refund_fuel: trace.metrics.refund_fuel,
+        }
+    }
+
+    pub fn insert_sql_values(&self) -> String {
+        format!(
+            "({}, {}, {:.6}, {:.6}, {:.6}, {:.6}, {}, {}, {}, {}, {})",
+            self.tick,
+            self.player_id,
+            self.collect_timeout_rate,
+            self.tick_abandon_rate,
+            self.refund_abuse_rate,
+            self.command_rejection_rate,
+            self.tick_duration_p99,
+            self.accepted_commands,
+            self.rejected_commands,
+            self.refund_events,
+            self.refund_fuel
+        )
+    }
+}
+
+fn percentile_nearest_rank(values: &mut [u64], percentile: u64) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let rank = ((percentile as usize * values.len()).div_ceil(100)).max(1);
+    values[rank.saturating_sub(1).min(values.len() - 1)]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TickMetricsWriteError {
+    Failed(String),
+}
+
+pub trait TickMetricsWriter {
+    fn write_tick_metrics(
+        &mut self,
+        row: ClickHouseTickMetricsRow,
+    ) -> Result<(), TickMetricsWriteError>;
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InMemoryClickHouseTickMetricsWriter {
+    pub rows: Vec<ClickHouseTickMetricsRow>,
+}
+
+impl TickMetricsWriter for InMemoryClickHouseTickMetricsWriter {
+    fn write_tick_metrics(
+        &mut self,
+        row: ClickHouseTickMetricsRow,
+    ) -> Result<(), TickMetricsWriteError> {
+        self.rows.push(row);
+        Ok(())
+    }
+}
+
+pub const CLICKHOUSE_TICK_METRICS_INSERT: &str = "INSERT INTO tick_metrics (tick, player_id, collect_timeout_rate, tick_abandon_rate, refund_abuse_rate, command_rejection_rate, tick_duration_p99, accepted_commands, rejected_commands, refund_events, refund_fuel) VALUES";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayError {
@@ -231,6 +363,7 @@ where
 
     pub fn tick(&mut self) -> TickReport {
         let tick = self.tick_counter;
+        let started_at = Instant::now();
         let state_checksum = self.world.state_checksum();
         let mut results = thread::scope(|scope| {
             self.executors
@@ -265,8 +398,7 @@ where
         let execution = execute_deterministic(&mut self.world, raw_commands);
         let accepted = execution.commands;
         let rejections = execution.rejections;
-        self.metrics.accepted_commands += accepted.len() as u64;
-        self.metrics.rejected_commands += rejections.len() as u64;
+        self.metrics.record_execution(accepted.len(), &rejections);
 
         let checksum = self.world.state_checksum();
         let state = TickState::capture(self.world.app.world_mut());
@@ -307,6 +439,8 @@ where
             self.metrics.broadcast_failures += 1;
             false
         };
+
+        self.metrics.duration_ms = started_at.elapsed().as_millis() as u64;
 
         TickReport {
             tick,
@@ -355,6 +489,7 @@ where
 
     pub fn tick(&mut self) -> TickReport {
         let tick = self.tick_counter;
+        let started_at = Instant::now();
         let snapshot = TickSnapshot {
             tick,
             player_id: self.player_id,
@@ -384,8 +519,7 @@ where
         let execution = execute_deterministic(&mut self.world, raw_commands);
         let accepted = execution.commands;
         let rejections = execution.rejections;
-        self.metrics.accepted_commands += accepted.len() as u64;
-        self.metrics.rejected_commands += rejections.len() as u64;
+        self.metrics.record_execution(accepted.len(), &rejections);
 
         let checksum = self.world.state_checksum();
         let state = TickState::capture(self.world.app.world_mut());
@@ -426,6 +560,8 @@ where
             self.metrics.broadcast_failures += 1;
             false
         };
+
+        self.metrics.duration_ms = started_at.elapsed().as_millis() as u64;
 
         TickReport {
             tick,
@@ -479,13 +615,15 @@ pub fn execute_deterministic(
             Ok(validated) => match apply_command(world.app.world_mut(), validated) {
                 Ok(()) => accepted.push(raw),
                 Err(rejection) => {
-                    refunds.record_rejection(&raw, &rejection, COMMAND_REJECTION_FUEL_COST);
-                    rejections.push(CommandRejection::new(raw, rejection));
+                    let refund_fuel =
+                        refunds.record_rejection(&raw, &rejection, COMMAND_REJECTION_FUEL_COST);
+                    rejections.push(command_rejection_with_refund(raw, rejection, refund_fuel));
                 }
             },
             Err(rejection) => {
-                refunds.record_rejection(&raw, &rejection, COMMAND_REJECTION_FUEL_COST);
-                rejections.push(CommandRejection::new(raw, rejection));
+                let refund_fuel =
+                    refunds.record_rejection(&raw, &rejection, COMMAND_REJECTION_FUEL_COST);
+                rejections.push(command_rejection_with_refund(raw, rejection, refund_fuel));
             }
         }
     }
@@ -500,6 +638,18 @@ pub fn execute_deterministic(
         state,
         state_checksum,
     }
+}
+
+fn command_rejection_with_refund(
+    raw: RawCommand,
+    rejection: crate::command::RejectionReason,
+    refund_fuel: u64,
+) -> CommandRejection {
+    let mut command_rejection = CommandRejection::new(raw, rejection);
+    if let Some(detail) = command_rejection.detail.as_object_mut() {
+        detail.insert("refund_fuel".to_string(), serde_json::json!(refund_fuel));
+    }
+    command_rejection
 }
 
 pub fn replay_tick(
@@ -897,6 +1047,103 @@ mod tests {
 
         assert_eq!(first, second);
         assert_ne!(first, players);
+    }
+
+    #[test]
+    fn tick_metrics_row_calculates_clickhouse_health_metrics_from_trace() {
+        let metrics = TickMetrics {
+            executor_timeouts: 1,
+            accepted_commands: 3,
+            rejected_commands: 1,
+            total_commands: 4,
+            refund_events: 1,
+            refund_fuel: 5_000,
+            duration_ms: 42,
+            ..Default::default()
+        };
+        let trace = TickTrace {
+            tick: 7,
+            player_id: 11,
+            commands: Vec::new(),
+            state: TickState::capture(create_world().app.world_mut()),
+            rejections: Vec::new(),
+            metrics,
+            state_checksum: 99,
+        };
+
+        let row = ClickHouseTickMetricsRow::from_trace(&trace, &[10, 20, 30, 40]);
+
+        assert_eq!(row.tick, 7);
+        assert_eq!(row.player_id, 11);
+        assert_eq!(row.collect_timeout_rate, 1.0);
+        assert_eq!(row.refund_abuse_rate, 0.25);
+        assert_eq!(row.command_rejection_rate, 0.25);
+        assert_eq!(row.tick_duration_p99, 40);
+        assert_eq!(row.refund_fuel, 5_000);
+    }
+
+    #[test]
+    fn clickhouse_tick_metrics_memory_writer_stores_rows_and_renders_insert_values() {
+        let mut writer = InMemoryClickHouseTickMetricsWriter::default();
+        let row = ClickHouseTickMetricsRow {
+            tick: 2,
+            player_id: 3,
+            collect_timeout_rate: 0.0,
+            tick_abandon_rate: 0.0,
+            refund_abuse_rate: 0.5,
+            command_rejection_rate: 0.25,
+            tick_duration_p99: 2_801,
+            accepted_commands: 3,
+            rejected_commands: 1,
+            refund_events: 2,
+            refund_fuel: 10_000,
+        };
+
+        writer.write_tick_metrics(row.clone()).unwrap();
+
+        assert_eq!(writer.rows, vec![row.clone()]);
+        assert!(CLICKHOUSE_TICK_METRICS_INSERT.contains("refund_abuse_rate"));
+        assert!(CLICKHOUSE_TICK_METRICS_INSERT.contains("command_rejection_rate"));
+        assert!(CLICKHOUSE_TICK_METRICS_INSERT.contains("tick_duration_p99"));
+        assert_eq!(
+            row.insert_sql_values(),
+            "(2, 3, 0.000000, 0.000000, 0.500000, 0.250000, 2801, 3, 1, 2, 10000)"
+        );
+    }
+
+    #[test]
+    fn execution_metrics_include_refund_fuel_for_refund_abuse_rate() {
+        let mut world = create_world();
+        let first = world.spawn_drone(1, 24, 25, vec![BodyPart::Work, BodyPart::Carry]);
+        let second = world.spawn_drone(2, 26, 25, vec![BodyPart::Work, BodyPart::Carry]);
+        let source = world
+            .app
+            .world_mut()
+            .query::<(Entity, &mut Source)>()
+            .iter_mut(world.app.world_mut())
+            .map(|(entity, mut source)| {
+                source.capacity = 2;
+                entity
+            })
+            .next()
+            .expect("expected source");
+
+        let execution = execute_deterministic(
+            &mut world,
+            vec![
+                raw_harvest(1, 1, 1, object_id(first), object_id(source)),
+                raw_harvest(2, 2, 1, object_id(second), object_id(source)),
+            ],
+        );
+        let mut metrics = TickMetrics::default();
+        metrics.record_execution(execution.commands.len(), &execution.rejections);
+
+        assert_eq!(metrics.total_commands, 2);
+        assert_eq!(metrics.rejected_commands, 1);
+        assert_eq!(metrics.refund_events, 1);
+        assert_eq!(metrics.refund_fuel, 5_000);
+        assert_eq!(metrics.command_rejection_rate(), 0.5);
+        assert_eq!(metrics.refund_abuse_rate(), 0.5);
     }
 
     #[test]
