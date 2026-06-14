@@ -144,6 +144,8 @@ impl RoomTerrains {
 pub struct Drone {
     pub owner: PlayerId,
     pub body: Vec<BodyPart>,
+    pub carry: IndexMap<String, u32>,
+    pub carry_capacity: u32,
     pub fatigue: u32,
     pub hits: u32,
     pub hits_max: u32,
@@ -154,9 +156,16 @@ pub struct Drone {
 
 impl Drone {
     pub fn new(owner: PlayerId, body: Vec<BodyPart>) -> Self {
+        let carry_capacity = body
+            .iter()
+            .filter(|part| matches!(part, BodyPart::Carry))
+            .count() as u32
+            * 50;
         Self {
             owner,
             body,
+            carry: IndexMap::new(),
+            carry_capacity,
             fatigue: 0,
             hits: 100,
             hits_max: 100,

@@ -1,7 +1,9 @@
+pub mod command;
 pub mod components;
 pub mod systems;
 pub mod world;
 
+pub use command::*;
 pub use components::*;
 pub use world::{SwarmWorld, create_world};
 
@@ -9,7 +11,7 @@ pub use world::{SwarmWorld, create_world};
 mod tests {
     use indexmap::IndexMap;
 
-    use crate::{components::*, create_world, systems::*};
+    use crate::{command::*, components::*, create_world, systems::*};
 
     fn drone_count(world: &mut crate::SwarmWorld) -> usize {
         world
@@ -41,6 +43,64 @@ mod tests {
             energy_capacity: Some(300),
             cooldown,
         }
+    }
+
+    fn spawn_structure(
+        world: &mut crate::SwarmWorld,
+        owner: Option<PlayerId>,
+        x: i32,
+        y: i32,
+        energy: u32,
+        capacity: u32,
+        cooldown: u32,
+    ) -> bevy::prelude::Entity {
+        world
+            .app
+            .world_mut()
+            .spawn((
+                Position {
+                    x,
+                    y,
+                    room: RoomId(0),
+                },
+                Structure {
+                    structure_type: StructureType::Spawn,
+                    owner,
+                    hits: 5_000,
+                    hits_max: 5_000,
+                    energy: Some(energy),
+                    energy_capacity: Some(capacity),
+                    cooldown,
+                },
+            ))
+            .id()
+    }
+
+    fn first_source_id(world: &mut crate::SwarmWorld) -> ObjectId {
+        object_id(
+            world
+                .app
+                .world_mut()
+                .query::<(bevy::prelude::Entity, &Source)>()
+                .iter(world.app.world())
+                .map(|(entity, _)| entity)
+                .next()
+                .expect("expected source"),
+        )
+    }
+
+    fn submit(
+        world: &mut crate::SwarmWorld,
+        player_id: PlayerId,
+        sequence: u32,
+        action: CommandAction,
+    ) -> CommandResult {
+        world.submit_intent(
+            player_id,
+            1,
+            CommandSource::Wasm,
+            CommandIntent { sequence, action },
+        )
     }
 
     #[test]
@@ -318,5 +378,527 @@ mod tests {
             Resource { amounts },
         ));
         assert_ne!(resource_checksum, second.state_checksum());
+    }
+
+    #[test]
+    fn source_gate_injects_envelope_fields() {
+        let intent = CommandIntent {
+            sequence: 7,
+            action: CommandAction::Move {
+                object_id: 12,
+                direction: Direction::Top,
+            },
+        };
+
+        let raw = source_gate(42, 99, CommandSource::Wasm, intent);
+
+        assert_eq!(raw.player_id, 42);
+        assert_eq!(raw.tick, 99);
+        assert_eq!(raw.source, CommandSource::Wasm);
+        assert_eq!(raw.sequence, 7);
+    }
+
+    #[test]
+    fn move_rejects_owner_fatigue_spawning_body_and_terrain_then_succeeds() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let id = object_id(drone);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                2,
+                1,
+                CommandAction::Move {
+                    object_id: id,
+                    direction: Direction::Top
+                }
+            ),
+            Err(RejectionReason::NotOwner)
+        );
+
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .get_mut::<Drone>()
+            .unwrap()
+            .fatigue = 1;
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                2,
+                CommandAction::Move {
+                    object_id: id,
+                    direction: Direction::Top
+                }
+            ),
+            Err(RejectionReason::Fatigued)
+        );
+
+        {
+            let mut entity = world.app.world_mut().entity_mut(drone);
+            let mut drone_ref = entity.get_mut::<Drone>().unwrap();
+            drone_ref.fatigue = 0;
+            drone_ref.spawning = true;
+        }
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                3,
+                CommandAction::Move {
+                    object_id: id,
+                    direction: Direction::Top
+                }
+            ),
+            Err(RejectionReason::StillSpawning)
+        );
+
+        {
+            let mut entity = world.app.world_mut().entity_mut(drone);
+            let mut drone_ref = entity.get_mut::<Drone>().unwrap();
+            drone_ref.spawning = false;
+            drone_ref.body.clear();
+        }
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                4,
+                CommandAction::Move {
+                    object_id: id,
+                    direction: Direction::Top
+                }
+            ),
+            Err(RejectionReason::MissingBodyPart {
+                part: BodyPart::Move
+            })
+        );
+
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .get_mut::<Drone>()
+            .unwrap()
+            .body = vec![BodyPart::Move];
+        assert!(world.set_terrain(RoomId(0), 10, 9, TerrainType::Wall));
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                5,
+                CommandAction::Move {
+                    object_id: id,
+                    direction: Direction::Top
+                }
+            ),
+            Err(RejectionReason::TileBlocked)
+        );
+
+        assert!(world.set_terrain(RoomId(0), 10, 9, TerrainType::Plain));
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                6,
+                CommandAction::Move {
+                    object_id: id,
+                    direction: Direction::Top
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            *world.app.world().entity(drone).get::<Position>().unwrap(),
+            Position {
+                x: 10,
+                y: 9,
+                room: RoomId(0)
+            }
+        );
+    }
+
+    #[test]
+    fn harvest_rejects_missing_body_range_and_empty_source_then_adds_energy() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 24, 25, vec![BodyPart::Carry]);
+        let drone_id = object_id(drone);
+        let source_id = first_source_id(&mut world);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::Harvest {
+                    object_id: drone_id,
+                    target_id: source_id,
+                    resource: None
+                }
+            ),
+            Err(RejectionReason::MissingBodyPart {
+                part: BodyPart::Work
+            })
+        );
+
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .get_mut::<Drone>()
+            .unwrap()
+            .body = vec![BodyPart::Work, BodyPart::Carry];
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .get_mut::<Position>()
+            .unwrap()
+            .x = 20;
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                2,
+                CommandAction::Harvest {
+                    object_id: drone_id,
+                    target_id: source_id,
+                    resource: None
+                }
+            ),
+            Err(RejectionReason::OutOfRange {
+                distance: 5,
+                max: 1
+            })
+        );
+
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .get_mut::<Position>()
+            .unwrap()
+            .x = 24;
+        let source_entity = bevy::prelude::Entity::from_bits(source_id);
+        world
+            .app
+            .world_mut()
+            .entity_mut(source_entity)
+            .get_mut::<crate::components::Source>()
+            .unwrap()
+            .amount = 0;
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                3,
+                CommandAction::Harvest {
+                    object_id: drone_id,
+                    target_id: source_id,
+                    resource: None
+                }
+            ),
+            Err(RejectionReason::SourceEmpty)
+        );
+
+        world
+            .app
+            .world_mut()
+            .entity_mut(source_entity)
+            .get_mut::<crate::components::Source>()
+            .unwrap()
+            .amount = 10;
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                4,
+                CommandAction::Harvest {
+                    object_id: drone_id,
+                    target_id: source_id,
+                    resource: None
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(drone)
+                .get::<Drone>()
+                .unwrap()
+                .carry
+                .get("Energy"),
+            Some(&2)
+        );
+    }
+
+    #[test]
+    fn transfer_and_withdraw_update_resources() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Carry]);
+        let store = spawn_structure(&mut world, Some(1), 11, 10, 25, 100, 0);
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .get_mut::<Drone>()
+            .unwrap()
+            .carry
+            .insert("Energy".to_string(), 30);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::Transfer {
+                    object_id: object_id(drone),
+                    target_id: object_id(store),
+                    resource: "Energy".to_string(),
+                    amount: 20
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(store)
+                .get::<Structure>()
+                .unwrap()
+                .energy,
+            Some(45)
+        );
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                2,
+                CommandAction::Withdraw {
+                    object_id: object_id(drone),
+                    target_id: object_id(store),
+                    resource: "Energy".to_string(),
+                    amount: 15
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(drone)
+                .get::<Drone>()
+                .unwrap()
+                .carry
+                .get("Energy"),
+            Some(&25)
+        );
+    }
+
+    #[test]
+    fn attack_and_heal_update_hits() {
+        let mut world = create_world();
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
+        let target = world.spawn_drone(2, 11, 10, vec![BodyPart::Move]);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::Attack {
+                    object_id: object_id(attacker),
+                    target_id: object_id(target)
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(target)
+                .get::<Drone>()
+                .unwrap()
+                .hits,
+            70
+        );
+
+        let healer = world.spawn_drone(2, 12, 10, vec![BodyPart::Heal]);
+        assert_eq!(
+            submit(
+                &mut world,
+                2,
+                2,
+                CommandAction::Heal {
+                    object_id: object_id(healer),
+                    target_id: object_id(target)
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(target)
+                .get::<Drone>()
+                .unwrap()
+                .hits,
+            82
+        );
+    }
+
+    #[test]
+    fn attack_rejects_friendly_and_heal_rejects_full_or_enemy() {
+        let mut world = create_world();
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
+        let friendly = world.spawn_drone(1, 11, 10, vec![BodyPart::Move]);
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::Attack {
+                    object_id: object_id(attacker),
+                    target_id: object_id(friendly)
+                }
+            ),
+            Err(RejectionReason::FriendlyTarget)
+        );
+
+        let healer = world.spawn_drone(1, 12, 10, vec![BodyPart::Heal]);
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                2,
+                CommandAction::Heal {
+                    object_id: object_id(healer),
+                    target_id: object_id(friendly)
+                }
+            ),
+            Err(RejectionReason::AlreadyFullHealth)
+        );
+
+        let enemy = world.spawn_drone(2, 11, 11, vec![BodyPart::Move]);
+        world
+            .app
+            .world_mut()
+            .entity_mut(enemy)
+            .get_mut::<Drone>()
+            .unwrap()
+            .hits = 50;
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                3,
+                CommandAction::Heal {
+                    object_id: object_id(healer),
+                    target_id: object_id(enemy)
+                }
+            ),
+            Err(RejectionReason::NotFriendly)
+        );
+    }
+
+    #[test]
+    fn spawn_drone_rejects_spawn_constraints_then_queues_spawn() {
+        let mut world = create_world();
+        let spawn = spawn_structure(&mut world, Some(1), 10, 10, 300, 300, 1);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::SpawnDrone {
+                    spawn_id: object_id(spawn),
+                    body: vec![BodyPart::Move]
+                }
+            ),
+            Err(RejectionReason::SpawnOnCooldown)
+        );
+
+        world
+            .app
+            .world_mut()
+            .entity_mut(spawn)
+            .get_mut::<Structure>()
+            .unwrap()
+            .cooldown = 0;
+        assert_eq!(
+            submit(
+                &mut world,
+                2,
+                2,
+                CommandAction::SpawnDrone {
+                    spawn_id: object_id(spawn),
+                    body: vec![BodyPart::Move]
+                }
+            ),
+            Err(RejectionReason::NotYourSpawn)
+        );
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                3,
+                CommandAction::SpawnDrone {
+                    spawn_id: object_id(spawn),
+                    body: vec![BodyPart::Tough; 51]
+                }
+            ),
+            Err(RejectionReason::BodyTooLarge)
+        );
+
+        assert!(world.set_terrain(RoomId(0), 11, 10, TerrainType::Wall));
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                4,
+                CommandAction::SpawnDrone {
+                    spawn_id: object_id(spawn),
+                    body: vec![BodyPart::Move]
+                }
+            ),
+            Err(RejectionReason::InvalidTerrain)
+        );
+
+        assert!(world.set_terrain(RoomId(0), 11, 10, TerrainType::Plain));
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                5,
+                CommandAction::SpawnDrone {
+                    spawn_id: object_id(spawn),
+                    body: vec![BodyPart::Move, BodyPart::Carry]
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(world.app.world().resource::<PendingSpawnQueue>().0.len(), 1);
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(spawn)
+                .get::<Structure>()
+                .unwrap()
+                .energy,
+            Some(200)
+        );
     }
 }

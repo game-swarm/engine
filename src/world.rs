@@ -1,6 +1,10 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
 
+use crate::command::{
+    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
+    validate_command,
+};
 use crate::components::*;
 use crate::systems::*;
 
@@ -11,6 +15,22 @@ pub struct SwarmWorld {
 impl SwarmWorld {
     pub fn run_tick(&mut self) {
         self.app.update();
+    }
+
+    pub fn submit_intent(
+        &mut self,
+        player_id: PlayerId,
+        tick: Tick,
+        source: CommandSource,
+        intent: CommandIntent,
+    ) -> CommandResult {
+        let raw = source_gate(player_id, tick, source, intent);
+        self.submit_raw_command(raw)
+    }
+
+    pub fn submit_raw_command(&mut self, raw: RawCommand) -> CommandResult {
+        let validated = validate_command(self.app.world_mut(), raw)?;
+        apply_command(self.app.world_mut(), validated)
     }
 
     pub fn spawn_drone(&mut self, owner: PlayerId, x: i32, y: i32, body: Vec<BodyPart>) -> Entity {
@@ -236,6 +256,11 @@ pub fn state_checksum(world: &mut World) -> u64 {
                 p.y,
                 d.owner,
                 body_bytes,
+                d.carry
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect::<Vec<_>>(),
+                d.carry_capacity,
                 d.fatigue,
                 d.hits,
                 d.hits_max,
@@ -246,18 +271,63 @@ pub fn state_checksum(world: &mut World) -> u64 {
         })
         .collect::<Vec<_>>();
     drones.sort_unstable_by_key(
-        |(room, x, y, owner, _, fatigue, hits, hits_max, spawning, age, lifespan)| {
+        |(
+            room,
+            x,
+            y,
+            owner,
+            _,
+            _,
+            carry_capacity,
+            fatigue,
+            hits,
+            hits_max,
+            spawning,
+            age,
+            lifespan,
+        )| {
             (
-                *room, *x, *y, *owner, *fatigue, *hits, *hits_max, *spawning, *age, *lifespan,
+                *room,
+                *x,
+                *y,
+                *owner,
+                *carry_capacity,
+                *fatigue,
+                *hits,
+                *hits_max,
+                *spawning,
+                *age,
+                *lifespan,
             )
         },
     );
-    for (room, x, y, owner, body, fatigue, hits, hits_max, spawning, age, lifespan) in &drones {
+    for (
+        room,
+        x,
+        y,
+        owner,
+        body,
+        carry,
+        carry_capacity,
+        fatigue,
+        hits,
+        hits_max,
+        spawning,
+        age,
+        lifespan,
+    ) in &drones
+    {
         hash = fnv_bytes(hash, &room.to_le_bytes());
         hash = fnv_bytes(hash, &x.to_le_bytes());
         hash = fnv_bytes(hash, &y.to_le_bytes());
         hash = fnv_bytes(hash, &owner.to_le_bytes());
         hash = fnv_bytes(hash, body);
+        for (name, amount) in carry {
+            hash = fnv_bytes(hash, &(name.len() as u64).to_le_bytes());
+            hash = fnv_bytes(hash, name.as_bytes());
+            hash = fnv_bytes(hash, &amount.to_le_bytes());
+        }
+        hash = fnv_bytes(hash, &carry_capacity.to_le_bytes());
         hash = fnv_bytes(hash, &fatigue.to_le_bytes());
         hash = fnv_bytes(hash, &hits.to_le_bytes());
         hash = fnv_bytes(hash, &hits_max.to_le_bytes());
