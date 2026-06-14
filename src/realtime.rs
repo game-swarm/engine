@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,8 @@ where
 pub struct WebSocketClient {
     player_id: PlayerId,
     last_tick: Option<Tick>,
+    pending: VecDeque<WebSocketMessage>,
+    fetch_from_tick: Option<Tick>,
     receiver: Receiver<WebSocketMessage>,
 }
 
@@ -96,11 +98,34 @@ impl WebSocketClient {
         self.player_id
     }
 
+    pub fn fetch_from_tick(&self) -> Option<Tick> {
+        self.fetch_from_tick
+    }
+
     pub fn recv(&mut self) -> Option<WebSocketMessage> {
+        if let Some(message) = self.pending.pop_front() {
+            return Some(message);
+        }
+
         match self.receiver.try_recv() {
             Ok(message) => {
                 match &message {
-                    WebSocketMessage::Delta(delta) => self.last_tick = Some(delta.tick),
+                    WebSocketMessage::Delta(delta) => {
+                        if let Some(last_tick) = self.last_tick {
+                            if delta.last_tick != last_tick {
+                                let expected_tick = last_tick + 1;
+                                let actual_tick = delta.tick;
+                                self.last_tick = Some(actual_tick);
+                                self.fetch_from_tick = Some(expected_tick);
+                                self.pending.push_back(message);
+                                return Some(WebSocketMessage::TickGap {
+                                    expected_tick,
+                                    actual_tick,
+                                });
+                            }
+                        }
+                        self.last_tick = Some(delta.tick);
+                    }
                     WebSocketMessage::TickGap { actual_tick, .. } => {
                         self.last_tick = Some(*actual_tick)
                     }
@@ -141,6 +166,8 @@ impl RealtimeGateway {
         WebSocketClient {
             player_id,
             last_tick: None,
+            pending: VecDeque::new(),
+            fetch_from_tick: None,
             receiver,
         }
     }
@@ -152,22 +179,6 @@ impl RealtimeGateway {
         self.clients.retain_mut(|client| {
             if client.player_id != delta.player_id {
                 return true;
-            }
-
-            if let Some(last_tick) = client.last_tick {
-                let expected_tick = last_tick + 1;
-                if delta.tick != expected_tick {
-                    if client
-                        .sender
-                        .send(WebSocketMessage::TickGap {
-                            expected_tick,
-                            actual_tick: delta.tick,
-                        })
-                        .is_err()
-                    {
-                        return false;
-                    }
-                }
             }
 
             client.last_tick = Some(delta.tick);
@@ -234,7 +245,7 @@ mod tests {
     use crate::command::{CommandAction, CommandIntent, CommandSource, Direction, object_id};
     use crate::components::BodyPart;
     use crate::mcp::visible_entities_for_player;
-    use crate::{RealtimeGateway, WebSocketMessage, create_world};
+    use crate::{RealtimeGateway, WebSocketMessage, create_world, replay_visible_entities};
 
     use super::{InMemoryNats, NatsRealtimePublisher, compute_realtime_delta, entity_id};
 
@@ -310,6 +321,44 @@ mod tests {
                 actual_tick: 3,
             })
         );
+        assert_eq!(client.fetch_from_tick(), Some(2));
         assert_eq!(client.recv(), Some(WebSocketMessage::Delta(gap_delta)));
+    }
+
+    #[test]
+    fn snapshot_websocket_and_replay_share_visible_entity_filter() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let visible_enemy = world.spawn_drone(2, 12, 10, vec![BodyPart::Move]);
+        let hidden_enemy = world.spawn_drone(2, 40, 40, vec![BodyPart::Move]);
+
+        let snapshot = crate::swarm_get_snapshot(
+            &mut world,
+            crate::McpContext {
+                player_id: 1,
+                tick: 9,
+            },
+        );
+        let before = Vec::new();
+        let delta = compute_realtime_delta(&mut world, 1, 9, 8, &before);
+        let trace = crate::TickTrace {
+            tick: 9,
+            player_id: 1,
+            commands: Vec::new(),
+            state: crate::TickState::capture(world.app.world_mut()),
+            rejections: Vec::new(),
+            metrics: crate::TickMetrics::default(),
+            state_checksum: world.state_checksum(),
+        };
+        let replay_entities = replay_visible_entities(&trace, 1);
+
+        let snapshot_ids = snapshot.entities.iter().map(entity_id).collect::<Vec<_>>();
+        let ws_ids = delta.changed_entities.iter().map(entity_id).collect::<Vec<_>>();
+        let replay_ids = replay_entities.iter().map(entity_id).collect::<Vec<_>>();
+
+        assert!(snapshot_ids.contains(&object_id(visible_enemy)));
+        assert!(!snapshot_ids.contains(&object_id(hidden_enemy)));
+        assert_eq!(snapshot_ids, ws_ids);
+        assert_eq!(snapshot_ids, replay_ids);
     }
 }

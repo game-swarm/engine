@@ -526,6 +526,15 @@ pub fn replay(initial_state: &TickState, traces: &[TickTrace]) -> Result<TickSta
     Ok(state)
 }
 
+pub fn replay_visible_entities(
+    trace: &TickTrace,
+    player_id: PlayerId,
+) -> Vec<crate::mcp::VisibleEntity> {
+    let mut world = crate::world::create_world();
+    trace.state.clone().restore(world.app.world_mut());
+    crate::mcp::visible_entities_for_player(world.app.world_mut(), player_id)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryTickBroadcaster {
     pub broadcasts: Vec<TickBroadcast>,

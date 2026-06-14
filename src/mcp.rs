@@ -8,9 +8,11 @@ use serde_json::{Value, json};
 
 use crate::command::{ObjectId, Tick, object_id};
 use crate::components::*;
+use crate::visibility::{
+    VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
+};
 use crate::world::SwarmWorld;
 
-const VISIBILITY_RADIUS: i32 = 5;
 const MAX_WASM_BYTES: usize = 5 * 1024 * 1024;
 const CERTIFICATE_TTL_SECONDS: u64 = 24 * 60 * 60;
 const CERTIFICATE_AUDIENCE: &str = "swarm-wasm-deploy";
@@ -502,8 +504,8 @@ pub fn swarm_get_snapshot(world: &mut SwarmWorld, context: McpContext) -> Visibl
         .collect::<Vec<_>>();
     visible_tiles.sort();
 
-    let mut entities =
-        visible_entities(world.app.world_mut(), context.player_id, &visible_positions);
+    let visible_ids = visible_entity_ids(world.app.world_mut(), context.player_id, context.tick);
+    let mut entities = visible_entities(world.app.world_mut(), &visible_positions, &visible_ids);
     entities.sort_by_key(entity_sort_key);
 
     VisibleWorldSnapshot {
@@ -561,55 +563,28 @@ pub fn swarm_get_world_rules() -> WorldRules {
 }
 
 pub fn is_visible_to(world: &mut World, player_id: PlayerId, position: Position) -> bool {
-    visible_positions(world, player_id).contains(&(position.room, position.x, position.y))
+    is_position_visible_to(world, player_id, position)
 }
 
 pub fn visible_entities_for_player(world: &mut World, player_id: PlayerId) -> Vec<VisibleEntity> {
     let visible_positions = visible_positions(world, player_id);
-    let mut entities = visible_entities(world, player_id, &visible_positions);
+    let visible_ids = visible_entity_ids(world, player_id, 0);
+    let mut entities = visible_entities(world, &visible_positions, &visible_ids);
     entities.sort_by_key(entity_sort_key);
     entities
 }
 
-fn visible_positions(world: &mut World, player_id: PlayerId) -> BTreeSet<(RoomId, i32, i32)> {
-    let mut anchors = world
-        .query::<(&Position, Option<&Drone>, Option<&Structure>)>()
-        .iter(world)
-        .filter_map(|(position, drone, structure)| {
-            let owned_drone = drone.is_some_and(|drone| drone.owner == player_id);
-            let owned_structure =
-                structure.is_some_and(|structure| structure.owner == Some(player_id));
-            (owned_drone || owned_structure).then_some(*position)
-        })
-        .collect::<Vec<_>>();
-    anchors.sort_by_key(|position| (position.room.0, position.x, position.y));
-
-    let terrains = world.resource::<RoomTerrains>();
-    let mut visible = BTreeSet::new();
-    for anchor in anchors {
-        if let Some(room) = terrains.0.get(&anchor.room) {
-            for y in (anchor.y - VISIBILITY_RADIUS)..=(anchor.y + VISIBILITY_RADIUS) {
-                for x in (anchor.x - VISIBILITY_RADIUS)..=(anchor.x + VISIBILITY_RADIUS) {
-                    if room.contains(x, y) {
-                        visible.insert((anchor.room, x, y));
-                    }
-                }
-            }
-        }
-    }
-    visible
-}
-
 fn visible_entities(
     world: &mut World,
-    player_id: PlayerId,
     visible_positions: &BTreeSet<(RoomId, i32, i32)>,
+    visible_ids: &BTreeSet<Entity>,
 ) -> Vec<VisibleEntity> {
     let mut entities = Vec::new();
 
     for (entity, position, drone) in world.query::<(Entity, &Position, &Drone)>().iter(world) {
-        let owned = drone.owner == player_id;
-        if owned || visible_positions.contains(&(position.room, position.x, position.y)) {
+        if visible_ids.contains(&entity)
+            || visible_positions.contains(&(position.room, position.x, position.y))
+        {
             entities.push(VisibleEntity::Drone(VisibleDrone {
                 id: object_id(entity),
                 owner: drone.owner,
@@ -628,8 +603,9 @@ fn visible_entities(
     for (entity, position, structure) in
         world.query::<(Entity, &Position, &Structure)>().iter(world)
     {
-        let owned = structure.owner == Some(player_id);
-        if owned || visible_positions.contains(&(position.room, position.x, position.y)) {
+        if visible_ids.contains(&entity)
+            || visible_positions.contains(&(position.room, position.x, position.y))
+        {
             entities.push(VisibleEntity::Structure(VisibleStructure {
                 id: object_id(entity),
                 structure_type: structure.structure_type,
@@ -681,7 +657,9 @@ fn visible_entities(
         .query::<(Entity, &Position, &Controller)>()
         .iter(world)
     {
-        if visible_positions.contains(&(position.room, position.x, position.y)) {
+        if visible_ids.contains(&entity)
+            || visible_positions.contains(&(position.room, position.x, position.y))
+        {
             entities.push(VisibleEntity::Controller(VisibleController {
                 id: object_id(entity),
                 owner: controller.owner,

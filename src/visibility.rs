@@ -8,6 +8,7 @@ use crate::components::*;
 pub const VISIBILITY_RADIUS: i32 = 5;
 
 pub type VisiblePositionKey = (RoomId, i32, i32);
+pub type VisibilitySet = BTreeSet<VisiblePositionKey>;
 
 pub fn is_visible_to(world: &mut World, entity: Entity, player_id: PlayerId, tick: Tick) -> bool {
     let _ = tick;
