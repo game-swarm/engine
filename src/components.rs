@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use bevy::prelude::{Component, Resource as BevyResource};
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_DRONE_LIFESPAN: u32 = 1500;
 
@@ -20,7 +21,7 @@ pub struct Position {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Owner(pub PlayerId);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BodyPart {
     Move,
     Work,
@@ -32,7 +33,7 @@ pub enum BodyPart {
     Tough,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StructureType {
     Spawn,
     Extension,

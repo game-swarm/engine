@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::components::*;
 use crate::systems::{PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
@@ -8,17 +10,31 @@ pub type ObjectId = u64;
 pub type Tick = u64;
 
 pub const MAX_BODY_PARTS: usize = 50;
+pub const MAX_COMMANDS_PER_PLAYER: usize = 100;
 pub const MAX_DRONES_PER_PLAYER: u32 = 500;
+pub const MAX_TICK_OUTPUT_BYTES: usize = 256 * 1024;
+pub const MAX_JSON_DEPTH: usize = 10;
+pub const MAX_FUEL: u64 = 10_000_000;
+pub const MAX_REFUND_PER_TICK: u64 = MAX_FUEL / 10;
+pub const MAX_NEXT_TICK_FUEL_BUDGET: u64 = MAX_FUEL + MAX_REFUND_PER_TICK;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommandSource {
     Wasm,
-    Mcp,
-    Rest,
-    AdminCli,
+    McpDeploy,
+    McpQuery,
+    Admin,
+    Replay,
+    TestHarness,
+    Tutorial,
+    Deploy,
+    Rollback,
+    RuleMod,
+    Simulate,
+    DryRun,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Direction {
     Top,
     TopRight,
@@ -28,7 +44,9 @@ pub enum Direction {
     TopLeft,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(tag = "type")]
 pub enum CommandAction {
     Move {
         object_id: ObjectId,
@@ -59,6 +77,7 @@ pub enum CommandAction {
         object_id: ObjectId,
         target_id: ObjectId,
     },
+    #[serde(rename = "Spawn")]
     SpawnDrone {
         spawn_id: ObjectId,
         body: Vec<BodyPart>,
@@ -67,13 +86,15 @@ pub enum CommandAction {
 
 /// Untrusted command shape emitted by a player module. Envelope fields are not
 /// representable here; Source Gate is the only path to `RawCommand`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandIntent {
     pub sequence: u32,
     pub action: CommandAction,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawCommand {
     pub player_id: PlayerId,
     pub tick: Tick,
@@ -87,8 +108,9 @@ pub struct ValidatedCommand {
     pub raw: RawCommand,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RejectionReason {
+    SourceNotAllowed,
     ObjectNotFound,
     NotOwner,
     NotMovable,
@@ -100,6 +122,9 @@ pub enum RejectionReason {
     InvalidDirection,
     StillSpawning,
     OutOfRoom,
+    NoPath,
+    PathTooLong,
+    InsufficientMoveParts,
     InsufficientResource {
         resource: String,
         required: u32,
@@ -114,8 +139,11 @@ pub enum RejectionReason {
     },
     TargetFull,
     TargetEmpty,
+    NotYourRoom,
     TileOccupied,
     InvalidTerrain,
+    TooManyConstructionSites,
+    NotStructure,
     AlreadyFullHealth,
     FriendlyTarget,
     NotYourSpawn,
@@ -128,19 +156,80 @@ pub enum RejectionReason {
 
 pub type CommandResult = Result<(), RejectionReason>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TickValidationError {
+    TooLarge,
+    InvalidJson,
+    NotArray,
+    TooManyCommands,
+    TooDeep,
+    SchemaViolation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRejection {
+    pub command: RawCommand,
+    pub rejection: RejectionReason,
+    pub detail: serde_json::Value,
+    pub tick: Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RefundAccumulator {
+    pub next_tick_fuel_credit: u64,
+    seen: HashSet<(PlayerId, CommandSource, RejectionReason)>,
+}
+
 pub fn source_gate(
     player_id: PlayerId,
     tick: Tick,
     source: CommandSource,
     intent: CommandIntent,
-) -> RawCommand {
-    RawCommand {
+) -> Result<RawCommand, RejectionReason> {
+    if !source_allows_gameplay(source) {
+        return Err(RejectionReason::SourceNotAllowed);
+    }
+
+    Ok(RawCommand {
         player_id,
         tick,
         source,
         sequence: intent.sequence,
         action: intent.action,
+    })
+}
+
+pub fn parse_tick_output(
+    player_id: PlayerId,
+    tick: Tick,
+    bytes: &[u8],
+) -> Result<Vec<RawCommand>, TickValidationError> {
+    if bytes.len() > MAX_TICK_OUTPUT_BYTES {
+        return Err(TickValidationError::TooLarge);
     }
+
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| TickValidationError::InvalidJson)?;
+    if !value.is_array() {
+        return Err(TickValidationError::NotArray);
+    }
+    if json_depth(&value) > MAX_JSON_DEPTH {
+        return Err(TickValidationError::TooDeep);
+    }
+    let commands = value.as_array().ok_or(TickValidationError::NotArray)?;
+    if commands.len() > MAX_COMMANDS_PER_PLAYER {
+        return Err(TickValidationError::TooManyCommands);
+    }
+
+    commands
+        .iter()
+        .map(|command| {
+            let intent: CommandIntent = serde_json::from_value(command.clone())
+                .map_err(|_| TickValidationError::SchemaViolation)?;
+            source_gate(player_id, tick, CommandSource::Wasm, intent)
+                .map_err(|_| TickValidationError::SchemaViolation)
+        })
+        .collect()
 }
 
 pub fn object_id(entity: Entity) -> ObjectId {
@@ -151,6 +240,10 @@ pub fn validate_command(
     world: &mut World,
     raw: RawCommand,
 ) -> Result<ValidatedCommand, RejectionReason> {
+    if !source_allows_gameplay(raw.source) {
+        return Err(RejectionReason::SourceNotAllowed);
+    }
+
     match &raw.action {
         CommandAction::Move {
             object_id,
@@ -201,6 +294,69 @@ pub fn validate_command(
     }?;
 
     Ok(ValidatedCommand { raw })
+}
+
+pub fn source_allows_gameplay(source: CommandSource) -> bool {
+    matches!(source, CommandSource::Wasm | CommandSource::TestHarness)
+}
+
+pub fn refund_for_rejection(reason: &RejectionReason, consumed_fuel: u64) -> u64 {
+    match reason {
+        RejectionReason::SourceEmpty
+        | RejectionReason::TileOccupied
+        | RejectionReason::TargetFull => consumed_fuel / 2,
+        _ => 0,
+    }
+}
+
+pub fn next_tick_fuel_budget(next_tick_fuel_credit: u64) -> u64 {
+    MAX_FUEL
+        .saturating_add(next_tick_fuel_credit)
+        .min(MAX_NEXT_TICK_FUEL_BUDGET)
+}
+
+impl RefundAccumulator {
+    pub fn record_rejection(
+        &mut self,
+        raw: &RawCommand,
+        reason: &RejectionReason,
+        consumed_fuel: u64,
+    ) -> u64 {
+        let key = (raw.player_id, raw.source, reason.clone());
+        if !self.seen.insert(key) {
+            return 0;
+        }
+
+        let remaining = MAX_REFUND_PER_TICK.saturating_sub(self.next_tick_fuel_credit);
+        let refund = refund_for_rejection(reason, consumed_fuel).min(remaining);
+        self.next_tick_fuel_credit += refund;
+        refund
+    }
+
+    pub fn clear_for_deploy(&mut self) {
+        self.next_tick_fuel_credit = 0;
+        self.seen.clear();
+    }
+}
+
+impl CommandRejection {
+    pub fn new(command: RawCommand, rejection: RejectionReason, detail: serde_json::Value) -> Self {
+        let tick = command.tick;
+        Self {
+            command,
+            rejection,
+            detail,
+            tick,
+        }
+    }
+}
+
+fn json_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(items) => 1 + items.iter().map(json_depth).max().unwrap_or(0),
+        serde_json::Value::Object(fields) => 1 + fields.values().map(json_depth).max().unwrap_or(0),
+        _ => 1,
+    }
 }
 
 pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandResult {

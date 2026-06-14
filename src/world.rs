@@ -24,7 +24,7 @@ impl SwarmWorld {
         source: CommandSource,
         intent: CommandIntent,
     ) -> CommandResult {
-        let raw = source_gate(player_id, tick, source, intent);
+        let raw = source_gate(player_id, tick, source, intent)?;
         self.submit_raw_command(raw)
     }
 

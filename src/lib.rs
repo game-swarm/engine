@@ -390,12 +390,149 @@ mod tests {
             },
         };
 
-        let raw = source_gate(42, 99, CommandSource::Wasm, intent);
+        let raw = source_gate(42, 99, CommandSource::Wasm, intent).unwrap();
 
         assert_eq!(raw.player_id, 42);
         assert_eq!(raw.tick, 99);
         assert_eq!(raw.source, CommandSource::Wasm);
         assert_eq!(raw.sequence, 7);
+    }
+
+    #[test]
+    fn tick_output_schema_accepts_intents_and_injects_wasm_envelope() {
+        let json = br#"[
+            {"sequence":3,"action":{"type":"Move","object_id":1001,"direction":"TopRight"}}
+        ]"#;
+
+        let commands = parse_tick_output(42, 4521, json).unwrap();
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].player_id, 42);
+        assert_eq!(commands[0].tick, 4521);
+        assert_eq!(commands[0].source, CommandSource::Wasm);
+        assert_eq!(commands[0].sequence, 3);
+        assert_eq!(
+            commands[0].action,
+            CommandAction::Move {
+                object_id: 1001,
+                direction: Direction::TopRight
+            }
+        );
+    }
+
+    #[test]
+    fn tick_output_schema_rejects_non_arrays_extra_fields_depth_and_size() {
+        assert_eq!(
+            parse_tick_output(1, 1, br#"{"sequence":1,"action":{"type":"Move"}}"#),
+            Err(TickValidationError::NotArray)
+        );
+        assert_eq!(
+            parse_tick_output(
+                1,
+                1,
+                br#"[{"player_id":99,"sequence":1,"action":{"type":"Move","object_id":1,"direction":"Top"}}]"#
+            ),
+            Err(TickValidationError::SchemaViolation)
+        );
+        assert_eq!(
+            parse_tick_output(
+                1,
+                1,
+                br#"[{"sequence":1,"action":{"type":"Move","object_id":1,"direction":"Top","extra":true}}]"#
+            ),
+            Err(TickValidationError::SchemaViolation)
+        );
+        assert_eq!(
+            parse_tick_output(1, 1, br#"[[[[[[[[[[[0]]]]]]]]]]]"#),
+            Err(TickValidationError::TooDeep)
+        );
+        assert_eq!(
+            parse_tick_output(1, 1, &vec![b' '; MAX_TICK_OUTPUT_BYTES + 1]),
+            Err(TickValidationError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn tick_output_schema_rejects_too_many_commands() {
+        let command = r#"{"sequence":1,"action":{"type":"Move","object_id":1,"direction":"Top"}}"#;
+        let json = format!("[{}]", vec![command; MAX_COMMANDS_PER_PLAYER + 1].join(","));
+
+        assert_eq!(
+            parse_tick_output(1, 1, json.as_bytes()),
+            Err(TickValidationError::TooManyCommands)
+        );
+    }
+
+    #[test]
+    fn source_gate_rejects_non_gameplay_sources() {
+        let intent = CommandIntent {
+            sequence: 1,
+            action: CommandAction::Move {
+                object_id: 1,
+                direction: Direction::Top,
+            },
+        };
+
+        assert_eq!(
+            source_gate(1, 1, CommandSource::McpDeploy, intent.clone()),
+            Err(RejectionReason::SourceNotAllowed)
+        );
+        assert!(source_gate(1, 1, CommandSource::Wasm, intent).is_ok());
+    }
+
+    #[test]
+    fn refund_policy_only_refunds_contention_once_and_caps_credit() {
+        let raw = RawCommand {
+            player_id: 7,
+            tick: 9,
+            source: CommandSource::Wasm,
+            sequence: 1,
+            action: CommandAction::Harvest {
+                object_id: 1,
+                target_id: 2,
+                resource: None,
+            },
+        };
+        let mut refunds = RefundAccumulator::default();
+
+        assert_eq!(
+            refunds.record_rejection(&raw, &RejectionReason::SourceEmpty, 10_000),
+            5_000
+        );
+        assert_eq!(
+            refunds.record_rejection(&raw, &RejectionReason::SourceEmpty, 10_000),
+            0
+        );
+        assert_eq!(
+            refunds.record_rejection(
+                &RawCommand {
+                    sequence: 2,
+                    ..raw.clone()
+                },
+                &RejectionReason::OutOfRange {
+                    distance: 2,
+                    max: 1
+                },
+                10_000
+            ),
+            0
+        );
+        assert_eq!(
+            refunds.record_rejection(
+                &RawCommand {
+                    sequence: 3,
+                    ..raw.clone()
+                },
+                &RejectionReason::TargetFull,
+                MAX_FUEL * 4
+            ),
+            MAX_REFUND_PER_TICK - 5_000
+        );
+        assert_eq!(refunds.next_tick_fuel_credit, MAX_REFUND_PER_TICK);
+        assert_eq!(next_tick_fuel_budget(u64::MAX), MAX_NEXT_TICK_FUEL_BUDGET);
+
+        refunds.clear_for_deploy();
+        assert_eq!(refunds.next_tick_fuel_credit, 0);
     }
 
     #[test]

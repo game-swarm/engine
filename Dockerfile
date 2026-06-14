@@ -1,6 +1,7 @@
-FROM rust:1.88-slim
+FROM rust:1.85-slim
 
 ARG FDB_VERSION=7.3.59
+ENV CARGO_HTTP_MULTIPLEXING=false
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -13,7 +14,10 @@ RUN apt-get update \
         "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_${arch}.deb" \
     && apt-get install -y --no-install-recommends /tmp/foundationdb-clients.deb \
     && rm -f /tmp/foundationdb-clients.deb \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/local/cargo/bin/cargo /usr/local/bin/cargo \
+    && ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc \
+    && ln -sf /usr/local/cargo/bin/rustup /usr/local/bin/rustup
 
 WORKDIR /app
 COPY . .
