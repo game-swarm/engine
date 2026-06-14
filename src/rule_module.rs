@@ -1,7 +1,13 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
+use rhai::{Engine, EvalAltResult, Scope};
 use serde_json::Value;
+
+use crate::components::{Drone, Owner, PlayerId, Resource, Structure};
 
 pub const DEFAULT_RHAI_AST_NODES_PER_TICK: usize = 10_000;
 pub const DEFAULT_RHAI_ACTIONS_PER_TICK: usize = 100;
@@ -31,7 +37,20 @@ impl Default for RhaiExecutionBudget {
 pub enum RuleAction {
     LogInfo(String),
     LogWarn(String),
-    EmitEvent { event_type: String, data: Value },
+    DeductResource {
+        player_id: PlayerId,
+        resource: String,
+        amount: u32,
+    },
+    AwardResource {
+        player_id: PlayerId,
+        resource: String,
+        amount: u32,
+    },
+    EmitEvent {
+        event_type: String,
+        data: Value,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +69,44 @@ pub struct RhaiModuleTickReport {
     pub actions_discarded: usize,
     pub over_budget: Vec<RhaiBudgetExceeded>,
     pub consecutive_over_budget_ticks: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RhaiRuleHook {
+    Init,
+    TickStart,
+    TickEnd,
+}
+
+impl RhaiRuleHook {
+    fn filename(self) -> &'static str {
+        match self {
+            Self::Init => "init.rhai",
+            Self::TickStart => "tick_start.rhai",
+            Self::TickEnd => "tick_end.rhai",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RhaiScriptModule {
+    pub name: String,
+    pub root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RhaiScriptError {
+    pub module_name: String,
+    pub hook: RhaiRuleHook,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RhaiHookReport {
+    pub actions_applied: usize,
+    pub actions_skipped: usize,
+    pub events_emitted: usize,
+    pub errors: Vec<RhaiScriptError>,
 }
 
 pub struct RhaiActions<'a> {
@@ -95,6 +152,32 @@ impl<'a> RhaiActions<'a> {
         self.push_action(RuleAction::EmitEvent {
             event_type: event_type.into(),
             data,
+        })
+    }
+
+    pub fn deduct_resource(
+        &mut self,
+        player_id: PlayerId,
+        resource: impl Into<String>,
+        amount: u32,
+    ) -> bool {
+        self.push_action(RuleAction::DeductResource {
+            player_id,
+            resource: resource.into(),
+            amount,
+        })
+    }
+
+    pub fn award_resource(
+        &mut self,
+        player_id: PlayerId,
+        resource: impl Into<String>,
+        amount: u32,
+    ) -> bool {
+        self.push_action(RuleAction::AwardResource {
+            player_id,
+            resource: resource.into(),
+            amount,
         })
     }
 
@@ -181,6 +264,8 @@ pub struct RhaiRuleModules {
     modules: Vec<RhaiRuleModule>,
     last_tick_reports: Vec<RhaiModuleTickReport>,
     applied_actions: Vec<RuleAction>,
+    script_modules: Vec<RhaiScriptModule>,
+    last_hook_report: RhaiHookReport,
 }
 
 impl RhaiRuleModules {
@@ -190,6 +275,8 @@ impl RhaiRuleModules {
             modules: Vec::new(),
             last_tick_reports: Vec::new(),
             applied_actions: Vec::new(),
+            script_modules: Vec::new(),
+            last_hook_report: RhaiHookReport::default(),
         }
     }
 
@@ -218,6 +305,47 @@ impl RhaiRuleModules {
         self.applied_actions.clear();
     }
 
+    pub fn add_script_module_dir(&mut self, dir: impl AsRef<Path>) {
+        let root = dir.as_ref().to_path_buf();
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("rule-module")
+            .to_string();
+        self.script_modules.push(RhaiScriptModule { name, root });
+    }
+
+    pub fn script_modules(&self) -> &[RhaiScriptModule] {
+        &self.script_modules
+    }
+
+    pub fn last_hook_report(&self) -> &RhaiHookReport {
+        &self.last_hook_report
+    }
+
+    pub fn run_hook(&mut self, world: &mut World, hook: RhaiRuleHook) -> RhaiHookReport {
+        let mut report = RhaiHookReport::default();
+        for module in self.script_modules.clone() {
+            let script_path = module.root.join(hook.filename());
+            if !script_path.exists() {
+                continue;
+            }
+            match execute_rhai_script(&script_path, self.budget) {
+                Ok(actions) => {
+                    self.applied_actions.extend(actions.clone());
+                    apply_rule_actions(world, &actions, &mut report);
+                }
+                Err(error) => report.errors.push(RhaiScriptError {
+                    module_name: module.name,
+                    hook,
+                    message: error.to_string(),
+                }),
+            }
+        }
+        self.last_hook_report = report.clone();
+        report
+    }
+
     pub fn run_tick_end(&mut self) {
         self.last_tick_reports.clear();
         for module in &mut self.modules {
@@ -227,8 +355,281 @@ impl RhaiRuleModules {
     }
 }
 
-pub fn rhai_rule_module_tick_end_system(mut modules: ResMut<RhaiRuleModules>) {
-    modules.run_tick_end();
+pub fn rhai_rule_module_tick_end_system(world: &mut World) {
+    world.resource_scope(|world, mut modules: Mut<RhaiRuleModules>| {
+        let start = modules.applied_actions.len();
+        modules.run_tick_end();
+        let actions = modules.applied_actions[start..].to_vec();
+        let mut report = RhaiHookReport::default();
+        apply_rule_actions(world, &actions, &mut report);
+        let script_report = modules.run_hook(world, RhaiRuleHook::TickEnd);
+        report.actions_applied += script_report.actions_applied;
+        report.actions_skipped += script_report.actions_skipped;
+        report.events_emitted += script_report.events_emitted;
+        report.errors.extend(script_report.errors);
+        modules.last_hook_report = report;
+    });
+}
+
+pub fn run_init_scripts(world: &mut World) -> RhaiHookReport {
+    run_script_hook(world, RhaiRuleHook::Init)
+}
+
+pub fn run_tick_start_scripts(world: &mut World) -> RhaiHookReport {
+    run_script_hook(world, RhaiRuleHook::TickStart)
+}
+
+pub fn run_tick_end_scripts(world: &mut World) -> RhaiHookReport {
+    run_script_hook(world, RhaiRuleHook::TickEnd)
+}
+
+fn run_script_hook(world: &mut World, hook: RhaiRuleHook) -> RhaiHookReport {
+    world.resource_scope(|world, mut modules: Mut<RhaiRuleModules>| modules.run_hook(world, hook))
+}
+
+#[derive(Clone)]
+struct RhaiActionBuffer {
+    actions: Arc<Mutex<Vec<RuleAction>>>,
+}
+
+fn execute_rhai_script(
+    script_path: &Path,
+    budget: RhaiExecutionBudget,
+) -> Result<Vec<RuleAction>, Box<EvalAltResult>> {
+    let script = fs::read_to_string(script_path).map_err(|error| {
+        EvalAltResult::ErrorSystem(
+            format!("failed to read {}", script_path.display()),
+            Box::new(error),
+        )
+    })?;
+    let buffered = Arc::new(Mutex::new(Vec::new()));
+    let actions = RhaiActionBuffer {
+        actions: Arc::clone(&buffered),
+    };
+    let mut engine = Engine::new();
+    engine.set_max_expr_depths(32, 32);
+    engine.set_max_operations(budget.ast_nodes_per_tick as u64);
+    engine.register_type::<RhaiActionBuffer>();
+    engine.register_fn("deduct_resource", rhai_deduct_resource);
+    engine.register_fn("award_resource", rhai_award_resource);
+    engine.register_fn("emit_event", rhai_emit_event);
+
+    let ast = engine.compile(&script)?;
+    let mut scope = Scope::new();
+    scope.push("actions", actions);
+    engine.run_ast_with_scope(&mut scope, &ast)?;
+    let actions = buffered
+        .lock()
+        .expect("rhai action buffer lock should not be poisoned")
+        .clone();
+    Ok(actions)
+}
+
+fn rhai_deduct_resource(
+    actions: &mut RhaiActionBuffer,
+    player_id: i64,
+    resource: &str,
+    amount: i64,
+) {
+    if let (Ok(player_id), Ok(amount)) = (u32::try_from(player_id), u32::try_from(amount)) {
+        actions
+            .actions
+            .lock()
+            .expect("rhai action buffer lock should not be poisoned")
+            .push(RuleAction::DeductResource {
+                player_id,
+                resource: resource.to_string(),
+                amount,
+            });
+    }
+}
+
+fn rhai_award_resource(
+    actions: &mut RhaiActionBuffer,
+    player_id: i64,
+    resource: &str,
+    amount: i64,
+) {
+    if let (Ok(player_id), Ok(amount)) = (u32::try_from(player_id), u32::try_from(amount)) {
+        actions
+            .actions
+            .lock()
+            .expect("rhai action buffer lock should not be poisoned")
+            .push(RuleAction::AwardResource {
+                player_id,
+                resource: resource.to_string(),
+                amount,
+            });
+    }
+}
+
+fn rhai_emit_event(actions: &mut RhaiActionBuffer, event_type: &str, data: &str) {
+    actions
+        .actions
+        .lock()
+        .expect("rhai action buffer lock should not be poisoned")
+        .push(RuleAction::EmitEvent {
+            event_type: event_type.to_string(),
+            data: Value::String(data.to_string()),
+        });
+}
+
+fn apply_rule_actions(world: &mut World, actions: &[RuleAction], report: &mut RhaiHookReport) {
+    for action in actions {
+        match action {
+            RuleAction::DeductResource {
+                player_id,
+                resource,
+                amount,
+            } => {
+                if deduct_player_resource(world, *player_id, resource, *amount) {
+                    report.actions_applied += 1;
+                } else {
+                    report.actions_skipped += 1;
+                }
+            }
+            RuleAction::AwardResource {
+                player_id,
+                resource,
+                amount,
+            } => {
+                if award_player_resource(world, *player_id, resource, *amount) {
+                    report.actions_applied += 1;
+                } else {
+                    report.actions_skipped += 1;
+                }
+            }
+            RuleAction::EmitEvent { event_type, data } => {
+                report.events_emitted += 1;
+                report.actions_applied += 1;
+                let _ = (event_type, data);
+            }
+            RuleAction::LogInfo(_) | RuleAction::LogWarn(_) => {
+                report.actions_applied += 1;
+            }
+        }
+    }
+}
+
+fn deduct_player_resource(
+    world: &mut World,
+    player_id: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> bool {
+    if player_resource_total(world, player_id, resource) < amount {
+        return false;
+    }
+    let mut remaining = amount;
+    let mut drones = world.query::<(&mut Drone, Option<&Owner>)>();
+    for (mut drone, owner) in drones.iter_mut(world) {
+        if owner.map(|owner| owner.0).unwrap_or(drone.owner) != player_id {
+            continue;
+        }
+        let take = (*drone.carry.get(resource).unwrap_or(&0)).min(remaining);
+        if take > 0 {
+            *drone.carry.entry(resource.to_string()).or_default() -= take;
+            remaining -= take;
+        }
+        if remaining == 0 {
+            return true;
+        }
+    }
+    if resource == "Energy" {
+        let mut structures = world.query::<&mut Structure>();
+        for mut structure in structures.iter_mut(world) {
+            if structure.owner != Some(player_id) {
+                continue;
+            }
+            let available = structure.energy.unwrap_or(0);
+            let take = available.min(remaining);
+            if take > 0 {
+                structure.energy = Some(available - take);
+                remaining -= take;
+            }
+            if remaining == 0 {
+                return true;
+            }
+        }
+    }
+    let mut drops = world.query::<(&mut Resource, Option<&Owner>)>();
+    for (mut dropped, owner) in drops.iter_mut(world) {
+        if owner.map(|owner| owner.0) != Some(player_id) {
+            continue;
+        }
+        let take = (*dropped.amounts.get(resource).unwrap_or(&0)).min(remaining);
+        if take > 0 {
+            *dropped.amounts.entry(resource.to_string()).or_default() -= take;
+            remaining -= take;
+        }
+        if remaining == 0 {
+            return true;
+        }
+    }
+    remaining == 0
+}
+
+fn award_player_resource(
+    world: &mut World,
+    player_id: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> bool {
+    if amount == 0 {
+        return true;
+    }
+    let mut drones = world.query::<(&mut Drone, Option<&Owner>)>();
+    for (mut drone, owner) in drones.iter_mut(world) {
+        if owner.map(|owner| owner.0).unwrap_or(drone.owner) != player_id {
+            continue;
+        }
+        let used = drone.carry.values().copied().sum::<u32>();
+        if drone.carry_capacity.saturating_sub(used) >= amount {
+            *drone.carry.entry(resource.to_string()).or_default() += amount;
+            return true;
+        }
+    }
+    if resource == "Energy" {
+        let mut structures = world.query::<&mut Structure>();
+        for mut structure in structures.iter_mut(world) {
+            if structure.owner != Some(player_id) {
+                continue;
+            }
+            if let Some(capacity) = structure.energy_capacity {
+                let current = structure.energy.unwrap_or(0);
+                if capacity.saturating_sub(current) >= amount {
+                    structure.energy = Some(current + amount);
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn player_resource_total(world: &mut World, player_id: PlayerId, resource: &str) -> u32 {
+    let mut total = 0_u32;
+    let mut drones = world.query::<(&Drone, Option<&Owner>)>();
+    for (drone, owner) in drones.iter(world) {
+        if owner.map(|owner| owner.0).unwrap_or(drone.owner) == player_id {
+            total = total.saturating_add(*drone.carry.get(resource).unwrap_or(&0));
+        }
+    }
+    if resource == "Energy" {
+        let mut structures = world.query::<&Structure>();
+        for structure in structures.iter(world) {
+            if structure.owner == Some(player_id) {
+                total = total.saturating_add(structure.energy.unwrap_or(0));
+            }
+        }
+    }
+    let mut drops = world.query::<(&Resource, Option<&Owner>)>();
+    for (dropped, owner) in drops.iter(world) {
+        if owner.map(|owner| owner.0) == Some(player_id) {
+            total = total.saturating_add(*dropped.amounts.get(resource).unwrap_or(&0));
+        }
+    }
+    total
 }
 
 pub fn count_rhai_ast_nodes(source: &str) -> usize {
@@ -417,5 +818,109 @@ mod tests {
         module.set_ast_nodes(1);
         run_module_tick_end(RhaiExecutionBudget::default(), &mut module, &mut actions);
         assert_eq!(module.consecutive_over_budget_ticks(), 0);
+    }
+
+    #[test]
+    fn script_hooks_load_missing_scripts_and_apply_actions_transactionally() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let module_dir = temp.path().join("script-mod");
+        fs::create_dir(&module_dir).expect("module dir");
+        fs::write(
+            module_dir.join("init.rhai"),
+            r#"actions.emit_event("init", "loaded");"#,
+        )
+        .unwrap();
+        fs::write(
+            module_dir.join("tick_start.rhai"),
+            r#"actions.deduct_resource(1, "Energy", 10); actions.emit_event("hook", "start");"#,
+        )
+        .unwrap();
+        let mut world = crate::create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![crate::BodyPart::Carry]);
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .get_mut::<Drone>()
+            .unwrap()
+            .carry
+            .insert("Energy".to_string(), 20);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<RhaiRuleModules>()
+            .add_script_module_dir(&module_dir);
+
+        let init = run_init_scripts(world.app.world_mut());
+        let start = run_tick_start_scripts(world.app.world_mut());
+        let end = run_tick_end_scripts(world.app.world_mut());
+
+        assert!(init.errors.is_empty());
+        assert_eq!(init.events_emitted, 1);
+        assert!(start.errors.is_empty());
+        assert_eq!(start.actions_applied, 2);
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(drone)
+                .get::<Drone>()
+                .unwrap()
+                .carry
+                .get("Energy"),
+            Some(&10)
+        );
+        assert!(end.errors.is_empty());
+        assert_eq!(end.actions_applied, 0);
+    }
+
+    #[test]
+    fn script_error_discards_buffer_and_action_failure_skips_only_that_action() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let module_dir = temp.path().join("script-mod");
+        fs::create_dir(&module_dir).expect("module dir");
+        fs::write(
+            module_dir.join("tick_start.rhai"),
+            r#"actions.deduct_resource(1, "Energy", 999); actions.emit_event("hook", "kept");"#,
+        )
+        .unwrap();
+        fs::write(
+            module_dir.join("tick_end.rhai"),
+            r#"actions.award_resource(1, "Energy", 5); throw "boom";"#,
+        )
+        .unwrap();
+        let mut world = crate::create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![crate::BodyPart::Carry]);
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .get_mut::<Drone>()
+            .unwrap()
+            .carry
+            .insert("Energy".to_string(), 5);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<RhaiRuleModules>()
+            .add_script_module_dir(&module_dir);
+
+        let start = run_tick_start_scripts(world.app.world_mut());
+        let end = run_tick_end_scripts(world.app.world_mut());
+
+        assert_eq!(start.actions_skipped, 1);
+        assert_eq!(start.events_emitted, 1);
+        assert_eq!(end.errors.len(), 1);
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(drone)
+                .get::<Drone>()
+                .unwrap()
+                .carry
+                .get("Energy"),
+            Some(&5)
+        );
     }
 }

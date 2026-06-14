@@ -8,7 +8,11 @@ use crate::command::{
     apply_command, source_gate, validate_command,
 };
 use crate::components::*;
+<<<<<<< HEAD
 use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
+=======
+use crate::rule_module::run_tick_start_scripts;
+>>>>>>> origin/task/t_a3b4cc44
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
 use crate::world::SwarmWorld;
 
@@ -667,6 +671,7 @@ pub fn execute_deterministic(
     world: &mut SwarmWorld,
     commands: Vec<RawCommand>,
 ) -> DeterministicExecution {
+    run_tick_start_scripts(world.app.world_mut());
     let mut accepted = Vec::new();
     let mut rejections = Vec::new();
     let mut refunds = RefundAccumulator::default();

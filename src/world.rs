@@ -10,7 +10,7 @@ use crate::resources::{
     GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
     ResourceRegistry,
 };
-use crate::rule_module::{RhaiRuleModules, rhai_rule_module_tick_end_system};
+use crate::rule_module::{RhaiRuleModules, rhai_rule_module_tick_end_system, run_init_scripts};
 use crate::systems::*;
 
 pub struct SwarmWorld {
@@ -198,7 +198,9 @@ pub fn create_world() -> SwarmWorld {
         },
     ));
 
-    SwarmWorld { app }
+    let mut world = SwarmWorld { app };
+    run_init_scripts(world.app.world_mut());
+    world
 }
 
 /// Compute a deterministic, stable checksum over the full world state.
