@@ -3,6 +3,7 @@ pub mod components;
 pub mod hot_cache;
 pub mod mcp;
 pub mod mod_cli;
+pub mod onboarding;
 pub mod realtime;
 pub mod resources;
 pub mod rule_module;
@@ -20,6 +21,7 @@ pub use mcp::{
     VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot, WorldRuleMod, WorldRules,
     swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player,
 };
+pub use onboarding::*;
 pub use realtime::*;
 pub use resources::*;
 pub use rule_module::*;
