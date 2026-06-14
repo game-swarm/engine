@@ -15,23 +15,23 @@ pub use command::*;
 pub use components::*;
 pub use hot_cache::*;
 pub use mcp::{
-    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player, DeployParams,
-    DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer, StoredModule,
-    VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
+    DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer,
+    StoredModule, VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
     VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot, WorldRuleMod, WorldRules,
+    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player,
 };
 pub use realtime::*;
 pub use resources::*;
 pub use rule_module::*;
 pub use tick::*;
 pub use visibility::*;
-pub use world::{create_world, SwarmWorld};
+pub use world::{SwarmWorld, create_world};
 
 #[cfg(test)]
 mod tests {
     use indexmap::IndexMap;
 
-    use crate::{command::*, components::*, create_world, systems::*};
+    use crate::{command::*, components::*, create_world, resources::*, systems::*};
 
     fn drone_count(world: &mut crate::SwarmWorld) -> usize {
         world
@@ -1062,6 +1062,186 @@ mod tests {
                 .carry
                 .get("Energy"),
             Some(&25)
+        );
+    }
+
+    #[test]
+    fn transfer_to_global_delivers_after_ten_ticks_and_is_visible_in_snapshot() {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerLocalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::TransferToGlobal {
+                resource: "Energy".to_string(),
+                amount: 1_000,
+            },
+        )
+        .unwrap();
+
+        let snapshot = crate::swarm_get_snapshot(
+            &mut world,
+            crate::McpContext {
+                player_id: 1,
+                tick: 1,
+            },
+        );
+        assert_eq!(snapshot.pending_global_transfers.len(), 1);
+        assert_eq!(snapshot.pending_global_transfers[0].remaining_ticks, 10);
+        assert_eq!(snapshot.global_storage.get("Energy"), None);
+
+        for _ in 0..9 {
+            world.run_tick();
+        }
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<PlayerGlobalStorage>()
+                .0
+                .get(&1)
+                .and_then(|storage| storage.get("Energy")),
+            None
+        );
+        assert_eq!(
+            world.app.world().resource::<PendingGlobalTransfers>().0[0].remaining_ticks,
+            1
+        );
+
+        world.run_tick();
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<PlayerGlobalStorage>()
+                .0
+                .get(&1)
+                .and_then(|storage| storage.get("Energy")),
+            Some(&990)
+        );
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<PendingGlobalTransfers>()
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn transfer_from_global_delivers_after_five_ticks() {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::TransferFromGlobal {
+                resource: "Energy".to_string(),
+                amount: 1_000,
+            },
+        )
+        .unwrap();
+
+        for _ in 0..4 {
+            world.run_tick();
+        }
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<PlayerLocalStorage>()
+                .0
+                .get(&1)
+                .and_then(|storage| storage.get("Energy")),
+            None
+        );
+        assert_eq!(
+            world.app.world().resource::<PendingGlobalTransfers>().0[0].remaining_ticks,
+            1
+        );
+
+        world.run_tick();
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<PlayerLocalStorage>()
+                .0
+                .get(&1)
+                .and_then(|storage| storage.get("Energy")),
+            Some(&950)
+        );
+    }
+
+    #[test]
+    fn global_storage_tax_is_progressive() {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 100_000);
+
+        world.run_tick();
+
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<PlayerGlobalStorage>()
+                .0
+                .get(&1)
+                .and_then(|storage| storage.get("Energy")),
+            Some(&99_955)
+        );
+    }
+
+    #[test]
+    fn command_action_serde_accepts_global_storage_variants() {
+        let action: CommandAction = serde_json::from_str(
+            r#"{"type":"TransferToGlobal","resource":"Energy","amount":1000}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            CommandAction::TransferToGlobal {
+                resource: "Energy".to_string(),
+                amount: 1000
+            }
+        );
+
+        let action: CommandAction = serde_json::from_str(
+            r#"{"type":"TransferFromGlobal","resource":"Energy","amount":1000}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            CommandAction::TransferFromGlobal {
+                resource: "Energy".to_string(),
+                amount: 1000
+            }
         );
     }
 

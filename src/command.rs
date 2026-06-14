@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::components::*;
-use crate::resources::ResourceRegistry;
+use crate::resources::{
+    GlobalStorageConfig, GlobalTransferDirection, PendingGlobalTransfer, PendingGlobalTransfers,
+    PlayerGlobalStorage, PlayerLocalStorage, ResourceRegistry,
+};
 use crate::systems::{PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
 
 pub type ObjectId = u64;
@@ -92,6 +95,14 @@ pub enum CommandAction {
         y: i32,
         structure: StructureType,
     },
+    TransferToGlobal {
+        resource: String,
+        amount: u32,
+    },
+    TransferFromGlobal {
+        resource: String,
+        amount: u32,
+    },
 }
 
 /// Untrusted command shape emitted by a player module. Envelope fields are not
@@ -173,6 +184,8 @@ pub enum RejectionReason {
     ExceedsRoomCapacity,
     RoomDroneCapReached,
     NotFriendly,
+    GlobalStorageDisabled,
+    TransferInProgress,
 }
 
 pub type CommandResult = Result<(), RejectionReason>;
@@ -327,6 +340,12 @@ pub fn validate_command(
             y,
             structure,
         } => validate_build(world, raw.player_id, *object_id, *x, *y, *structure),
+        CommandAction::TransferToGlobal { resource, amount } => {
+            validate_transfer_to_global(world, raw.player_id, resource, *amount)
+        }
+        CommandAction::TransferFromGlobal { resource, amount } => {
+            validate_transfer_from_global(world, raw.player_id, resource, *amount)
+        }
     }?;
 
     Ok(ValidatedCommand { raw })
@@ -426,7 +445,9 @@ pub fn source_capabilities(source: CommandSource) -> SourceCapabilities {
 pub fn source_allows_action(source: CommandSource, action: &CommandAction) -> bool {
     match source {
         CommandSource::Wasm | CommandSource::Admin | CommandSource::TestHarness => true,
-        CommandSource::Tutorial => !action_triggers_combat(action),
+        CommandSource::Tutorial => {
+            !action_triggers_combat(action) && !action_uses_global_storage(action)
+        }
         CommandSource::McpDeploy
         | CommandSource::McpQuery
         | CommandSource::Replay
@@ -442,6 +463,13 @@ fn action_triggers_combat(action: &CommandAction) -> bool {
     matches!(
         action,
         CommandAction::Attack { .. } | CommandAction::Heal { .. }
+    )
+}
+
+fn action_uses_global_storage(action: &CommandAction) -> bool {
+    matches!(
+        action,
+        CommandAction::TransferToGlobal { .. } | CommandAction::TransferFromGlobal { .. }
     )
 }
 
@@ -516,6 +544,8 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Heal { .. } => "Heal",
         CommandAction::SpawnDrone { .. } => "Spawn",
         CommandAction::Build { .. } => "Build",
+        CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
+        CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
     };
 
     match rejection {
@@ -681,6 +711,12 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             y,
             structure,
         } => apply_build(world, command.raw.player_id, object_id, x, y, structure),
+        CommandAction::TransferToGlobal { resource, amount } => {
+            apply_transfer_to_global(world, command.raw.player_id, &resource, amount)
+        }
+        CommandAction::TransferFromGlobal { resource, amount } => {
+            apply_transfer_from_global(world, command.raw.player_id, &resource, amount)
+        }
     }
 }
 
@@ -894,6 +930,73 @@ fn validate_build(
     ensure_range(position, target, 1)
 }
 
+fn validate_transfer_to_global(
+    world: &mut World,
+    player_id: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    let config = world.resource::<GlobalStorageConfig>();
+    if !config.enabled {
+        return Err(RejectionReason::GlobalStorageDisabled);
+    }
+    ensure_no_pending_global_transfer(world, player_id)?;
+
+    let available = world
+        .resource::<PlayerLocalStorage>()
+        .0
+        .get(&player_id)
+        .and_then(|storage| storage.get(resource))
+        .copied()
+        .unwrap_or_default();
+    if available < amount {
+        return Err(RejectionReason::InsufficientResource {
+            resource: resource.to_string(),
+            required: amount,
+            available,
+        });
+    }
+
+    let deliver_amount = amount.saturating_sub(transfer_fee(
+        amount,
+        config.transfer_to_global_fee_per_10_000,
+    ));
+    let committed = global_storage_committed(world, player_id);
+    if committed.saturating_add(deliver_amount) > config.capacity {
+        return Err(RejectionReason::TargetFull);
+    }
+    Ok(())
+}
+
+fn validate_transfer_from_global(
+    world: &mut World,
+    player_id: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    let config = world.resource::<GlobalStorageConfig>();
+    if !config.enabled {
+        return Err(RejectionReason::GlobalStorageDisabled);
+    }
+    ensure_no_pending_global_transfer(world, player_id)?;
+
+    let available = world
+        .resource::<PlayerGlobalStorage>()
+        .0
+        .get(&player_id)
+        .and_then(|storage| storage.get(resource))
+        .copied()
+        .unwrap_or_default();
+    if available < amount {
+        return Err(RejectionReason::InsufficientResource {
+            resource: resource.to_string(),
+            required: amount,
+            available,
+        });
+    }
+    Ok(())
+}
+
 fn apply_move(world: &mut World, object_id: ObjectId, direction: Direction) -> CommandResult {
     let entity = entity(object_id)?;
     let current_position = *world
@@ -1072,6 +1175,72 @@ fn apply_build(
         position,
         structure_defaults(structure_type, Some(player_id)),
     ));
+    Ok(())
+}
+
+fn apply_transfer_to_global(
+    world: &mut World,
+    player_id: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    let config = world.resource::<GlobalStorageConfig>().clone();
+    subtract_player_resource(
+        world
+            .resource_mut::<PlayerLocalStorage>()
+            .0
+            .entry(player_id)
+            .or_default(),
+        resource,
+        amount,
+    );
+    world
+        .resource_mut::<PendingGlobalTransfers>()
+        .0
+        .push(PendingGlobalTransfer {
+            player_id,
+            direction: GlobalTransferDirection::ToGlobal,
+            resource: resource.to_string(),
+            amount,
+            deliver_amount: amount.saturating_sub(transfer_fee(
+                amount,
+                config.transfer_to_global_fee_per_10_000,
+            )),
+            remaining_ticks: config.transfer_to_global_ticks,
+        });
+    Ok(())
+}
+
+fn apply_transfer_from_global(
+    world: &mut World,
+    player_id: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    let config = world.resource::<GlobalStorageConfig>().clone();
+    subtract_player_resource(
+        world
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(player_id)
+            .or_default(),
+        resource,
+        amount,
+    );
+    world
+        .resource_mut::<PendingGlobalTransfers>()
+        .0
+        .push(PendingGlobalTransfer {
+            player_id,
+            direction: GlobalTransferDirection::FromGlobal,
+            resource: resource.to_string(),
+            amount,
+            deliver_amount: amount.saturating_sub(transfer_fee(
+                amount,
+                config.transfer_from_global_fee_per_10_000,
+            )),
+            remaining_ticks: config.transfer_from_global_ticks,
+        });
     Ok(())
 }
 
@@ -1358,6 +1527,47 @@ fn structure_defaults(structure_type: StructureType, owner: Option<PlayerId>) ->
         energy_capacity,
         cooldown: 0,
     }
+}
+
+fn ensure_no_pending_global_transfer(world: &World, player_id: PlayerId) -> CommandResult {
+    if world
+        .resource::<PendingGlobalTransfers>()
+        .0
+        .iter()
+        .any(|transfer| transfer.player_id == player_id)
+    {
+        return Err(RejectionReason::TransferInProgress);
+    }
+    Ok(())
+}
+
+fn global_storage_committed(world: &World, player_id: PlayerId) -> u32 {
+    let stored: u32 = world
+        .resource::<PlayerGlobalStorage>()
+        .0
+        .get(&player_id)
+        .map(|storage| storage.values().sum())
+        .unwrap_or_default();
+    let pending: u32 = world
+        .resource::<PendingGlobalTransfers>()
+        .0
+        .iter()
+        .filter(|transfer| {
+            transfer.player_id == player_id
+                && transfer.direction == GlobalTransferDirection::ToGlobal
+        })
+        .map(|transfer| transfer.deliver_amount)
+        .sum();
+    stored.saturating_add(pending)
+}
+
+fn transfer_fee(amount: u32, fee_per_10_000: u32) -> u32 {
+    amount.saturating_mul(fee_per_10_000) / 10_000
+}
+
+fn subtract_player_resource(storage: &mut IndexMap<String, u32>, resource: &str, amount: u32) {
+    let value = storage.entry(resource.to_string()).or_default();
+    *value = value.saturating_sub(amount);
 }
 
 fn carry_used(carry: &IndexMap<String, u32>) -> u32 {

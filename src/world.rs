@@ -1,13 +1,16 @@
 use bevy::prelude::*;
 
 use crate::command::{
-    apply_command, source_gate, validate_command, CommandIntent, CommandResult, CommandSource,
-    RawCommand, Tick,
+    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
+    validate_command,
 };
 use crate::components::*;
 use crate::hot_cache::{InMemoryDragonfly, InMemoryFoundationDb};
-use crate::resources::ResourceRegistry;
-use crate::rule_module::{rhai_rule_module_tick_end_system, RhaiRuleModules};
+use crate::resources::{
+    GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
+    ResourceRegistry,
+};
+use crate::rule_module::{RhaiRuleModules, rhai_rule_module_tick_end_system};
 use crate::systems::*;
 
 pub struct SwarmWorld {
@@ -148,6 +151,10 @@ pub fn create_world() -> SwarmWorld {
     app.init_resource::<RoomDroneCounts>();
     app.init_resource::<PendingCombat>();
     app.init_resource::<ResourceRegistry>();
+    app.init_resource::<GlobalStorageConfig>();
+    app.init_resource::<PlayerLocalStorage>();
+    app.init_resource::<PlayerGlobalStorage>();
+    app.init_resource::<PendingGlobalTransfers>();
     app.init_resource::<RhaiRuleModules>();
     app.init_resource::<InMemoryFoundationDb>();
     app.init_resource::<InMemoryDragonfly>();
@@ -157,6 +164,7 @@ pub fn create_world() -> SwarmWorld {
             death_mark_system,
             spawn_system,
             regeneration_system,
+            global_storage_system,
             combat_system,
             decay_system,
             rhai_rule_module_tick_end_system,
@@ -489,10 +497,64 @@ pub fn state_checksum(world: &mut World) -> u64 {
         }
     }
 
+    tag(&mut hasher, "player_local_storage");
+    hash_player_storage(&mut hasher, &world.resource::<PlayerLocalStorage>().0);
+
+    tag(&mut hasher, "player_global_storage");
+    hash_player_storage(&mut hasher, &world.resource::<PlayerGlobalStorage>().0);
+
+    tag(&mut hasher, "pending_global_transfers");
+    let mut transfers = world.resource::<PendingGlobalTransfers>().0.clone();
+    transfers.sort_by_key(|transfer| {
+        (
+            transfer.player_id,
+            transfer.direction as u8,
+            transfer.resource.clone(),
+            transfer.amount,
+            transfer.deliver_amount,
+            transfer.remaining_ticks,
+        )
+    });
+    for transfer in transfers {
+        hasher.update(&transfer.player_id.to_le_bytes());
+        hasher.update(&[transfer.direction as u8]);
+        hash_bytes(&mut hasher, transfer.resource.as_bytes());
+        hasher.update(&transfer.amount.to_le_bytes());
+        hasher.update(&transfer.deliver_amount.to_le_bytes());
+        hasher.update(&transfer.remaining_ticks.to_le_bytes());
+    }
+
     let digest = hasher.finalize();
     u64::from_le_bytes(
         digest.as_bytes()[..8]
             .try_into()
             .expect("BLAKE3 digest has 32 bytes"),
     )
+}
+
+fn hash_player_storage(
+    hasher: &mut blake3::Hasher,
+    storage: &indexmap::IndexMap<PlayerId, indexmap::IndexMap<String, u32>>,
+) {
+    let mut rows = storage
+        .iter()
+        .map(|(player_id, amounts)| {
+            let mut amounts = amounts
+                .iter()
+                .map(|(name, amount)| (name.clone(), *amount))
+                .collect::<Vec<_>>();
+            amounts.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            (*player_id, amounts)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by_key(|(player_id, _)| *player_id);
+
+    for (player_id, amounts) in rows {
+        hasher.update(&player_id.to_le_bytes());
+        for (name, amount) in amounts {
+            hasher.update(&(name.len() as u64).to_le_bytes());
+            hasher.update(name.as_bytes());
+            hasher.update(&amount.to_le_bytes());
+        }
+    }
 }

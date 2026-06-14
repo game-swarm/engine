@@ -8,6 +8,7 @@ use crate::command::{
     apply_command, source_gate, validate_command,
 };
 use crate::components::*;
+use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
 use crate::world::SwarmWorld;
 
@@ -791,6 +792,9 @@ pub struct WorldSnapshot {
     pending_spawns: PendingSpawnQueue,
     room_counts: RoomDroneCounts,
     pending_combat: PendingCombat,
+    local_storage: PlayerLocalStorage,
+    global_storage: PlayerGlobalStorage,
+    pending_global_transfers: PendingGlobalTransfers,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -859,6 +863,9 @@ impl WorldSnapshot {
             pending_spawns: world.resource::<PendingSpawnQueue>().clone(),
             room_counts: world.resource::<RoomDroneCounts>().clone(),
             pending_combat: world.resource::<PendingCombat>().clone(),
+            local_storage: world.resource::<PlayerLocalStorage>().clone(),
+            global_storage: world.resource::<PlayerGlobalStorage>().clone(),
+            pending_global_transfers: world.resource::<PendingGlobalTransfers>().clone(),
         }
     }
 
@@ -894,6 +901,9 @@ impl WorldSnapshot {
         *world.resource_mut::<PendingSpawnQueue>() = self.pending_spawns;
         *world.resource_mut::<RoomDroneCounts>() = self.room_counts;
         *world.resource_mut::<PendingCombat>() = self.pending_combat;
+        *world.resource_mut::<PlayerLocalStorage>() = self.local_storage;
+        *world.resource_mut::<PlayerGlobalStorage>() = self.global_storage;
+        *world.resource_mut::<PendingGlobalTransfers>() = self.pending_global_transfers;
     }
 
     fn tracked_entities(world: &mut World) -> Vec<Entity> {

@@ -12,6 +12,7 @@ use crate::command::{
 };
 use crate::components::*;
 use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
+use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use crate::visibility::{
     VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
 };
@@ -77,6 +78,19 @@ pub struct VisibleWorldSnapshot {
     pub visibility_radius: i32,
     pub visible_tiles: Vec<VisibleTile>,
     pub entities: Vec<VisibleEntity>,
+    pub local_storage: BTreeMap<String, u32>,
+    pub global_storage: BTreeMap<String, u32>,
+    pub pending_global_transfers: Vec<VisiblePendingGlobalTransfer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisiblePendingGlobalTransfer {
+    pub player_id: PlayerId,
+    pub direction: String,
+    pub resource: String,
+    pub amount: u32,
+    pub deliver_amount: u32,
+    pub remaining_ticks: Tick,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -816,7 +830,46 @@ fn build_visible_snapshot(world: &mut SwarmWorld, context: McpContext) -> Visibl
         visibility_radius: VISIBILITY_RADIUS,
         visible_tiles,
         entities,
+        local_storage: player_storage_snapshot(
+            &world.app.world().resource::<PlayerLocalStorage>().0,
+            context.player_id,
+        ),
+        global_storage: player_storage_snapshot(
+            &world.app.world().resource::<PlayerGlobalStorage>().0,
+            context.player_id,
+        ),
+        pending_global_transfers: world
+            .app
+            .world()
+            .resource::<PendingGlobalTransfers>()
+            .0
+            .iter()
+            .filter(|transfer| transfer.player_id == context.player_id)
+            .map(|transfer| VisiblePendingGlobalTransfer {
+                player_id: transfer.player_id,
+                direction: format!("{:?}", transfer.direction),
+                resource: transfer.resource.clone(),
+                amount: transfer.amount,
+                deliver_amount: transfer.deliver_amount,
+                remaining_ticks: transfer.remaining_ticks,
+            })
+            .collect(),
     }
+}
+
+fn player_storage_snapshot(
+    storage: &indexmap::IndexMap<PlayerId, indexmap::IndexMap<String, u32>>,
+    player_id: PlayerId,
+) -> BTreeMap<String, u32> {
+    storage
+        .get(&player_id)
+        .map(|amounts| {
+            amounts
+                .iter()
+                .map(|(name, amount)| (name.clone(), *amount))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn swarm_get_world_rules() -> WorldRules {

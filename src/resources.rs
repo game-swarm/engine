@@ -2,11 +2,17 @@ use bevy::prelude::Resource as BevyResource;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::components::{BodyPart, StructureType};
+use crate::command::Tick;
+use crate::components::{BodyPart, PlayerId, StructureType};
 
 pub type ResourceName = String;
 pub type ResourceAmount = u32;
 pub type ResourceCost = IndexMap<ResourceName, ResourceAmount>;
+
+pub const TRANSFER_TO_GLOBAL_TICKS: Tick = 10;
+pub const TRANSFER_FROM_GLOBAL_TICKS: Tick = 5;
+pub const TRANSFER_TO_GLOBAL_FEE_PER_10_000: u32 = 100;
+pub const TRANSFER_FROM_GLOBAL_FEE_PER_10_000: u32 = 500;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceDef {
@@ -40,6 +46,79 @@ pub struct ResourceRegistry {
     pub resources: IndexMap<ResourceName, ResourceDef>,
     pub action_costs: ActionCosts,
     pub sources: IndexMap<String, SourceDef>,
+}
+
+#[derive(BevyResource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalStorageConfig {
+    pub enabled: bool,
+    pub capacity: ResourceAmount,
+    pub transfer_to_global_ticks: Tick,
+    pub transfer_from_global_ticks: Tick,
+    pub transfer_to_global_fee_per_10_000: u32,
+    pub transfer_from_global_fee_per_10_000: u32,
+    pub tax_tiers: Vec<GlobalStorageTaxTier>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalStorageTaxTier {
+    pub up_to_percent: u32,
+    pub rate_per_10_000: u32,
+}
+
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerLocalStorage(pub IndexMap<PlayerId, ResourceCost>);
+
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerGlobalStorage(pub IndexMap<PlayerId, ResourceCost>);
+
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingGlobalTransfers(pub Vec<PendingGlobalTransfer>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingGlobalTransfer {
+    pub player_id: PlayerId,
+    pub direction: GlobalTransferDirection,
+    pub resource: ResourceName,
+    pub amount: ResourceAmount,
+    pub deliver_amount: ResourceAmount,
+    pub remaining_ticks: Tick,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GlobalTransferDirection {
+    ToGlobal,
+    FromGlobal,
+}
+
+impl Default for GlobalStorageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            capacity: 100_000,
+            transfer_to_global_ticks: TRANSFER_TO_GLOBAL_TICKS,
+            transfer_from_global_ticks: TRANSFER_FROM_GLOBAL_TICKS,
+            transfer_to_global_fee_per_10_000: TRANSFER_TO_GLOBAL_FEE_PER_10_000,
+            transfer_from_global_fee_per_10_000: TRANSFER_FROM_GLOBAL_FEE_PER_10_000,
+            tax_tiers: vec![
+                GlobalStorageTaxTier {
+                    up_to_percent: 30,
+                    rate_per_10_000: 0,
+                },
+                GlobalStorageTaxTier {
+                    up_to_percent: 60,
+                    rate_per_10_000: 1,
+                },
+                GlobalStorageTaxTier {
+                    up_to_percent: 85,
+                    rate_per_10_000: 5,
+                },
+                GlobalStorageTaxTier {
+                    up_to_percent: 100,
+                    rate_per_10_000: 20,
+                },
+            ],
+        }
+    }
 }
 
 impl Default for ResourceRegistry {

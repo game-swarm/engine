@@ -152,6 +152,9 @@ mod tests {
             visibility_radius: 5,
             visible_tiles: Vec::new(),
             entities: Vec::new(),
+            local_storage: Default::default(),
+            global_storage: Default::default(),
+            pending_global_transfers: Vec::new(),
         }
     }
 
