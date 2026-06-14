@@ -8,7 +8,9 @@ use crate::command::{
     apply_command, source_gate, validate_command,
 };
 use crate::components::*;
-use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
+use crate::resources::{
+    PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
+};
 use crate::rule_module::run_tick_start_scripts;
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
 use crate::world::SwarmWorld;
@@ -85,6 +87,7 @@ pub struct TickMetrics {
     pub commit_failures: u64,
     pub broadcast_failures: u64,
     pub total_commands: u64,
+    pub fuel_consumed: u64,
     pub refund_events: u64,
     pub refund_fuel: u64,
     pub duration_ms: u64,
@@ -94,7 +97,11 @@ impl TickMetrics {
     pub fn record_execution(&mut self, accepted_count: usize, rejections: &[CommandRejection]) {
         self.accepted_commands += accepted_count as u64;
         self.rejected_commands += rejections.len() as u64;
-        self.total_commands += (accepted_count + rejections.len()) as u64;
+        let total_commands = (accepted_count + rejections.len()) as u64;
+        self.total_commands += total_commands;
+        self.fuel_consumed = self
+            .fuel_consumed
+            .saturating_add(total_commands.saturating_mul(COMMAND_REJECTION_FUEL_COST));
         for rejection in rejections {
             if let Some(refund_fuel) = rejection
                 .detail
@@ -217,6 +224,163 @@ impl TickMetricsWriter for InMemoryClickHouseTickMetricsWriter {
 }
 
 pub const CLICKHOUSE_TICK_METRICS_INSERT: &str = "INSERT INTO tick_metrics (tick, player_id, collect_timeout_rate, tick_abandon_rate, refund_abuse_rate, command_rejection_rate, tick_duration_p99, accepted_commands, rejected_commands, refund_events, refund_fuel) VALUES";
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct StrategyMetricsAccumulator {
+    tick_count: u64,
+    executor_timeouts: u64,
+    total_commands: u64,
+    rejected_commands: u64,
+    fuel_consumed: u64,
+    first_tick: Option<Tick>,
+    last_tick: Option<Tick>,
+    resource_start: Option<u64>,
+    resource_end: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategyMetricsDashboardRow {
+    pub player_id: PlayerId,
+    pub tick_start: Tick,
+    pub tick_end: Tick,
+    pub tick_count: u64,
+    pub fuel_consumed: u64,
+    pub timeout_rate: f64,
+    pub command_rejection_rate: f64,
+    pub resource_start: u64,
+    pub resource_end: u64,
+    pub resource_growth_rate: f64,
+}
+
+impl StrategyMetricsDashboardRow {
+    pub fn insert_sql_values(&self) -> String {
+        format!(
+            "({}, {}, {}, {}, {}, {:.6}, {:.6}, {}, {}, {:.6})",
+            self.player_id,
+            self.tick_start,
+            self.tick_end,
+            self.tick_count,
+            self.fuel_consumed,
+            self.timeout_rate,
+            self.command_rejection_rate,
+            self.resource_start,
+            self.resource_end,
+            self.resource_growth_rate
+        )
+    }
+}
+
+pub const CLICKHOUSE_STRATEGY_METRICS_INSERT: &str = "INSERT INTO strategy_metrics_dashboard (player_id, tick_start, tick_end, tick_count, fuel_consumed, timeout_rate, command_rejection_rate, resource_start, resource_end, resource_growth_rate) VALUES";
+
+/// Aggregates P0-6 strategy dashboard metrics by player over an inclusive tick range.
+pub fn aggregate_strategy_metrics_dashboard(
+    traces: &[TickTrace],
+    tick_start: Tick,
+    tick_end: Tick,
+) -> Vec<StrategyMetricsDashboardRow> {
+    if tick_start > tick_end {
+        return Vec::new();
+    }
+
+    let mut accumulators = HashMap::<PlayerId, StrategyMetricsAccumulator>::new();
+    let mut ordered_traces = traces
+        .iter()
+        .filter(|trace| trace.tick >= tick_start && trace.tick <= tick_end)
+        .collect::<Vec<_>>();
+    ordered_traces.sort_by_key(|trace| trace.tick);
+
+    for trace in ordered_traces {
+        if trace.player_id != 0 {
+            let accumulator = accumulators.entry(trace.player_id).or_default();
+            accumulator.tick_count += 1;
+            accumulator.executor_timeouts += trace.metrics.executor_timeouts.min(1);
+            accumulator.total_commands += trace.metrics.total_commands;
+            accumulator.rejected_commands += trace.metrics.rejected_commands;
+            accumulator.fuel_consumed += trace.metrics.fuel_consumed;
+            accumulator.first_tick.get_or_insert(trace.tick);
+            accumulator.last_tick = Some(trace.tick);
+        } else {
+            aggregate_multiplayer_trace_commands(trace, &mut accumulators);
+        }
+
+        for (player_id, resources) in trace.state.player_resource_totals() {
+            if player_id == 0 {
+                continue;
+            }
+            let accumulator = accumulators.entry(player_id).or_default();
+            if accumulator
+                .first_tick
+                .is_none_or(|first_tick| trace.tick <= first_tick)
+            {
+                accumulator.first_tick = Some(trace.tick);
+                accumulator.resource_start = Some(resources);
+            }
+            if accumulator
+                .last_tick
+                .is_none_or(|last_tick| trace.tick >= last_tick)
+            {
+                accumulator.last_tick = Some(trace.tick);
+                accumulator.resource_end = Some(resources);
+            }
+        }
+    }
+
+    let mut rows = accumulators
+        .into_iter()
+        .filter_map(|(player_id, accumulator)| {
+            let first_tick = accumulator.first_tick?;
+            let last_tick = accumulator.last_tick.unwrap_or(first_tick);
+            let resource_start = accumulator.resource_start.unwrap_or_default();
+            let resource_end = accumulator.resource_end.unwrap_or(resource_start);
+            let tick_span = last_tick.saturating_sub(first_tick).max(1);
+            Some(StrategyMetricsDashboardRow {
+                player_id,
+                tick_start: first_tick,
+                tick_end: last_tick,
+                tick_count: accumulator.tick_count,
+                fuel_consumed: accumulator.fuel_consumed,
+                timeout_rate: ratio(accumulator.executor_timeouts, accumulator.tick_count),
+                command_rejection_rate: ratio(
+                    accumulator.rejected_commands,
+                    accumulator.total_commands,
+                ),
+                resource_start,
+                resource_end,
+                resource_growth_rate: (resource_end as f64 - resource_start as f64)
+                    / tick_span as f64,
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.player_id);
+    rows
+}
+
+fn aggregate_multiplayer_trace_commands(
+    trace: &TickTrace,
+    accumulators: &mut HashMap<PlayerId, StrategyMetricsAccumulator>,
+) {
+    let mut per_player_commands = HashMap::<PlayerId, (u64, u64)>::new();
+    for command in &trace.commands {
+        per_player_commands.entry(command.player_id).or_default().0 += 1;
+    }
+    for rejection in &trace.rejections {
+        let counts = per_player_commands
+            .entry(rejection.command.player_id)
+            .or_default();
+        counts.0 += 1;
+        counts.1 += 1;
+    }
+
+    for (player_id, (total_commands, rejected_commands)) in per_player_commands {
+        let accumulator = accumulators.entry(player_id).or_default();
+        accumulator.tick_count += 1;
+        accumulator.total_commands += total_commands;
+        accumulator.rejected_commands += rejected_commands;
+        accumulator.fuel_consumed += total_commands.saturating_mul(COMMAND_REJECTION_FUEL_COST);
+        accumulator.first_tick.get_or_insert(trace.tick);
+        accumulator.last_tick = Some(trace.tick);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayError {
@@ -813,6 +977,25 @@ struct EntitySnapshot {
 }
 
 impl WorldSnapshot {
+    fn player_resource_totals(&self) -> HashMap<PlayerId, u64> {
+        let mut totals = HashMap::<PlayerId, u64>::new();
+        add_player_resource_totals(&mut totals, &self.local_storage.0);
+        add_player_resource_totals(&mut totals, &self.global_storage.0);
+
+        for snapshot in self.entities.values() {
+            if let Some(drone) = &snapshot.drone {
+                *totals.entry(drone.owner).or_default() += resource_total(&drone.carry);
+            }
+            if let Some(structure) = &snapshot.structure {
+                if let (Some(owner), Some(energy)) = (structure.owner, structure.energy) {
+                    *totals.entry(owner).or_default() += energy as u64;
+                }
+            }
+        }
+
+        totals
+    }
+
     pub fn capture(world: &mut World) -> Self {
         let mut query = world.query::<(
             Entity,
@@ -966,6 +1149,19 @@ impl EntitySnapshot {
     }
 }
 
+fn add_player_resource_totals(
+    totals: &mut HashMap<PlayerId, u64>,
+    storage: &indexmap::IndexMap<PlayerId, ResourceCost>,
+) {
+    for (player_id, resources) in storage {
+        *totals.entry(*player_id).or_default() += resource_total(resources);
+    }
+}
+
+fn resource_total(resources: &indexmap::IndexMap<String, u32>) -> u64 {
+    resources.values().map(|amount| *amount as u64).sum()
+}
+
 fn restore_component<T: Component>(entity: &mut EntityWorldMut<'_>, component: Option<T>) {
     if let Some(component) = component {
         entity.insert(component);
@@ -978,7 +1174,7 @@ fn restore_component<T: Component>(entity: &mut EntityWorldMut<'_>, component: O
 mod tests {
     use crate::command::{CommandAction, CommandAuth, Direction, RejectionReason, object_id};
     use crate::systems::PendingSpawnQueue;
-    use crate::{BodyPart, CommandIntent, Structure, StructureType, create_world};
+    use crate::{BodyPart, CommandIntent, Structure, StructureType, create_world, energy_cost};
     use std::sync::{Arc, Barrier, Mutex};
 
     use super::*;
@@ -1274,6 +1470,101 @@ mod tests {
         );
     }
 
+    fn strategy_trace(
+        tick: Tick,
+        player_id: PlayerId,
+        metrics: TickMetrics,
+        local_energy: u32,
+    ) -> TickTrace {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerLocalStorage>()
+            .0
+            .insert(player_id, energy_cost(local_energy));
+
+        TickTrace {
+            tick,
+            player_id,
+            commands: Vec::new(),
+            state: TickState::capture(world.app.world_mut()),
+            rejections: Vec::new(),
+            metrics,
+            state_checksum: world.state_checksum(),
+        }
+    }
+
+    #[test]
+    fn strategy_dashboard_aggregates_player_metrics_over_tick_range() {
+        let traces = vec![
+            strategy_trace(
+                1,
+                7,
+                TickMetrics {
+                    executor_timeouts: 1,
+                    total_commands: 2,
+                    rejected_commands: 1,
+                    fuel_consumed: 20_000,
+                    ..Default::default()
+                },
+                100,
+            ),
+            strategy_trace(
+                2,
+                7,
+                TickMetrics {
+                    total_commands: 3,
+                    fuel_consumed: 30_000,
+                    ..Default::default()
+                },
+                130,
+            ),
+        ];
+
+        let rows = aggregate_strategy_metrics_dashboard(&traces, 1, 2);
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.player_id, 7);
+        assert_eq!(row.tick_start, 1);
+        assert_eq!(row.tick_end, 2);
+        assert_eq!(row.tick_count, 2);
+        assert_eq!(row.fuel_consumed, 50_000);
+        assert_eq!(row.timeout_rate, 0.5);
+        assert_eq!(row.command_rejection_rate, 0.2);
+        assert_eq!(row.resource_start, 100);
+        assert_eq!(row.resource_end, 130);
+        assert_eq!(row.resource_growth_rate, 30.0);
+        assert!(CLICKHOUSE_STRATEGY_METRICS_INSERT.contains("fuel_consumed"));
+        assert!(CLICKHOUSE_STRATEGY_METRICS_INSERT.contains("resource_growth_rate"));
+        assert_eq!(
+            row.insert_sql_values(),
+            "(7, 1, 2, 2, 50000, 0.500000, 0.200000, 100, 130, 30.000000)"
+        );
+    }
+
+    #[test]
+    fn strategy_dashboard_attributes_multiplayer_trace_commands_to_players() {
+        let mut trace = strategy_trace(5, 0, TickMetrics::default(), 0);
+        trace.commands = vec![raw_harvest(2, 1, 5, 100, 200)];
+        trace.rejections = vec![CommandRejection::new(
+            raw_harvest(9, 1, 5, 101, 201),
+            RejectionReason::ObjectNotFound,
+        )];
+
+        let rows = aggregate_strategy_metrics_dashboard(&[trace], 5, 5);
+
+        assert_eq!(
+            rows.iter().map(|row| row.player_id).collect::<Vec<_>>(),
+            vec![2, 9]
+        );
+        assert_eq!(rows[0].command_rejection_rate, 0.0);
+        assert_eq!(rows[1].command_rejection_rate, 1.0);
+        assert_eq!(rows[0].fuel_consumed, 10_000);
+        assert_eq!(rows[1].fuel_consumed, 10_000);
+    }
+
     #[test]
     fn execution_metrics_include_refund_fuel_for_refund_abuse_rate() {
         let mut world = create_world();
@@ -1303,6 +1594,7 @@ mod tests {
 
         assert_eq!(metrics.total_commands, 2);
         assert_eq!(metrics.rejected_commands, 1);
+        assert_eq!(metrics.fuel_consumed, 20_000);
         assert_eq!(metrics.refund_events, 1);
         assert_eq!(metrics.refund_fuel, 5_000);
         assert_eq!(metrics.command_rejection_rate(), 0.5);
