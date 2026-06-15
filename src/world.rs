@@ -23,6 +23,10 @@ use crate::rule_module::{
 };
 use crate::systems::*;
 
+#[path = "shard.rs"]
+pub mod shard;
+pub use shard::*;
+
 static NEXT_TUTORIAL_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct SwarmWorld {
@@ -203,6 +207,16 @@ pub fn create_world() -> SwarmWorld {
     create_world_with_mode(WorldMode::Default)
 }
 
+pub fn create_sharded_world(shard_count: u32) -> Result<MultiShardWorld, ShardConfigError> {
+    MultiShardWorld::new(shard_count)
+}
+
+pub fn create_world_with_shard_config(config: ShardConfig) -> SwarmWorld {
+    let mut world = create_world_with_mode(WorldMode::Default);
+    world.app.insert_resource(config);
+    world
+}
+
 pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
@@ -221,6 +235,7 @@ pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
     app.init_resource::<FoundationDbStore>();
     app.init_resource::<DragonflyCache>();
     app.init_resource::<RankingState>();
+    app.init_resource::<ShardConfig>();
     app.insert_resource(OnboardingConfig::for_mode(mode));
     app.init_resource::<OnboardingProgress>();
     app.add_event::<OnboardingEvent>();
@@ -680,5 +695,109 @@ fn hash_player_storage(
             hasher.update(name.as_bytes());
             hasher.update(&amount.to_le_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::*;
+    use crate::command::{CommandAction, CommandAuth};
+    use crate::realtime::InMemoryNats;
+
+    fn test_command(player_id: PlayerId) -> RawCommand {
+        RawCommand {
+            player_id,
+            tick: 7,
+            source: CommandSource::TestHarness,
+            auth: CommandAuth {
+                source: CommandSource::TestHarness,
+                player_id,
+                tick_submitted: 7,
+                tick_target: 7,
+            },
+            sequence: 1,
+            action: CommandAction::TransferToGlobal {
+                resource: "Energy".to_string(),
+                amount: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn shard_key_uses_deterministic_player_hash() {
+        let first = ShardKey::for_player(42, 4);
+        let second = ShardKey::for_player(42, 4);
+        let other = ShardKey::for_player(43, 4);
+
+        assert_eq!(first, second);
+        assert_eq!(first.player_id, 42);
+        assert!(first.shard_id.0 < 4);
+        assert!(other.shard_id.0 < 4);
+
+        let config = ShardConfig::new(4, first.shard_id).unwrap();
+        assert!(config.owns_player(42));
+        assert_eq!(config.shard_for_player(42), first.shard_id);
+    }
+
+    #[test]
+    fn remote_shard_command_publishes_to_nats_subject() {
+        let remote_player = (1..=100)
+            .find(|player_id| shard_for_player(*player_id, 2) == ShardId(1))
+            .expect("test setup should find a player routed to shard 1");
+        let registry = ShardRegistry::new(ShardConfig::new(2, ShardId(0)).unwrap()).unwrap();
+        let mut router = ShardRouter::new(registry, InMemoryNats::default());
+
+        let routed = router
+            .route_raw_command(test_command(remote_player))
+            .unwrap();
+        assert_eq!(
+            routed,
+            RoutedCommand::Published {
+                subject: "swarm.shard.1.commands".to_string()
+            }
+        );
+
+        let nats = router.into_publisher();
+        assert_eq!(nats.messages.len(), 1);
+        assert_eq!(nats.messages[0].0, "swarm.shard.1.commands");
+        let envelope: ShardEnvelope = serde_json::from_slice(&nats.messages[0].1).unwrap();
+        assert_eq!(envelope.source_shard, ShardId(0));
+        assert_eq!(envelope.target_shard, ShardId(1));
+        assert_eq!(envelope.command.player_id, remote_player);
+    }
+
+    #[test]
+    fn multi_shard_tick_checksum_is_consistent() {
+        let mut first = create_sharded_world(3).unwrap();
+        let mut second = create_sharded_world(3).unwrap();
+
+        assert_eq!(first.state_checksum(), second.state_checksum());
+        for player_id in 1..=12 {
+            let shard_id = first.shard_for_player(player_id);
+            first.shard_mut(shard_id).unwrap().queue_spawn(
+                player_id,
+                player_id as i32,
+                10,
+                vec![BodyPart::Move],
+            );
+            second.shard_mut(shard_id).unwrap().queue_spawn(
+                player_id,
+                player_id as i32,
+                10,
+                vec![BodyPart::Move],
+            );
+        }
+
+        first.run_tick();
+        second.run_tick();
+        assert_eq!(first.state_checksum(), second.state_checksum());
+
+        let before = first.state_checksum();
+        let routed = (1..=12)
+            .map(|player_id| first.shard_for_player(player_id))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(routed.len() > 1);
+        first.run_tick();
+        assert_ne!(before, first.state_checksum());
     }
 }
