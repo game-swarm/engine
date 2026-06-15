@@ -3,7 +3,7 @@ use std::fmt;
 
 use bevy::prelude::{Component, Resource as BevyResource};
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const DEFAULT_DRONE_LIFESPAN: u32 = 1500;
 
@@ -381,20 +381,411 @@ impl DamageTypeRegistry {
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Attributes(pub Vec<String>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum StructureType {
-    Spawn,
-    Extension,
-    Tower,
-    Storage,
-    Link,
-    Extractor,
-    Lab,
-    Terminal,
-    Nuker,
-    Observer,
-    PowerSpawn,
-    Factory,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct StructureType(pub &'static str);
+
+impl StructureType {
+    pub const SPAWN: Self = Self("Spawn");
+    pub const EXTENSION: Self = Self("Extension");
+    pub const TOWER: Self = Self("Tower");
+    pub const STORAGE: Self = Self("Storage");
+    pub const LINK: Self = Self("Link");
+    pub const EXTRACTOR: Self = Self("Extractor");
+    pub const LAB: Self = Self("Lab");
+    pub const TERMINAL: Self = Self("Terminal");
+    pub const NUKER: Self = Self("Nuker");
+    pub const OBSERVER: Self = Self("Observer");
+    pub const POWER_SPAWN: Self = Self("PowerSpawn");
+    pub const FACTORY: Self = Self("Factory");
+
+    #[allow(non_upper_case_globals)]
+    pub const Spawn: Self = Self::SPAWN;
+    #[allow(non_upper_case_globals)]
+    pub const Extension: Self = Self::EXTENSION;
+    #[allow(non_upper_case_globals)]
+    pub const Tower: Self = Self::TOWER;
+    #[allow(non_upper_case_globals)]
+    pub const Storage: Self = Self::STORAGE;
+    #[allow(non_upper_case_globals)]
+    pub const Link: Self = Self::LINK;
+    #[allow(non_upper_case_globals)]
+    pub const Extractor: Self = Self::EXTRACTOR;
+    #[allow(non_upper_case_globals)]
+    pub const Lab: Self = Self::LAB;
+    #[allow(non_upper_case_globals)]
+    pub const Terminal: Self = Self::TERMINAL;
+    #[allow(non_upper_case_globals)]
+    pub const Nuker: Self = Self::NUKER;
+    #[allow(non_upper_case_globals)]
+    pub const Observer: Self = Self::OBSERVER;
+    #[allow(non_upper_case_globals)]
+    pub const PowerSpawn: Self = Self::POWER_SPAWN;
+    #[allow(non_upper_case_globals)]
+    pub const Factory: Self = Self::FACTORY;
+
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(Box::leak(name.into().into_boxed_str()))
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl Default for StructureType {
+    fn default() -> Self {
+        Self::SPAWN
+    }
+}
+
+impl fmt::Display for StructureType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl Serialize for StructureType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for StructureType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::new)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StructureAttackDef {
+    pub damage: u32,
+    pub damage_type: String,
+    pub range: u32,
+    pub cooldown: u32,
+}
+
+impl Default for StructureAttackDef {
+    fn default() -> Self {
+        Self {
+            damage: 0,
+            damage_type: DamageType::Kinetic.to_string(),
+            range: 0,
+            cooldown: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StructureTypeDef {
+    pub name: StructureType,
+    pub description: String,
+    pub category: String,
+    pub hits: u32,
+    pub rcl_required: u8,
+    pub max_per_room: Option<u32>,
+    pub capacity: Option<u32>,
+    pub attack: Option<StructureAttackDef>,
+    pub sight_range: Option<u32>,
+    pub cost: IndexMap<String, u32>,
+}
+
+impl Default for StructureTypeDef {
+    fn default() -> Self {
+        Self {
+            name: StructureType::SPAWN,
+            description: String::new(),
+            category: "core".to_string(),
+            hits: 1,
+            rcl_required: 1,
+            max_per_room: None,
+            capacity: None,
+            attack: None,
+            sight_range: None,
+            cost: IndexMap::new(),
+        }
+    }
+}
+
+#[derive(BevyResource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructureTypeRegistry {
+    pub structure_types: IndexMap<StructureType, StructureTypeDef>,
+}
+
+impl Default for StructureTypeRegistry {
+    fn default() -> Self {
+        let mut registry = Self {
+            structure_types: IndexMap::new(),
+        };
+        registry.insert(
+            "Spawn",
+            "Spawn point for creating drones",
+            "core",
+            5000,
+            1,
+            None,
+            Some(300),
+            None,
+            None,
+            200,
+        );
+        registry.insert(
+            "Extension",
+            "Energy extension",
+            "storage",
+            1000,
+            2,
+            Some(60),
+            Some(50),
+            None,
+            None,
+            50,
+        );
+        registry.insert(
+            "Tower",
+            "Defensive tower",
+            "defense",
+            3000,
+            3,
+            None,
+            Some(1000),
+            Some(StructureAttackDef {
+                damage: 50,
+                damage_type: DamageType::Kinetic.to_string(),
+                range: 5,
+                cooldown: 10,
+            }),
+            None,
+            200,
+        );
+        registry.insert(
+            "Storage",
+            "Large local resource storage",
+            "storage",
+            10000,
+            3,
+            None,
+            Some(1_000_000),
+            None,
+            None,
+            500,
+        );
+        registry.insert(
+            "Link",
+            "Short range energy link",
+            "logistics",
+            1000,
+            4,
+            None,
+            None,
+            None,
+            None,
+            300,
+        );
+        registry.insert(
+            "Extractor",
+            "Mineral extractor",
+            "production",
+            5000,
+            6,
+            None,
+            None,
+            None,
+            None,
+            800,
+        );
+        registry.insert(
+            "Lab",
+            "Resource reaction lab",
+            "production",
+            5000,
+            6,
+            None,
+            None,
+            None,
+            None,
+            1000,
+        );
+        registry.insert(
+            "Terminal",
+            "Market terminal",
+            "logistics",
+            3000,
+            5,
+            None,
+            None,
+            None,
+            None,
+            500,
+        );
+        registry.insert(
+            "Observer",
+            "Remote observer",
+            "intel",
+            500,
+            5,
+            None,
+            None,
+            None,
+            Some(10),
+            300,
+        );
+        registry.insert(
+            "PowerSpawn",
+            "Advanced spawn",
+            "core",
+            5000,
+            7,
+            None,
+            None,
+            None,
+            None,
+            5000,
+        );
+        registry.insert(
+            "Factory",
+            "Commodity factory",
+            "production",
+            5000,
+            6,
+            None,
+            None,
+            None,
+            None,
+            1500,
+        );
+        registry.insert(
+            "Nuker",
+            "Nuclear launcher",
+            "defense",
+            10000,
+            8,
+            None,
+            None,
+            None,
+            None,
+            100000,
+        );
+        registry
+    }
+}
+
+impl StructureTypeRegistry {
+    #[allow(clippy::too_many_arguments)]
+    fn insert(
+        &mut self,
+        name: &'static str,
+        description: &str,
+        category: &str,
+        hits: u32,
+        rcl_required: u8,
+        max_per_room: Option<u32>,
+        capacity: Option<u32>,
+        attack: Option<StructureAttackDef>,
+        sight_range: Option<u32>,
+        energy_cost: u32,
+    ) {
+        let structure_type = StructureType(name);
+        let mut cost = IndexMap::new();
+        cost.insert("Energy".to_string(), energy_cost);
+        self.structure_types.insert(
+            structure_type,
+            StructureTypeDef {
+                name: structure_type,
+                description: description.to_string(),
+                category: category.to_string(),
+                hits,
+                rcl_required,
+                max_per_room,
+                capacity,
+                attack,
+                sight_range,
+                cost,
+            },
+        );
+    }
+
+    pub fn from_defs(defs: Vec<StructureTypeDef>) -> Self {
+        let mut registry = Self::default();
+        for def in defs {
+            registry.structure_types.insert(def.name, def);
+        }
+        registry
+    }
+
+    pub fn get(&self, structure_type: StructureType) -> Option<&StructureTypeDef> {
+        self.structure_types.get(&structure_type)
+    }
+
+    pub fn contains(&self, structure_type: StructureType) -> bool {
+        self.structure_types.contains_key(&structure_type)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomActionSpecialEffect {
+    HealSelf,
+    ScrambleCommands,
+    ConvertToStructure,
+    Disrupt,
+    Fortify,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomActionDef {
+    pub name: String,
+    pub description: String,
+    pub damage_type: Option<String>,
+    pub base_damage: Option<u32>,
+    pub range: u32,
+    pub special_effect: Option<CustomActionSpecialEffect>,
+    pub special_param: Option<f64>,
+    pub cooldown: Option<u32>,
+    pub cost: IndexMap<String, u32>,
+}
+
+impl Default for CustomActionDef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            damage_type: None,
+            base_damage: None,
+            range: 1,
+            special_effect: None,
+            special_param: None,
+            cooldown: None,
+            cost: IndexMap::new(),
+        }
+    }
+}
+
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CustomActionRegistry {
+    pub actions: IndexMap<String, CustomActionDef>,
+}
+
+impl CustomActionRegistry {
+    pub fn from_defs(defs: Vec<CustomActionDef>) -> Self {
+        let mut actions = IndexMap::new();
+        for def in defs {
+            actions.insert(def.name.clone(), def);
+        }
+        Self { actions }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&CustomActionDef> {
+        self.actions.get(name)
+    }
 }
 
 pub const DEFAULT_ROOM_SIZE: i32 = 50;

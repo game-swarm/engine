@@ -42,6 +42,8 @@ pub struct WorldConfig {
     pub combat: WorldCombatConfig,
     pub damage_types: Vec<crate::components::DamageTypeDef>,
     pub body_part_types: Vec<crate::components::BodyPartTypeDef>,
+    pub structure_types: Vec<crate::components::StructureTypeDef>,
+    pub custom_actions: Vec<crate::components::CustomActionDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +158,8 @@ impl Default for WorldConfig {
             combat: WorldCombatConfig::default(),
             damage_types: Vec::new(),
             body_part_types: Vec::new(),
+            structure_types: Vec::new(),
+            custom_actions: Vec::new(),
         }
     }
 }
@@ -299,6 +303,10 @@ impl WorldConfig {
         });
         app.insert_resource(DamageTypeRegistry::from_defs(self.damage_types.clone()));
         app.insert_resource(BodyPartRegistry::from_defs(self.body_part_types.clone()));
+        app.insert_resource(StructureTypeRegistry::from_defs(
+            self.structure_types.clone(),
+        ));
+        app.insert_resource(CustomActionRegistry::from_defs(self.custom_actions.clone()));
     }
     fn register_systems(&self, app: &mut App) {
         if self.propagation_system_enabled() {
@@ -799,7 +807,7 @@ pub fn state_checksum(world: &mut World) -> u64 {
                 p.room.0,
                 p.x,
                 p.y,
-                s.structure_type as u8,
+                s.structure_type.as_str().to_string(),
                 s.owner.unwrap_or(u32::MAX),
                 s.hits,
                 s.hits_max,
@@ -815,7 +823,7 @@ pub fn state_checksum(world: &mut World) -> u64 {
                 *room,
                 *x,
                 *y,
-                *structure_type,
+                structure_type.clone(),
                 *owner,
                 *hits,
                 *hits_max,
@@ -831,7 +839,7 @@ pub fn state_checksum(world: &mut World) -> u64 {
         hasher.update(&room.to_le_bytes());
         hasher.update(&x.to_le_bytes());
         hasher.update(&y.to_le_bytes());
-        hasher.update(&[*structure_type]);
+        hash_bytes(&mut hasher, structure_type.as_bytes());
         hasher.update(&owner.to_le_bytes());
         hasher.update(&hits.to_le_bytes());
         hasher.update(&hits_max.to_le_bytes());

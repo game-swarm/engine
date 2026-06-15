@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 
 use crate::components::*;
@@ -52,9 +53,7 @@ pub enum Direction {
     TopLeft,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
     // --- Phase 1 commands ---
     Move {
@@ -97,7 +96,6 @@ pub enum CommandAction {
         object_id: ObjectId,
         controller_id: ObjectId,
     },
-    #[serde(rename = "Spawn")]
     SpawnDrone {
         spawn_id: ObjectId,
         body: Vec<BodyPart>,
@@ -125,6 +123,293 @@ pub enum CommandAction {
     BuyMarketOrder {
         order_id: u64,
     },
+    Custom {
+        action_type: String,
+        object_id: ObjectId,
+        target_id: Option<ObjectId>,
+        resource: Option<String>,
+        amount: Option<u32>,
+        structure: Option<StructureType>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandActionWire {
+    #[serde(rename = "type")]
+    action_type: String,
+    object_id: Option<ObjectId>,
+    target_id: Option<ObjectId>,
+    controller_id: Option<ObjectId>,
+    spawn_id: Option<ObjectId>,
+    direction: Option<Direction>,
+    body: Option<Vec<BodyPart>>,
+    resource: Option<String>,
+    amount: Option<u32>,
+    range: Option<u32>,
+    x: Option<i32>,
+    y: Option<i32>,
+    structure: Option<StructureType>,
+    price_resource: Option<String>,
+    price_amount: Option<u32>,
+    order_id: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for CommandAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = CommandActionWire::deserialize(deserializer)?;
+        macro_rules! required {
+            ($value:expr, $field:literal) => {
+                $value.ok_or_else(|| serde::de::Error::missing_field($field))?
+            };
+        }
+        Ok(match wire.action_type.as_str() {
+            "Move" => Self::Move {
+                object_id: required!(wire.object_id, "object_id"),
+                direction: required!(wire.direction, "direction"),
+            },
+            "Harvest" => Self::Harvest {
+                object_id: required!(wire.object_id, "object_id"),
+                target_id: required!(wire.target_id, "target_id"),
+                resource: wire.resource,
+            },
+            "Transfer" => Self::Transfer {
+                object_id: required!(wire.object_id, "object_id"),
+                target_id: required!(wire.target_id, "target_id"),
+                resource: required!(wire.resource, "resource"),
+                amount: required!(wire.amount, "amount"),
+            },
+            "Withdraw" => Self::Withdraw {
+                object_id: required!(wire.object_id, "object_id"),
+                target_id: required!(wire.target_id, "target_id"),
+                resource: required!(wire.resource, "resource"),
+                amount: required!(wire.amount, "amount"),
+            },
+            "Attack" => Self::Attack {
+                object_id: required!(wire.object_id, "object_id"),
+                target_id: required!(wire.target_id, "target_id"),
+            },
+            "RangedAttack" => Self::RangedAttack {
+                object_id: required!(wire.object_id, "object_id"),
+                target_id: required!(wire.target_id, "target_id"),
+                range: required!(wire.range, "range"),
+            },
+            "Heal" => Self::Heal {
+                object_id: required!(wire.object_id, "object_id"),
+                target_id: required!(wire.target_id, "target_id"),
+            },
+            "ClaimController" => Self::ClaimController {
+                object_id: required!(wire.object_id, "object_id"),
+                controller_id: required!(wire.controller_id, "controller_id"),
+            },
+            "Spawn" => Self::SpawnDrone {
+                spawn_id: required!(wire.spawn_id, "spawn_id"),
+                body: required!(wire.body, "body"),
+            },
+            "Build" => Self::Build {
+                object_id: required!(wire.object_id, "object_id"),
+                x: required!(wire.x, "x"),
+                y: required!(wire.y, "y"),
+                structure: required!(wire.structure, "structure"),
+            },
+            "TransferToGlobal" => Self::TransferToGlobal {
+                resource: required!(wire.resource, "resource"),
+                amount: required!(wire.amount, "amount"),
+            },
+            "TransferFromGlobal" => Self::TransferFromGlobal {
+                resource: required!(wire.resource, "resource"),
+                amount: required!(wire.amount, "amount"),
+            },
+            "CreateMarketOrder" => Self::CreateMarketOrder {
+                resource: required!(wire.resource, "resource"),
+                amount: required!(wire.amount, "amount"),
+                price_resource: required!(wire.price_resource, "price_resource"),
+                price_amount: required!(wire.price_amount, "price_amount"),
+            },
+            "BuyMarketOrder" => Self::BuyMarketOrder {
+                order_id: required!(wire.order_id, "order_id"),
+            },
+            custom => Self::Custom {
+                action_type: custom.to_string(),
+                object_id: required!(wire.object_id, "object_id"),
+                target_id: wire.target_id,
+                resource: wire.resource,
+                amount: wire.amount,
+                structure: wire.structure,
+            },
+        })
+    }
+}
+
+impl Serialize for CommandAction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            Self::Move {
+                object_id,
+                direction,
+            } => {
+                map.serialize_entry("type", "Move")?;
+                map.serialize_entry("object_id", object_id)?;
+                map.serialize_entry("direction", direction)?;
+            }
+            Self::Harvest {
+                object_id,
+                target_id,
+                resource,
+            } => {
+                map.serialize_entry("type", "Harvest")?;
+                map.serialize_entry("object_id", object_id)?;
+                map.serialize_entry("target_id", target_id)?;
+                if let Some(resource) = resource {
+                    map.serialize_entry("resource", resource)?;
+                }
+            }
+            Self::Transfer {
+                object_id,
+                target_id,
+                resource,
+                amount,
+            } => serialize_resource_action(
+                &mut map, "Transfer", object_id, target_id, resource, amount,
+            )?,
+            Self::Withdraw {
+                object_id,
+                target_id,
+                resource,
+                amount,
+            } => serialize_resource_action(
+                &mut map, "Withdraw", object_id, target_id, resource, amount,
+            )?,
+            Self::Attack {
+                object_id,
+                target_id,
+            } => serialize_target_action(&mut map, "Attack", object_id, target_id)?,
+            Self::RangedAttack {
+                object_id,
+                target_id,
+                range,
+            } => {
+                serialize_target_action(&mut map, "RangedAttack", object_id, target_id)?;
+                map.serialize_entry("range", range)?;
+            }
+            Self::Heal {
+                object_id,
+                target_id,
+            } => serialize_target_action(&mut map, "Heal", object_id, target_id)?,
+            Self::ClaimController {
+                object_id,
+                controller_id,
+            } => {
+                map.serialize_entry("type", "ClaimController")?;
+                map.serialize_entry("object_id", object_id)?;
+                map.serialize_entry("controller_id", controller_id)?;
+            }
+            Self::SpawnDrone { spawn_id, body } => {
+                map.serialize_entry("type", "Spawn")?;
+                map.serialize_entry("spawn_id", spawn_id)?;
+                map.serialize_entry("body", body)?;
+            }
+            Self::Build {
+                object_id,
+                x,
+                y,
+                structure,
+            } => {
+                map.serialize_entry("type", "Build")?;
+                map.serialize_entry("object_id", object_id)?;
+                map.serialize_entry("x", x)?;
+                map.serialize_entry("y", y)?;
+                map.serialize_entry("structure", structure)?;
+            }
+            Self::TransferToGlobal { resource, amount } => {
+                map.serialize_entry("type", "TransferToGlobal")?;
+                map.serialize_entry("resource", resource)?;
+                map.serialize_entry("amount", amount)?;
+            }
+            Self::TransferFromGlobal { resource, amount } => {
+                map.serialize_entry("type", "TransferFromGlobal")?;
+                map.serialize_entry("resource", resource)?;
+                map.serialize_entry("amount", amount)?;
+            }
+            Self::CreateMarketOrder {
+                resource,
+                amount,
+                price_resource,
+                price_amount,
+            } => {
+                map.serialize_entry("type", "CreateMarketOrder")?;
+                map.serialize_entry("resource", resource)?;
+                map.serialize_entry("amount", amount)?;
+                map.serialize_entry("price_resource", price_resource)?;
+                map.serialize_entry("price_amount", price_amount)?;
+            }
+            Self::BuyMarketOrder { order_id } => {
+                map.serialize_entry("type", "BuyMarketOrder")?;
+                map.serialize_entry("order_id", order_id)?;
+            }
+            Self::Custom {
+                action_type,
+                object_id,
+                target_id,
+                resource,
+                amount,
+                structure,
+            } => {
+                map.serialize_entry("type", action_type)?;
+                map.serialize_entry("object_id", object_id)?;
+                if let Some(target_id) = target_id {
+                    map.serialize_entry("target_id", target_id)?;
+                }
+                if let Some(resource) = resource {
+                    map.serialize_entry("resource", resource)?;
+                }
+                if let Some(amount) = amount {
+                    map.serialize_entry("amount", amount)?;
+                }
+                if let Some(structure) = structure {
+                    map.serialize_entry("structure", structure)?;
+                }
+            }
+        }
+        map.end()
+    }
+}
+
+fn serialize_target_action<S>(
+    map: &mut S,
+    action_type: &str,
+    object_id: &ObjectId,
+    target_id: &ObjectId,
+) -> Result<(), S::Error>
+where
+    S: SerializeMap,
+{
+    map.serialize_entry("type", action_type)?;
+    map.serialize_entry("object_id", object_id)?;
+    map.serialize_entry("target_id", target_id)
+}
+
+fn serialize_resource_action<S>(
+    map: &mut S,
+    action_type: &str,
+    object_id: &ObjectId,
+    target_id: &ObjectId,
+    resource: &str,
+    amount: &u32,
+) -> Result<(), S::Error>
+where
+    S: SerializeMap,
+{
+    serialize_target_action(map, action_type, object_id, target_id)?;
+    map.serialize_entry("resource", resource)?;
+    map.serialize_entry("amount", amount)
 }
 
 /// Untrusted command shape emitted by a player module. Envelope fields are not
@@ -211,6 +496,9 @@ pub enum RejectionReason {
     TransferInProgress,
     TerminalRequired,
     OrderNotFound,
+    UnknownAction {
+        action: String,
+    },
 }
 
 pub type CommandResult = Result<(), RejectionReason>;
@@ -231,6 +519,17 @@ pub struct CommandRejection {
     pub rejection: RejectionReason,
     pub detail: serde_json::Value,
     pub tick: Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandActionMetadata {
+    pub name: String,
+    pub description: String,
+    pub params: Vec<String>,
+    pub range: Option<u32>,
+    pub cooldown: Option<u32>,
+    pub cost: ResourceCost,
+    pub special_effect: Option<CustomActionSpecialEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -401,6 +700,12 @@ pub fn validate_command(
         CommandAction::BuyMarketOrder { order_id } => {
             validate_buy_market_order(world, raw.player_id, *order_id)
         }
+        CommandAction::Custom {
+            action_type,
+            object_id,
+            target_id,
+            ..
+        } => validate_custom_action(world, raw.player_id, action_type, *object_id, *target_id),
     };
 
     if matches!(result, Err(RejectionReason::InsufficientResource { .. })) {
@@ -568,6 +873,100 @@ pub fn next_tick_fuel_budget(next_tick_fuel_credit: u64) -> u64 {
         .min(MAX_NEXT_TICK_FUEL_BUDGET)
 }
 
+pub fn available_action_metadata(world: &World) -> Vec<CommandActionMetadata> {
+    let mut actions = vec![
+        builtin_action_metadata("Move", "Move one hex", &["object_id", "direction"]),
+        builtin_action_metadata(
+            "Harvest",
+            "Harvest from a source",
+            &["object_id", "target_id", "resource"],
+        ),
+        builtin_action_metadata(
+            "Transfer",
+            "Transfer resource to a target",
+            &["object_id", "target_id", "resource", "amount"],
+        ),
+        builtin_action_metadata(
+            "Withdraw",
+            "Withdraw resource from a target",
+            &["object_id", "target_id", "resource", "amount"],
+        ),
+        builtin_action_metadata("Attack", "Melee attack", &["object_id", "target_id"]),
+        builtin_action_metadata(
+            "RangedAttack",
+            "Ranged attack",
+            &["object_id", "target_id", "range"],
+        ),
+        builtin_action_metadata("Heal", "Heal a friendly drone", &["object_id", "target_id"]),
+        builtin_action_metadata(
+            "ClaimController",
+            "Claim a room controller",
+            &["object_id", "controller_id"],
+        ),
+        builtin_action_metadata("Spawn", "Spawn a drone", &["spawn_id", "body"]),
+        builtin_action_metadata(
+            "Build",
+            "Build a registered structure type",
+            &["object_id", "x", "y", "structure"],
+        ),
+        builtin_action_metadata(
+            "TransferToGlobal",
+            "Transfer local resources to global storage",
+            &["resource", "amount"],
+        ),
+        builtin_action_metadata(
+            "TransferFromGlobal",
+            "Transfer global resources to local storage",
+            &["resource", "amount"],
+        ),
+        builtin_action_metadata(
+            "CreateMarketOrder",
+            "Create a market order",
+            &["resource", "amount", "price_resource", "price_amount"],
+        ),
+        builtin_action_metadata("BuyMarketOrder", "Buy a market order", &["order_id"]),
+    ];
+    if let Some(registry) = world.get_resource::<CustomActionRegistry>() {
+        actions.extend(
+            registry
+                .actions
+                .values()
+                .map(|action| CommandActionMetadata {
+                    name: action.name.clone(),
+                    description: action.description.clone(),
+                    params: vec![
+                        "object_id".to_string(),
+                        "target_id".to_string(),
+                        "resource".to_string(),
+                        "amount".to_string(),
+                        "structure".to_string(),
+                    ],
+                    range: Some(action.range),
+                    cooldown: action.cooldown,
+                    cost: action.cost.clone(),
+                    special_effect: action.special_effect.clone(),
+                }),
+        );
+    }
+    actions
+}
+
+fn builtin_action_metadata(
+    name: &str,
+    description: &str,
+    params: &[&str],
+) -> CommandActionMetadata {
+    CommandActionMetadata {
+        name: name.to_string(),
+        description: description.to_string(),
+        params: params.iter().map(|param| param.to_string()).collect(),
+        range: None,
+        cooldown: None,
+        cost: ResourceCost::new(),
+        special_effect: None,
+    }
+}
+
 impl RefundAccumulator {
     pub fn record_rejection(
         &mut self,
@@ -621,6 +1020,7 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
         CommandAction::CreateMarketOrder { .. } => "CreateMarketOrder",
         CommandAction::BuyMarketOrder { .. } => "BuyMarketOrder",
+        CommandAction::Custom { action_type, .. } => action_type,
     };
 
     match rejection {
@@ -817,6 +1217,20 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         CommandAction::BuyMarketOrder { order_id } => {
             apply_buy_market_order(world, command.raw.player_id, order_id)
         }
+        CommandAction::Custom {
+            action_type,
+            object_id,
+            target_id,
+            structure,
+            ..
+        } => apply_custom_action(
+            world,
+            command.raw.player_id,
+            &action_type,
+            object_id,
+            target_id,
+            structure,
+        ),
     }
 }
 
@@ -1007,7 +1421,7 @@ fn validate_spawn_drone(
     body: &[BodyPart],
 ) -> CommandResult {
     let (position, structure) = structure_snapshot(world, spawn_id)?;
-    if structure.structure_type != StructureType::Spawn || structure.owner != Some(player_id) {
+    if structure.structure_type != StructureType::SPAWN || structure.owner != Some(player_id) {
         return Err(RejectionReason::NotYourSpawn);
     }
     if structure.cooldown > 0 {
@@ -1061,9 +1475,14 @@ fn validate_build(
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
     ensure_drone_can_act(&drone, BodyPart::Work, true)?;
-    let cost = build_cost(world, structure);
-    ensure_player_resource_cost(world, player_id, &cost, false)?;
-
+    let structure_def = world
+        .resource::<StructureTypeRegistry>()
+        .get(structure)
+        .ok_or(RejectionReason::NotStructure)?
+        .clone();
+    if room_controller_level(world, position.room, player_id) < structure_def.rcl_required {
+        return Err(RejectionReason::NotYourRoom);
+    }
     let target = Position {
         x,
         y,
@@ -1075,7 +1494,10 @@ fn validate_build(
     if tile_has_any_object(world, target) {
         return Err(RejectionReason::TileOccupied);
     }
-    ensure_range(position, target, 1)
+    ensure_range(position, target, 1)?;
+
+    let cost = build_cost(world, structure);
+    ensure_player_resource_cost(world, player_id, &cost, false)
 }
 
 fn validate_transfer_to_global(
@@ -1114,6 +1536,49 @@ fn validate_transfer_to_global(
         return Err(RejectionReason::TargetFull);
     }
     Ok(())
+}
+
+fn validate_custom_action(
+    world: &mut World,
+    player_id: PlayerId,
+    action_type: &str,
+    object_id: ObjectId,
+    target_id: Option<ObjectId>,
+) -> CommandResult {
+    let action = world
+        .resource::<CustomActionRegistry>()
+        .get(action_type)
+        .cloned()
+        .ok_or_else(|| RejectionReason::UnknownAction {
+            action: action_type.to_string(),
+        })?;
+    let (position, drone) = drone_snapshot(world, object_id)?;
+    ensure_owner(&drone, player_id)?;
+    if drone.spawning {
+        return Err(RejectionReason::StillSpawning);
+    }
+    if drone.fatigue > 0 {
+        return Err(RejectionReason::Fatigued);
+    }
+    ensure_player_resource_cost(world, player_id, &action.cost, false)?;
+
+    let Some(target_id) = target_id else {
+        return Ok(());
+    };
+    let (target_position, target_owner) = attackable_snapshot(world, target_id)?;
+    match action.special_effect {
+        Some(CustomActionSpecialEffect::Fortify) => {
+            if target_owner != Some(player_id) {
+                return Err(RejectionReason::NotFriendly);
+            }
+        }
+        _ => {
+            if target_owner == Some(player_id) {
+                return Err(RejectionReason::FriendlyTarget);
+            }
+        }
+    }
+    ensure_range(position, target_position, action.range)
 }
 
 fn validate_transfer_from_global(
@@ -1454,9 +1919,81 @@ fn apply_build(
     };
     world.spawn((
         position,
-        structure_defaults(structure_type, Some(player_id)),
+        structure_defaults(structure_type, Some(player_id), world),
     ));
     send_onboarding_event(world, OnboardingEvent::StructureBuilt);
+    Ok(())
+}
+
+fn apply_custom_action(
+    world: &mut World,
+    player_id: PlayerId,
+    action_type: &str,
+    object_id: ObjectId,
+    target_id: Option<ObjectId>,
+    structure_type: Option<StructureType>,
+) -> CommandResult {
+    let action = world
+        .resource::<CustomActionRegistry>()
+        .get(action_type)
+        .cloned()
+        .ok_or_else(|| RejectionReason::UnknownAction {
+            action: action_type.to_string(),
+        })?;
+    deduct_player_resource_cost(world, player_id, &action.cost, false);
+
+    match action.special_effect {
+        Some(CustomActionSpecialEffect::HealSelf) => {
+            let Some(target_id) = target_id else {
+                return Ok(());
+            };
+            let damage = action.base_damage.unwrap_or_default();
+            let damage_type = action
+                .damage_type
+                .as_deref()
+                .unwrap_or(DamageType::Kinetic.as_str());
+            apply_resisted_damage(world, target_id, damage_type, damage)?;
+            let heal = ((damage as f64) * action.special_param.unwrap_or(0.5)).floor() as u32;
+            let entity = entity(object_id)?;
+            if let Some(mut drone) = world.entity_mut(entity).get_mut::<Drone>() {
+                drone.hits = (drone.hits + heal).min(drone.hits_max);
+            }
+        }
+        Some(CustomActionSpecialEffect::ConvertToStructure) => {
+            let Some(target_id) = target_id else {
+                return Ok(());
+            };
+            let target = entity(target_id)?;
+            let position = *world
+                .entity(target)
+                .get::<Position>()
+                .ok_or(RejectionReason::ObjectNotFound)?;
+            world.entity_mut(target).despawn();
+            world.spawn((
+                position,
+                structure_defaults(
+                    structure_type.unwrap_or(StructureType::FACTORY),
+                    Some(player_id),
+                    world,
+                ),
+            ));
+        }
+        Some(CustomActionSpecialEffect::Fortify) => {
+            let target_id = target_id.unwrap_or(object_id);
+            let target = entity(target_id)?;
+            let mut entity_mut = world.entity_mut(target);
+            if let Some(mut attrs) = entity_mut.get_mut::<Attributes>() {
+                if !attrs.0.iter().any(|attr| attr == "Shielded") {
+                    attrs.0.push("Shielded".to_string());
+                }
+            } else {
+                entity_mut.insert(Attributes(vec!["Shielded".to_string()]));
+            }
+        }
+        Some(CustomActionSpecialEffect::ScrambleCommands)
+        | Some(CustomActionSpecialEffect::Disrupt)
+        | None => {}
+    }
     Ok(())
 }
 
@@ -1902,19 +2439,36 @@ fn tile_has_any_object(world: &mut World, position: Position) -> bool {
             .any(|(object_position, _)| *object_position == position)
 }
 
-fn structure_defaults(structure_type: StructureType, owner: Option<PlayerId>) -> Structure {
-    let (energy, energy_capacity) = match structure_type {
-        StructureType::Spawn => (Some(0), Some(300)),
-        StructureType::Extension => (Some(0), Some(50)),
-        StructureType::Tower => (Some(0), Some(1_000)),
-        _ => (None, None),
+fn structure_defaults(
+    structure_type: StructureType,
+    owner: Option<PlayerId>,
+    world: &World,
+) -> Structure {
+    let def = world
+        .resource::<StructureTypeRegistry>()
+        .get(structure_type);
+    let capacity = def.and_then(|def| def.capacity);
+    let energy_capacity = if matches!(
+        structure_type,
+        StructureType::SPAWN | StructureType::EXTENSION | StructureType::TOWER
+    ) {
+        capacity
+    } else {
+        None
     };
     Structure {
         structure_type,
         owner,
         hits: 1,
-        hits_max: 5_000,
-        energy,
+        hits_max: if matches!(
+            structure_type,
+            StructureType::SPAWN | StructureType::EXTENSION | StructureType::TOWER
+        ) {
+            5_000
+        } else {
+            def.map(|def| def.hits).unwrap_or(5_000)
+        },
+        energy: energy_capacity.map(|_| 0),
         energy_capacity,
         cooldown: 0,
     }
@@ -1965,9 +2519,20 @@ fn ensure_market_enabled(world: &mut World, player_id: PlayerId) -> CommandResul
 
 fn owns_terminal(world: &mut World, player_id: PlayerId) -> bool {
     world.query::<&Structure>().iter(world).any(|structure| {
-        structure.owner == Some(player_id)
-            && matches!(structure.structure_type, StructureType::Terminal)
+        structure.owner == Some(player_id) && structure.structure_type == StructureType::TERMINAL
     })
+}
+
+fn room_controller_level(world: &mut World, room: RoomId, player_id: PlayerId) -> u8 {
+    world
+        .query::<(&Position, &Controller)>()
+        .iter(world)
+        .filter(|(position, controller)| {
+            position.room == room && controller.owner == Some(player_id)
+        })
+        .map(|(_, controller)| controller.level)
+        .max()
+        .unwrap_or(8)
 }
 
 fn player_global_amount(world: &World, player_id: PlayerId, resource: &str) -> u32 {
