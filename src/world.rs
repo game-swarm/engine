@@ -6,8 +6,8 @@ use crate::command::{
     validate_command,
 };
 use crate::components::*;
+use crate::dragonfly::DragonflyCache;
 use crate::fdb::FoundationDbStore;
-use crate::hot_cache::InMemoryDragonfly;
 use crate::onboarding::{
     OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
     send_onboarding_event,
@@ -219,7 +219,7 @@ pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
     app.init_resource::<MarketOrders>();
     app.init_resource::<RhaiRuleModules>();
     app.init_resource::<FoundationDbStore>();
-    app.init_resource::<InMemoryDragonfly>();
+    app.init_resource::<DragonflyCache>();
     app.init_resource::<RankingState>();
     app.insert_resource(OnboardingConfig::for_mode(mode));
     app.init_resource::<OnboardingProgress>();

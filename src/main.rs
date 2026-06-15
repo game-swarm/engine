@@ -50,6 +50,9 @@ fn main() {
 
     let fdb_cluster_file = env::var("FDB_CLUSTER_FILE")
         .unwrap_or_else(|_| "/etc/foundationdb/fdb.cluster".to_string());
+    let dragonfly_url = env::var("DRAGONFLY_URL")
+        .or_else(|_| env::var("REDIS_URL"))
+        .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
     let health_addr =
         env::var("ENGINE_HEALTH_ADDR").unwrap_or_else(|_| DEFAULT_HEALTH_ADDR.to_string());
@@ -67,13 +70,19 @@ fn main() {
     start_health_server(health_addr, Arc::clone(&healthy));
 
     let fdb_store = swarm_engine::FoundationDbStore::connect(Some(&fdb_cluster_file));
+    let dragonfly_cache = swarm_engine::DragonflyCache::connect(&dragonfly_url);
     let fdb_endpoint = read_fdb_endpoint(&fdb_cluster_file);
+    let dragonfly_endpoint = parse_dragonfly_endpoint(&dragonfly_url);
     let nats_endpoint = parse_nats_endpoint(&nats_url);
 
     let fdb_connected = fdb_store.is_ok();
     match &fdb_store {
         Ok(_) => println!("fdb connected cluster_file={fdb_cluster_file}"),
         Err(error) => eprintln!("fdb unavailable: {error}"),
+    }
+    match &dragonfly_cache {
+        Ok(_) => println!("dragonfly configured url={dragonfly_url}"),
+        Err(error) => eprintln!("dragonfly unavailable: {error}"),
     }
 
     match &fdb_endpoint {
@@ -96,6 +105,9 @@ fn main() {
     if let Ok(store) = fdb_store {
         world.app.insert_resource(store);
     }
+    if let Ok(cache) = dragonfly_cache {
+        world.app.insert_resource(cache);
+    }
     world.spawn_drone(
         1,
         10,
@@ -114,7 +126,11 @@ fn main() {
             .as_ref()
             .map(|endpoint| tcp_check(endpoint))
             .unwrap_or(false);
-        healthy.store(fdb_ok && nats_ok, Ordering::Relaxed);
+        let dragonfly_ok = dragonfly_endpoint
+            .as_ref()
+            .map(|endpoint| tcp_check(endpoint))
+            .unwrap_or(false);
+        healthy.store(fdb_ok && dragonfly_ok && nats_ok, Ordering::Relaxed);
 
         if !fdb_ok {
             eprintln!(
@@ -126,13 +142,19 @@ fn main() {
                 "tick={tick} dependency=nats status=degraded action=continue_without_broadcast"
             );
         }
+        if !dragonfly_ok {
+            eprintln!(
+                "tick={tick} dependency=dragonfly status=degraded action=use_in_process_cache"
+            );
+        }
 
         world.run_tick();
         println!(
-            "tick={} state_checksum={} fdb={} nats={}",
+            "tick={} state_checksum={} fdb={} dragonfly={} nats={}",
             tick,
             world.state_checksum(),
             status(fdb_ok),
+            status(dragonfly_ok),
             status(nats_ok)
         );
         tick += 1;
@@ -296,6 +318,21 @@ fn parse_nats_endpoint(url: &str) -> Result<Endpoint, String> {
     let without_scheme = url.strip_prefix("nats://").unwrap_or(url);
     let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
     parse_host_port(authority, 4222)
+}
+
+fn parse_dragonfly_endpoint(url: &str) -> Result<Endpoint, String> {
+    let without_scheme = url
+        .strip_prefix("redis://")
+        .or_else(|| url.strip_prefix("rediss://"))
+        .unwrap_or(url);
+    let authority = without_scheme
+        .split('@')
+        .next_back()
+        .unwrap_or(without_scheme)
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme);
+    parse_host_port(authority, 6379)
 }
 
 fn parse_host_port(value: &str, default_port: u16) -> Result<Endpoint, String> {

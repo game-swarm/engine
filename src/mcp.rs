@@ -1554,16 +1554,22 @@ fn default_docs_topic() -> String {
 pub fn swarm_get_snapshot(world: &mut SwarmWorld, context: McpContext) -> VisibleWorldSnapshot {
     let snapshot = build_visible_snapshot(world, context.clone());
     let key = SnapshotKey::new(context.player_id, context.tick);
-    let authoritative = world
+    world
         .app
         .world_mut()
         .resource_mut::<crate::fdb::FoundationDbStore>()
-        .write_visible_snapshot(snapshot);
-    let mut cache = world
+        .write_visible_snapshot(snapshot.clone());
+
+    world
         .app
         .world_mut()
-        .resource_mut::<crate::hot_cache::InMemoryDragonfly>();
-    read_through_dragonfly(&mut *cache, key, authoritative)
+        .resource_scope(
+            |ecs, mut cache: Mut<'_, crate::dragonfly::DragonflyCache>| {
+                let store = ecs.resource::<crate::fdb::FoundationDbStore>();
+                read_through_dragonfly(&mut *cache, key, store)
+            },
+        )
+        .unwrap_or(snapshot)
 }
 
 fn build_visible_snapshot(world: &mut SwarmWorld, context: McpContext) -> VisibleWorldSnapshot {
@@ -2105,7 +2111,7 @@ mod tests {
         let stats = world
             .app
             .world()
-            .resource::<crate::hot_cache::InMemoryDragonfly>()
+            .resource::<crate::dragonfly::DragonflyCache>()
             .stats();
         assert_eq!(stats.misses, 1);
         assert_eq!(stats.refreshes, 1);
@@ -2114,7 +2120,7 @@ mod tests {
         let stats = world
             .app
             .world()
-            .resource::<crate::hot_cache::InMemoryDragonfly>()
+            .resource::<crate::dragonfly::DragonflyCache>()
             .stats();
         assert_eq!(second, first);
         assert_eq!(stats.hits, 1);

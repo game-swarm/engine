@@ -2,6 +2,7 @@ pub mod arena;
 pub mod clickhouse;
 pub mod command;
 pub mod components;
+pub mod dragonfly;
 pub mod fdb;
 pub mod hot_cache;
 pub mod mcp;
@@ -21,6 +22,7 @@ pub use arena::*;
 pub use clickhouse::*;
 pub use command::*;
 pub use components::*;
+pub use dragonfly::*;
 pub use fdb::*;
 pub use hot_cache::*;
 pub use mcp::{

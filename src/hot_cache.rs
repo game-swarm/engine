@@ -1,7 +1,3 @@
-use std::collections::BTreeMap;
-
-use bevy::prelude::Resource;
-
 use serde::{Deserialize, Serialize};
 
 use crate::command::Tick;
@@ -50,12 +46,6 @@ pub trait DragonflySnapshotCache {
     fn put_snapshot(&mut self, key: SnapshotKey, snapshot: CachedSnapshot);
 }
 
-#[derive(Resource, Debug, Default)]
-pub struct InMemoryDragonfly {
-    snapshots: BTreeMap<SnapshotKey, CachedSnapshot>,
-    stats: DragonflyStats,
-}
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct DragonflyStats {
     pub hits: u64,
@@ -63,53 +53,24 @@ pub struct DragonflyStats {
     pub refreshes: u64,
 }
 
-impl InMemoryDragonfly {
-    pub fn stats(&self) -> DragonflyStats {
-        self.stats
-    }
-
-    pub fn put_visible_snapshot(&mut self, snapshot: VisibleWorldSnapshot) {
-        let key = SnapshotKey::new(snapshot.player_id, snapshot.tick);
-        self.put_snapshot(key, CachedSnapshot::new(snapshot));
-    }
-}
-
-impl DragonflySnapshotCache for InMemoryDragonfly {
-    fn get_snapshot(&mut self, key: SnapshotKey) -> Option<CachedSnapshot> {
-        match self.snapshots.get(&key).cloned() {
-            Some(snapshot) => {
-                self.stats.hits += 1;
-                Some(snapshot)
-            }
-            None => {
-                self.stats.misses += 1;
-                None
-            }
-        }
-    }
-
-    fn put_snapshot(&mut self, key: SnapshotKey, snapshot: CachedSnapshot) {
-        self.stats.refreshes += 1;
-        self.snapshots.insert(key, snapshot);
-    }
-}
-
-pub fn read_through_dragonfly<C>(
+pub fn read_through_dragonfly<C, S>(
     cache: &mut C,
     key: SnapshotKey,
-    authoritative: CachedSnapshot,
-) -> VisibleWorldSnapshot
+    store: &S,
+) -> Option<VisibleWorldSnapshot>
 where
     C: DragonflySnapshotCache,
+    S: FoundationDbSnapshotStore,
 {
+    let authoritative = store.get_snapshot(key)?;
     if let Some(cached) = cache.get_snapshot(key) {
         if cached.matches_authoritative(&authoritative) {
-            return cached.snapshot;
+            return Some(cached.snapshot);
         }
     }
 
     cache.put_snapshot(key, authoritative.clone());
-    authoritative.snapshot
+    Some(authoritative.snapshot)
 }
 
 fn snapshot_fingerprint(snapshot: &VisibleWorldSnapshot) -> [u8; 32] {
@@ -120,6 +81,8 @@ fn snapshot_fingerprint(snapshot: &VisibleWorldSnapshot) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dragonfly::DragonflyCache;
+    use crate::fdb::FoundationDbStore;
     use crate::mcp::VisibleWorldSnapshot;
 
     fn snapshot(tick: Tick, player_id: PlayerId, room_id: u32) -> VisibleWorldSnapshot {
@@ -141,10 +104,12 @@ mod tests {
     fn dragonfly_hit_returns_cached_snapshot_when_consistent() {
         let key = SnapshotKey::new(1, 7);
         let authoritative = CachedSnapshot::new(snapshot(7, 1, 0));
-        let mut cache = InMemoryDragonfly::default();
+        let mut store = FoundationDbStore::unavailable("test degraded mode");
+        store.put_snapshot(key, authoritative.clone());
+        let mut cache = DragonflyCache::in_process();
         cache.put_snapshot(key, authoritative.clone());
 
-        let result = read_through_dragonfly(&mut cache, key, authoritative.clone());
+        let result = read_through_dragonfly(&mut cache, key, &store).unwrap();
 
         assert_eq!(result, authoritative.snapshot);
         assert_eq!(cache.stats().hits, 1);
@@ -156,9 +121,11 @@ mod tests {
     fn dragonfly_miss_reads_fdb_and_backfills_cache() {
         let key = SnapshotKey::new(1, 7);
         let authoritative = CachedSnapshot::new(snapshot(7, 1, 0));
-        let mut cache = InMemoryDragonfly::default();
+        let mut store = FoundationDbStore::unavailable("test degraded mode");
+        store.put_snapshot(key, authoritative.clone());
+        let mut cache = DragonflyCache::in_process();
 
-        let result = read_through_dragonfly(&mut cache, key, authoritative.clone());
+        let result = read_through_dragonfly(&mut cache, key, &store).unwrap();
 
         assert_eq!(result, authoritative.snapshot);
         assert_eq!(cache.stats().misses, 1);
@@ -171,10 +138,12 @@ mod tests {
         let key = SnapshotKey::new(1, 7);
         let authoritative = CachedSnapshot::new(snapshot(7, 1, 0));
         let stale = CachedSnapshot::new(snapshot(7, 1, 99));
-        let mut cache = InMemoryDragonfly::default();
+        let mut store = FoundationDbStore::unavailable("test degraded mode");
+        store.put_snapshot(key, authoritative.clone());
+        let mut cache = DragonflyCache::in_process();
         cache.put_snapshot(key, stale);
 
-        let result = read_through_dragonfly(&mut cache, key, authoritative.clone());
+        let result = read_through_dragonfly(&mut cache, key, &store).unwrap();
 
         assert_eq!(result, authoritative.snapshot);
         assert_eq!(cache.stats().hits, 1);
