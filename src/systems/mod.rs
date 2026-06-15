@@ -5,6 +5,7 @@ pub mod death_mark_system;
 pub mod decay_system;
 pub mod global_storage_system;
 pub mod regeneration_system;
+pub mod seed_rotation_system;
 pub mod spawn_system;
 
 pub use combat_system::{
@@ -20,4 +21,5 @@ pub use death_mark_system::death_mark_system;
 pub use decay_system::decay_system;
 pub use global_storage_system::global_storage_system;
 pub use regeneration_system::regeneration_system;
+pub use seed_rotation_system::{SeedRotationState, seed_rotation_system};
 pub use spawn_system::{PendingSpawn, PendingSpawnQueue, RoomDroneCounts, spawn_system};

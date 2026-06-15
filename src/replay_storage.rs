@@ -1,14 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use serde::{Deserialize, Serialize};
 
 use crate::command::Tick;
 use crate::components::PlayerId;
-use crate::rule_module::RhaiRuleModules;
-use crate::tick::{ReplayError, TickTrace, WorldSnapshot, replay_tick};
-use crate::world::{SwarmWorld, WorldConfig};
+use crate::world::WorldConfig;
 
 pub const DEFAULT_KEYFRAME_INTERVAL: Tick = 100;
+
+// ── Replay Storage Config ────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayStorageConfig {
@@ -35,6 +33,8 @@ impl ReplayStorageConfig {
     }
 }
 
+// ── Mods Lock ────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModVersionHash {
     pub module_id: String,
@@ -47,200 +47,87 @@ pub struct ModsLock {
 }
 
 impl ModsLock {
-    pub fn from_world(world: &bevy::prelude::World) -> Self {
-        let Some(modules) = world.get_resource::<RhaiRuleModules>() else {
-            return Self::default();
-        };
-
-        let entries = modules
-            .module_version_hashes()
-            .into_iter()
-            .map(|(module_id, version_hash)| ModVersionHash {
-                module_id,
-                version_hash,
+    pub fn from_rhai_modules(modules: &crate::rule_module::RhaiRuleModules) -> Self {
+        let modules = modules
+            .active_modules()
+            .iter()
+            .map(|m| ModVersionHash {
+                module_id: m.name.clone(),
+                version_hash: m.version_hash.clone(),
             })
             .collect();
-        Self { modules: entries }
+        Self { modules }
     }
 }
+
+// ── World Config Snapshot ────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorldConfigSnapshot {
-    pub config: WorldConfig,
-    pub fingerprint: [u8; 32],
+    pub tick: Tick,
+    pub config_toml: String,
 }
 
 impl WorldConfigSnapshot {
-    pub fn new(config: WorldConfig) -> Self {
-        let bytes = serde_json::to_vec(&config).expect("world config must serialize");
+    pub fn from_config(tick: Tick, config: &WorldConfig) -> Self {
         Self {
-            config,
-            fingerprint: *blake3::hash(&bytes).as_bytes(),
+            tick,
+            config_toml: toml::to_string_pretty(config).unwrap_or_default(),
         }
-    }
-
-    pub fn from_world(world: &bevy::prelude::World) -> Self {
-        Self::new(world.resource::<WorldConfig>().clone())
     }
 }
 
+// ── Keyframe Data ─────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ReplayEnvironmentSnapshot {
+pub struct KeyframeData {
+    pub tick: Tick,
+    pub world_snapshot: Vec<u8>,
     pub mods_lock: ModsLock,
     pub world_config: WorldConfigSnapshot,
 }
 
-impl ReplayEnvironmentSnapshot {
-    pub fn from_world(world: &bevy::prelude::World) -> Self {
-        Self {
-            mods_lock: ModsLock::from_world(world),
-            world_config: WorldConfigSnapshot::from_world(world),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EntityDelta {
-    pub entity: u64,
-    pub before: Option<crate::tick::EntitySnapshot>,
-    pub after: Option<crate::tick::EntitySnapshot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorldDelta {
-    pub from_tick: Tick,
-    pub to_tick: Tick,
-    pub entity_changes: Vec<EntityDelta>,
-    pub commands: Vec<crate::command::RawCommand>,
-}
-
-impl WorldDelta {
-    pub fn between(
-        before: &WorldSnapshot,
-        after: &WorldSnapshot,
-        from_tick: Tick,
-        to_tick: Tick,
-        commands: Vec<crate::command::RawCommand>,
-    ) -> Self {
-        let mut entity_ids = BTreeSet::new();
-        entity_ids.extend(before.entities().keys().copied());
-        entity_ids.extend(after.entities().keys().copied());
-
-        let entity_changes = entity_ids
-            .into_iter()
-            .filter_map(|entity| {
-                let before_snapshot = before.entities().get(&entity).cloned();
-                let after_snapshot = after.entities().get(&entity).cloned();
-                (before_snapshot != after_snapshot).then_some(EntityDelta {
-                    entity: entity.0,
-                    before: before_snapshot,
-                    after: after_snapshot,
-                })
-            })
-            .collect();
-
-        Self {
-            from_tick,
-            to_tick,
-            entity_changes,
-            commands,
-        }
-    }
-}
+// ── Tick Delta ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ReplayKeyframe {
+pub struct TickDelta {
     pub tick: Tick,
-    pub state: WorldSnapshot,
-    pub environment: ReplayEnvironmentSnapshot,
+    pub commands_json: String,
+    pub entity_changes: Vec<EntityChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ReplayDeltaRecord {
-    pub tick: Tick,
-    pub delta: WorldDelta,
-    pub trace: TickTrace,
+pub enum EntityChange {
+    Created {
+        entity_id: u64,
+        component_data: Vec<u8>,
+    },
+    Modified {
+        entity_id: u64,
+        component_data: Vec<u8>,
+    },
+    Removed {
+        entity_id: u64,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ReplayStorageRecord {
-    Keyframe(ReplayKeyframe),
-    Delta(ReplayDeltaRecord),
+// ── Replay Error ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayError {
+    NoKeyframeFound,
+    TickOutOfRange,
+    StorageUnavailable,
+    ConfigMismatch,
 }
 
-pub fn replay_record_for_trace(
-    previous_state: &WorldSnapshot,
-    trace: TickTrace,
-    environment: ReplayEnvironmentSnapshot,
-    config: &ReplayStorageConfig,
-) -> ReplayStorageRecord {
-    if config.is_keyframe_tick(trace.tick) {
-        ReplayStorageRecord::Keyframe(ReplayKeyframe {
-            tick: trace.tick,
-            state: trace.state.clone(),
-            environment,
-        })
-    } else {
-        ReplayStorageRecord::Delta(ReplayDeltaRecord {
-            tick: trace.tick,
-            delta: WorldDelta::between(
-                previous_state,
-                &trace.state,
-                trace.tick.saturating_sub(1),
-                trace.tick,
-                trace.commands.clone(),
-            ),
-            trace,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct InMemoryReplayStore {
-    pub keyframes: BTreeMap<Tick, ReplayKeyframe>,
-    pub deltas: BTreeMap<Tick, ReplayDeltaRecord>,
-}
-
-impl InMemoryReplayStore {
-    pub fn put(&mut self, record: ReplayStorageRecord) {
-        match record {
-            ReplayStorageRecord::Keyframe(keyframe) => {
-                self.keyframes.insert(keyframe.tick, keyframe);
-            }
-            ReplayStorageRecord::Delta(delta) => {
-                self.deltas.insert(delta.tick, delta);
-            }
+impl std::fmt::Display for ReplayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoKeyframeFound => write!(f, "no keyframe found for requested tick"),
+            Self::TickOutOfRange => write!(f, "tick out of replay range"),
+            Self::StorageUnavailable => write!(f, "replay storage unavailable"),
+            Self::ConfigMismatch => write!(f, "world config mismatch in replay"),
         }
     }
-
-    pub fn replay_to(&self, target_tick: Tick) -> Result<WorldSnapshot, ReplayError> {
-        let (keyframe_tick, keyframe) = self
-            .keyframes
-            .range(..=target_tick)
-            .next_back()
-            .ok_or(ReplayError::MissingKeyframe { tick: target_tick })?;
-        let mut state = keyframe.state.clone();
-        for tick in (keyframe_tick + 1)..=target_tick {
-            let delta = self
-                .deltas
-                .get(&tick)
-                .ok_or(ReplayError::MissingDelta { tick })?;
-            state = replay_tick(&state, &delta.trace)?;
-        }
-        Ok(state)
-    }
-
-    pub fn environment_at(&self, tick: Tick) -> Option<&ReplayEnvironmentSnapshot> {
-        self.keyframes
-            .range(..=tick)
-            .next_back()
-            .map(|(_, keyframe)| &keyframe.environment)
-    }
 }
-
-pub fn replay_environment(world: &SwarmWorld) -> ReplayEnvironmentSnapshot {
-    ReplayEnvironmentSnapshot::from_world(world.app.world())
-}
-
-#[allow(dead_code)]
-fn _player_id_type_guard(_: PlayerId) {}

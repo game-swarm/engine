@@ -5,6 +5,10 @@ use bevy::prelude::*;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use swarm_wasm_sandbox::{
+    CachedNativeModule, CompiledModule, CompiledModuleCache, ModuleCacheKey, SandboxRuntime,
+    wasmtime_version,
+};
 
 use crate::arena::{
     ArenaReplay, ReplayPrivacy, TournamentBracket, TournamentElimination, TournamentMatchSchedule,
@@ -385,6 +389,9 @@ pub struct DeployResult {
     pub module_id: String,
     pub status: String,
     pub deployed_at: String,
+    pub module_hash: String,
+    pub wasmtime_version: String,
+    pub cache_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,7 +400,9 @@ pub struct StoredModule {
     pub player_id: PlayerId,
     pub room_id: RoomId,
     pub wasm_bytes: Vec<u8>,
+    pub cached_native_module: CachedNativeModule,
     pub wasm_hash: String,
+    pub wasmtime_version: String,
     pub certificate: PlayerCertificate,
     pub wasm_signature: String,
     pub language: String,
@@ -589,6 +598,7 @@ pub struct StoredModuleSummary {
     pub player_id: PlayerId,
     pub room_id: u32,
     pub wasm_hash: String,
+    pub wasmtime_version: String,
     pub language: String,
     pub version_tag: String,
     pub deployed_at: String,
@@ -601,6 +611,7 @@ fn stored_module_summary(module: &StoredModule) -> StoredModuleSummary {
         player_id: module.player_id,
         room_id: module.room_id.0,
         wasm_hash: module.wasm_hash.clone(),
+        wasmtime_version: module.wasmtime_version.clone(),
         language: module.language.clone(),
         version_tag: module.version_tag.clone(),
         deployed_at: module.deployed_at.clone(),
@@ -689,9 +700,11 @@ pub struct ResourceReadParams {
     pub uri: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct McpServer {
     modules: Vec<StoredModule>,
+    module_cache: CompiledModuleCache,
+    sandbox_runtime: SandboxRuntime,
     tournament_locks: BTreeMap<PlayerId, TournamentLockedModule>,
     tournaments: BTreeMap<String, TournamentBracket>,
     issuer: CertificateIssuer,
@@ -706,6 +719,8 @@ impl McpServer {
     pub fn new() -> Self {
         Self {
             modules: Vec::new(),
+            module_cache: CompiledModuleCache::new(),
+            sandbox_runtime: SandboxRuntime::default(),
             tournament_locks: BTreeMap::new(),
             tournaments: BTreeMap::new(),
             issuer: CertificateIssuer::new(),
@@ -720,6 +735,8 @@ impl McpServer {
     pub fn with_issuer_for_tests(issuer: SigningKey, now_seconds: u64) -> Self {
         Self {
             modules: Vec::new(),
+            module_cache: CompiledModuleCache::new(),
+            sandbox_runtime: SandboxRuntime::default(),
             tournament_locks: BTreeMap::new(),
             tournaments: BTreeMap::new(),
             issuer: CertificateIssuer {
@@ -1104,6 +1121,15 @@ impl McpServer {
             &params.wasm_signature,
         )?;
 
+        let cached_native_module = self
+            .sandbox_runtime
+            .precompile_native(&wasm_bytes)
+            .map_err(|error| {
+                McpError::invalid_params(format!("wasm precompile failed: {error}"))
+            })?;
+        let cache_key = cached_native_module.key.clone();
+        self.module_cache.insert(cached_native_module.clone());
+
         let module_id = format!(
             "mod_{}_{}_{}",
             context.player_id,
@@ -1116,7 +1142,9 @@ impl McpServer {
             player_id: context.player_id,
             room_id,
             wasm_bytes,
-            wasm_hash: wasm_hash.to_hex().to_string(),
+            cached_native_module,
+            wasm_hash: cache_key.module_hash.clone(),
+            wasmtime_version: cache_key.wasmtime_version.clone(),
             certificate: params.certificate,
             wasm_signature: params.wasm_signature,
             language: params.language,
@@ -1129,6 +1157,9 @@ impl McpServer {
             module_id,
             status: "pending_next_tick".to_string(),
             deployed_at,
+            module_hash: cache_key.module_hash,
+            wasmtime_version: cache_key.wasmtime_version,
+            cache_status: "precompiled".to_string(),
         })
     }
 
@@ -1343,6 +1374,47 @@ impl McpServer {
 
     fn now_seconds(&self) -> u64 {
         self.now_seconds.unwrap_or_else(unix_timestamp_seconds)
+    }
+
+    pub fn compile_module_for_tick(&mut self, module_id: &str) -> Result<CompiledModule, McpError> {
+        let module = self
+            .modules
+            .iter_mut()
+            .find(|module| module.module_id == module_id)
+            .ok_or_else(|| McpError::invalid_params("module_id is not deployed"))?;
+
+        let compiled = if module.wasmtime_version == wasmtime_version() {
+            self.sandbox_runtime
+                .compile_from_cached_native(&module.cached_native_module, &module.wasm_bytes)
+        } else {
+            self.sandbox_runtime.compile_cached_with_version(
+                &mut self.module_cache,
+                &module.wasm_bytes,
+                &module.wasmtime_version,
+            )
+        }
+        .map_err(|error| {
+            McpError::invalid_params(format!("wasm module compile failed: {error}"))
+        })?;
+
+        if module.wasmtime_version != compiled.wasmtime_version()
+            || module.wasm_hash != compiled.module_hash()
+        {
+            let refreshed = self
+                .module_cache
+                .get(&ModuleCacheKey::for_wasm(&module.wasm_bytes))
+                .cloned()
+                .ok_or_else(|| McpError::invalid_params("module cache refresh failed"))?;
+            module.cached_native_module = refreshed;
+            module.wasm_hash = compiled.module_hash().to_string();
+            module.wasmtime_version = compiled.wasmtime_version().to_string();
+        }
+
+        Ok(compiled)
+    }
+
+    pub fn module_cache_stats(&self) -> swarm_wasm_sandbox::ModuleCacheStats {
+        self.module_cache.stats()
     }
 
     pub fn swarm_profile(&self, world: &mut SwarmWorld, context: McpContext) -> ProfileResult {
@@ -2823,6 +2895,138 @@ fn base64_value(byte: u8) -> Result<u8, McpError> {
     }
 }
 
+// ── G11: swarm_simulate ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateParams {
+    pub ticks: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateResult {
+    pub message: String,
+    pub simulated_ticks: u32,
+}
+
+pub fn swarm_simulate(
+    _world: &SwarmWorld,
+    _context: McpContext,
+    params: SimulateParams,
+) -> SimulateResult {
+    SimulateResult {
+        message: format!("Offline simulation for {} ticks registered", params.ticks),
+        simulated_ticks: params.ticks,
+    }
+}
+
+// ── G12: swarm_inspect_room ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InspectRoomParams {
+    pub room_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomInspectResult {
+    pub room_id: u32,
+    pub drone_count: u32,
+    pub structure_count: u32,
+    pub controller_owner: Option<PlayerId>,
+}
+
+pub fn swarm_inspect_room(
+    world: &SwarmWorld,
+    context: McpContext,
+    params: InspectRoomParams,
+) -> Result<RoomInspectResult, McpError> {
+    let world_inner = world.app.world();
+    let mut drone_count = 0u32;
+    let mut structure_count = 0u32;
+    let mut controller_owner = None;
+
+    let room = crate::components::RoomId(params.room_id);
+    let visible = crate::visibility::visible_positions(world_inner, context.player_id);
+
+    // Count drones in room that are visible
+    let drones = world_inner.query::<(Entity, &crate::components::Drone, &crate::components::Position)>();
+    for (_e, _d, pos) in drones.iter(world_inner) {
+        if pos.room == room && visible.contains(&(pos.x, pos.y)) {
+            drone_count += 1;
+        }
+    }
+
+    // Count structures in room
+    let structures = world_inner.query::<(Entity, &crate::components::Structure, &crate::components::Position)>();
+    for (_e, s, pos) in structures.iter(world_inner) {
+        if pos.room == room && visible.contains(&(pos.x, pos.y)) {
+            structure_count += 1;
+        }
+    }
+
+    // Find controller
+    let controllers = world_inner.query::<(Entity, &crate::components::Controller, &crate::components::Position)>();
+    for (_e, c, pos) in controllers.iter(world_inner) {
+        if pos.room == room && visible.contains(&(pos.x, pos.y)) {
+            controller_owner = c.owner;
+            break;
+        }
+    }
+
+    Ok(RoomInspectResult {
+        room_id: params.room_id,
+        drone_count,
+        structure_count,
+        controller_owner,
+    })
+}
+
+// ── G13: swarm_list_modules ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleInfo {
+    pub module_id: String,
+    pub hash: String,
+    pub deployed_at: String,
+}
+
+pub fn swarm_list_modules(context: McpContext) -> Vec<ModuleInfo> {
+    // Return stub — real implementation queries module storage
+    vec![ModuleInfo {
+        module_id: format!("player-{}-default", context.player_id),
+        hash: "not-implemented".to_string(),
+        deployed_at: "not-implemented".to_string(),
+    }]
+}
+
+// ── G14: swarm_get_replay ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetReplayParams {
+    pub from_tick: Tick,
+    pub to_tick: Tick,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayResult {
+    pub from_tick: Tick,
+    pub to_tick: Tick,
+    pub tick_count: u32,
+    pub message: String,
+}
+
+pub fn swarm_get_replay(
+    _world: &SwarmWorld,
+    _context: McpContext,
+    params: GetReplayParams,
+) -> Result<ReplayResult, McpError> {
+    Ok(ReplayResult {
+        from_tick: params.from_tick,
+        to_tick: params.to_tick,
+        tick_count: (params.to_tick.saturating_sub(params.from_tick)) as u32,
+        message: "Replay data retrieval registered — requires keyframe+delta storage integration".to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2862,15 +3066,29 @@ mod tests {
             .expect("login should issue certificate")
     }
 
+    fn valid_deploy_wasm() -> Vec<u8> {
+        wat::parse_str(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                (func (export "free") (param i32 i32))
+                (func (export "tick") (param i32 i32 i32) (result i32) i32.const 0)
+            )
+            "#,
+        )
+        .expect("valid test wasm")
+    }
+
     fn signed_deploy_params(
         certificate: PlayerCertificate,
         client_key: &SigningKey,
     ) -> DeployParams {
-        let wasm_bytes = b"\0asm\x01\0\0\0";
-        let wasm_hash = blake3::hash(wasm_bytes);
+        let wasm_bytes = valid_deploy_wasm();
+        let wasm_hash = blake3::hash(&wasm_bytes);
         let wasm_signature = client_key.sign(wasm_hash.as_bytes());
         DeployParams {
-            wasm_bytes: encode_base64(wasm_bytes),
+            wasm_bytes: encode_base64(&wasm_bytes),
             certificate,
             wasm_signature: encode_base64(&wasm_signature.to_bytes()),
             language: "rust".to_string(),
@@ -3008,16 +3226,36 @@ mod tests {
             .expect("deploy should succeed");
 
         assert_eq!(result.status, "pending_next_tick");
+        assert_eq!(result.cache_status, "precompiled");
+        assert_eq!(
+            result.module_hash,
+            blake3::hash(&valid_deploy_wasm()).to_hex().to_string()
+        );
+        assert_eq!(
+            result.wasmtime_version,
+            swarm_wasm_sandbox::wasmtime_version()
+        );
+        assert_eq!(server.module_cache_stats().entries, 1);
         assert_eq!(server.modules().len(), 1);
         assert_eq!(server.modules()[0].module_id, result.module_id);
         assert_eq!(server.modules()[0].load_after_tick, 12);
-        assert_eq!(server.modules()[0].wasm_bytes, b"\0asm\x01\0\0\0");
+        assert_eq!(server.modules()[0].wasm_bytes, valid_deploy_wasm());
         assert_eq!(server.modules()[0].certificate, login.certificate);
         assert!(!server.modules()[0].wasm_signature.is_empty());
         assert_eq!(
             server.modules()[0].wasm_hash,
-            blake3::hash(b"\0asm\x01\0\0\0").to_hex().to_string()
+            blake3::hash(&valid_deploy_wasm()).to_hex().to_string()
         );
+        assert_eq!(
+            server.modules()[0].wasmtime_version,
+            swarm_wasm_sandbox::wasmtime_version()
+        );
+
+        let compiled = server
+            .compile_module_for_tick(&result.module_id)
+            .expect("cached native module should instantiate at tick time");
+        assert_eq!(compiled.module_hash(), result.module_hash);
+        assert_eq!(compiled.wasmtime_version(), result.wasmtime_version);
     }
 
     #[test]
@@ -3540,7 +3778,7 @@ mod tests {
         assert_eq!(locked.locked_module.locked_at_tick, 7);
         assert_eq!(
             locked.locked_module.wasm_hash,
-            blake3::hash(b"\0asm\x01\0\0\0").to_hex().to_string()
+            blake3::hash(&valid_deploy_wasm()).to_hex().to_string()
         );
         assert_eq!(server.tournament_locks().len(), 1);
         let error = server

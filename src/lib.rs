@@ -37,6 +37,7 @@ pub use mcp::{
 pub use onboarding::*;
 pub use ranking::*;
 pub use realtime::*;
+pub use replay_storage::*;
 pub use resources::*;
 pub use rule_module::*;
 pub use tick::*;

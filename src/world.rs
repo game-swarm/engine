@@ -55,6 +55,7 @@ pub struct WorldSectionConfig {
     pub name: String,
     pub mode: String,
     pub tick_interval_ms: u64,
+    pub seed_rotation_interval: u64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpawnPolicy {
@@ -382,6 +383,7 @@ impl Default for WorldSectionConfig {
             name: "World of Swarm".to_string(),
             mode: "persistent".to_string(),
             tick_interval_ms: crate::components::DEFAULT_TICK_INTERVAL_MS,
+            seed_rotation_interval: 0,
         }
     }
 }
@@ -535,6 +537,7 @@ impl WorldConfig {
                 death_mark_system,
                 spawn_system,
                 regeneration_system,
+                seed_rotation_system,
                 global_storage_system,
                 controller_system,
                 combat_system,
@@ -777,6 +780,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<DragonflyCache>();
     app.init_resource::<RankingState>();
     app.init_resource::<ShardConfig>();
+    app.init_resource::<SeedRotationState>();
     app.insert_resource(OnboardingConfig::for_mode(mode));
     app.init_resource::<OnboardingProgress>();
     app.add_event::<OnboardingEvent>();
