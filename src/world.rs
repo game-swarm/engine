@@ -253,6 +253,7 @@ impl WorldConfig {
                 spawn_system,
                 regeneration_system,
                 global_storage_system,
+                controller_system,
                 combat_system,
                 decay_system,
                 rhai_rule_module_tick_end_system,
@@ -480,6 +481,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<PendingSpawnQueue>();
     app.init_resource::<RoomDroneCounts>();
     app.init_resource::<PendingCombat>();
+    app.init_resource::<PendingControllerUpgrade>();
     app.init_resource::<ResourceRegistry>();
     app.init_resource::<GlobalStorageConfig>();
     app.init_resource::<PlayerLocalStorage>();

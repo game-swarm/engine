@@ -10,7 +10,7 @@ use crate::resources::{
     PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
     ResourceRegistry,
 };
-use crate::systems::{PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
+use crate::systems::{PendingControllerUpgrade, PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
 
 pub type ObjectId = u64;
 pub type Tick = u64;
@@ -23,6 +23,7 @@ pub const MAX_JSON_DEPTH: usize = 10;
 pub const MAX_FUEL: u64 = 10_000_000;
 pub const MAX_REFUND_PER_TICK: u64 = MAX_FUEL / 10;
 pub const MAX_NEXT_TICK_FUEL_BUDGET: u64 = MAX_FUEL + MAX_REFUND_PER_TICK;
+pub const MAX_RANGED_ATTACK_RANGE: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommandSource {
@@ -82,9 +83,18 @@ pub enum CommandAction {
         object_id: ObjectId,
         target_id: ObjectId,
     },
+    RangedAttack {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        range: u32,
+    },
     Heal {
         object_id: ObjectId,
         target_id: ObjectId,
+    },
+    ClaimController {
+        object_id: ObjectId,
+        controller_id: ObjectId,
     },
     #[serde(rename = "Spawn")]
     SpawnDrone {
@@ -187,6 +197,7 @@ pub enum RejectionReason {
     InvalidTerrain,
     TooManyConstructionSites,
     NotStructure,
+    NotController,
     AlreadyFullHealth,
     FriendlyTarget,
     NotYourSpawn,
@@ -345,10 +356,19 @@ pub fn validate_command(
             object_id,
             target_id,
         } => validate_attack(world, raw.player_id, *object_id, *target_id),
+        CommandAction::RangedAttack {
+            object_id,
+            target_id,
+            range,
+        } => validate_ranged_attack(world, raw.player_id, *object_id, *target_id, *range),
         CommandAction::Heal {
             object_id,
             target_id,
         } => validate_heal(world, raw.player_id, *object_id, *target_id),
+        CommandAction::ClaimController {
+            object_id,
+            controller_id,
+        } => validate_claim_controller(world, raw.player_id, *object_id, *controller_id),
         CommandAction::SpawnDrone { spawn_id, body } => {
             validate_spawn_drone(world, raw.player_id, *spawn_id, body)
         }
@@ -507,7 +527,9 @@ pub fn source_allows_action(source: CommandSource, action: &CommandAction) -> bo
 fn action_triggers_combat(action: &CommandAction) -> bool {
     matches!(
         action,
-        CommandAction::Attack { .. } | CommandAction::Heal { .. }
+        CommandAction::Attack { .. }
+            | CommandAction::RangedAttack { .. }
+            | CommandAction::Heal { .. }
     )
 }
 
@@ -589,7 +611,9 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Transfer { .. } => "Transfer",
         CommandAction::Withdraw { .. } => "Withdraw",
         CommandAction::Attack { .. } => "Attack",
+        CommandAction::RangedAttack { .. } => "RangedAttack",
         CommandAction::Heal { .. } => "Heal",
+        CommandAction::ClaimController { .. } => "ClaimController",
         CommandAction::SpawnDrone { .. } => "Spawn",
         CommandAction::Build { .. } => "Build",
         CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
@@ -748,10 +772,19 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             object_id,
             target_id,
         } => apply_attack(world, object_id, target_id),
+        CommandAction::RangedAttack {
+            object_id,
+            target_id,
+            range: _,
+        } => apply_ranged_attack(world, object_id, target_id),
         CommandAction::Heal {
             object_id,
             target_id,
         } => apply_heal(world, object_id, target_id),
+        CommandAction::ClaimController {
+            object_id: _,
+            controller_id,
+        } => apply_claim_controller(world, command.raw.player_id, controller_id),
         CommandAction::SpawnDrone { spawn_id, body } => {
             apply_spawn_drone(world, command.raw.player_id, spawn_id, body)
         }
@@ -848,6 +881,11 @@ fn validate_transfer(
         });
     }
 
+    if let Ok((_, controller)) = controller_snapshot(world, target_id) {
+        if controller.owner != Some(player_id) {
+            return Err(RejectionReason::NotOwner);
+        }
+    }
     let (target_position, space) = target_resource_space(world, target_id, resource)?;
     if space < amount {
         return Err(RejectionReason::TargetFull);
@@ -903,6 +941,29 @@ fn validate_attack(
     ensure_range(position, target_position, 1)
 }
 
+fn validate_ranged_attack(
+    world: &mut World,
+    player_id: PlayerId,
+    object_id: ObjectId,
+    target_id: ObjectId,
+    range: u32,
+) -> CommandResult {
+    if range == 0 || range > MAX_RANGED_ATTACK_RANGE {
+        return Err(RejectionReason::OutOfRange {
+            distance: range,
+            max: MAX_RANGED_ATTACK_RANGE,
+        });
+    }
+    let (position, drone) = drone_snapshot(world, object_id)?;
+    ensure_owner(&drone, player_id)?;
+    ensure_drone_can_act(&drone, BodyPart::RangedAttack, true)?;
+    let (target_position, target_owner) = attackable_snapshot(world, target_id)?;
+    if target_owner == Some(player_id) {
+        return Err(RejectionReason::FriendlyTarget);
+    }
+    ensure_range(position, target_position, range)
+}
+
 fn validate_heal(
     world: &mut World,
     player_id: PlayerId,
@@ -920,6 +981,22 @@ fn validate_heal(
         return Err(RejectionReason::AlreadyFullHealth);
     }
     ensure_range(position, target_position, 3)
+}
+
+fn validate_claim_controller(
+    world: &mut World,
+    player_id: PlayerId,
+    object_id: ObjectId,
+    controller_id: ObjectId,
+) -> CommandResult {
+    let (position, drone) = drone_snapshot(world, object_id)?;
+    ensure_owner(&drone, player_id)?;
+    ensure_drone_can_act(&drone, BodyPart::Claim, true)?;
+    let (target_position, controller) = controller_snapshot(world, controller_id)?;
+    if controller.owner.is_some() && controller.owner != Some(player_id) {
+        return Err(RejectionReason::NotOwner);
+    }
+    ensure_range(position, target_position, 1)
 }
 
 fn validate_spawn_drone(
@@ -1230,6 +1307,29 @@ fn apply_attack(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> 
     Ok(())
 }
 
+fn apply_ranged_attack(
+    world: &mut World,
+    object_id: ObjectId,
+    target_id: ObjectId,
+) -> CommandResult {
+    let (_, drone) = drone_snapshot(world, object_id)?;
+    let damage = crate::systems::ranged_attack_damage(
+        drone
+            .body
+            .iter()
+            .filter(|part| **part == BodyPart::RangedAttack)
+            .count(),
+        *world.resource::<crate::systems::CombatRules>(),
+    );
+    let target = entity(target_id)?;
+    if let Some(mut target_drone) = world.entity_mut(target).get_mut::<Drone>() {
+        target_drone.hits = target_drone.hits.saturating_sub(damage);
+    } else if let Some(mut structure) = world.entity_mut(target).get_mut::<Structure>() {
+        structure.hits = structure.hits.saturating_sub(damage);
+    }
+    Ok(())
+}
+
 fn apply_heal(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> CommandResult {
     let (_, healer) = drone_snapshot(world, object_id)?;
     let heal = healer
@@ -1244,6 +1344,25 @@ fn apply_heal(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> Co
         .get_mut::<Drone>()
         .ok_or(RejectionReason::ObjectNotFound)?;
     drone.hits = (drone.hits + heal).min(drone.hits_max);
+    Ok(())
+}
+
+fn apply_claim_controller(
+    world: &mut World,
+    player_id: PlayerId,
+    controller_id: ObjectId,
+) -> CommandResult {
+    let controller = entity(controller_id)?;
+    let mut entity_mut = world.entity_mut(controller);
+    let mut controller = entity_mut
+        .get_mut::<Controller>()
+        .ok_or(RejectionReason::NotController)?;
+    controller.owner = Some(player_id);
+    if controller.level == 0 {
+        controller.level = 1;
+    }
+    controller.progress_total = crate::systems::rcl_progress_total(controller.level + 1);
+    controller.downgrade_timer = crate::systems::DEFAULT_CONTROLLER_DOWNGRADE_TIMER;
     Ok(())
 }
 
@@ -1527,6 +1646,24 @@ fn attackable_snapshot(
     }
 }
 
+fn controller_snapshot(
+    world: &mut World,
+    object_id: ObjectId,
+) -> Result<(Position, Controller), RejectionReason> {
+    let entity = entity(object_id)?;
+    let entity_ref = world
+        .get_entity(entity)
+        .map_err(|_| RejectionReason::ObjectNotFound)?;
+    let position = *entity_ref
+        .get::<Position>()
+        .ok_or(RejectionReason::ObjectNotFound)?;
+    let controller = entity_ref
+        .get::<Controller>()
+        .ok_or(RejectionReason::NotController)?
+        .clone();
+    Ok((position, controller))
+}
+
 fn target_resource_amount(
     world: &mut World,
     target_id: ObjectId,
@@ -1585,6 +1722,12 @@ fn target_resource_space(
                 .unwrap_or(0)
                 .saturating_sub(structure.energy.unwrap_or(0)),
         ));
+    }
+    if entity_ref.get::<Controller>().is_some() {
+        if resource == "Energy" {
+            return Ok((position, u32::MAX));
+        }
+        return Err(RejectionReason::TargetFull);
     }
     Err(RejectionReason::ObjectNotFound)
 }
@@ -1847,6 +1990,15 @@ fn add_to_target(world: &mut World, entity: Entity, resource: &str, amount: u32)
                 *energy += amount;
                 return Ok(());
             }
+        }
+    }
+    if world.entity(entity).contains::<Controller>() {
+        if resource == "Energy" {
+            world
+                .resource_mut::<PendingControllerUpgrade>()
+                .0
+                .push((entity.to_bits(), amount));
+            return Ok(());
         }
     }
     Err(RejectionReason::ObjectNotFound)
