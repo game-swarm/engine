@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::command::{
@@ -28,6 +29,258 @@ pub mod shard;
 pub use shard::*;
 
 static NEXT_TUTORIAL_WORLD_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorldConfig {
+    pub world: WorldSectionConfig,
+    pub spawn: SpawnConfig,
+    pub code: CodeConfig,
+    pub drone: DroneConfig,
+    pub resources: WorldResourceConfig,
+    pub combat: WorldCombatConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorldSectionConfig {
+    pub name: String,
+    pub mode: String,
+    pub tick_interval_ms: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpawnPolicy {
+    RandomRoom,
+    ManualSelect,
+    FixedSpawn,
+    Inherit,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RespawnPolicy {
+    NewRoom,
+    SameRoom,
+    FixedSpawn,
+    Disabled,
+    Inherit,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpawnConfig {
+    pub policy: SpawnPolicy,
+    pub cooldown: Tick,
+    #[serde(alias = "respawn")]
+    pub respawn_policy: RespawnPolicy,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CodeUpdateWindow {
+    pub every: Tick,
+    pub duration: Tick,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodePropagationSource {
+    Spawn,
+    Controller,
+    Global,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CodeConfig {
+    pub update_cost: crate::resources::ResourceCost,
+    pub update_cooldown: Tick,
+    pub update_window: CodeUpdateWindow,
+    pub propagation_speed: u32,
+    pub propagation_source: CodePropagationSource,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DroneConfig {
+    pub env_vars: bool,
+    pub memory_size: u32,
+    pub memory_spawn_cost: crate::resources::ResourceCost,
+    pub memory_upkeep_cost: crate::resources::ResourceCost,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorldResourceConfig {
+    pub source_regeneration_rate: u32,
+    pub build_cost_multiplier: u32,
+    pub drone_decay_rate: u32,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorldCombatConfig {
+    pub pvp_enabled: bool,
+    pub friendly_fire: bool,
+    pub damage_multiplier: f64,
+}
+impl Default for WorldConfig {
+    fn default() -> Self {
+        Self {
+            world: WorldSectionConfig::default(),
+            spawn: SpawnConfig::default(),
+            code: CodeConfig::default(),
+            drone: DroneConfig::default(),
+            resources: WorldResourceConfig::default(),
+            combat: WorldCombatConfig::default(),
+        }
+    }
+}
+impl Default for WorldSectionConfig {
+    fn default() -> Self {
+        Self {
+            name: "World of Swarm".to_string(),
+            mode: "persistent".to_string(),
+            tick_interval_ms: crate::components::DEFAULT_TICK_INTERVAL_MS,
+        }
+    }
+}
+impl Default for SpawnPolicy {
+    fn default() -> Self {
+        Self::RandomRoom
+    }
+}
+impl Default for RespawnPolicy {
+    fn default() -> Self {
+        Self::NewRoom
+    }
+}
+impl Default for SpawnConfig {
+    fn default() -> Self {
+        Self {
+            policy: SpawnPolicy::RandomRoom,
+            cooldown: 0,
+            respawn_policy: RespawnPolicy::NewRoom,
+        }
+    }
+}
+impl Default for CodeUpdateWindow {
+    fn default() -> Self {
+        Self {
+            every: 0,
+            duration: 0,
+        }
+    }
+}
+impl Default for CodePropagationSource {
+    fn default() -> Self {
+        Self::Spawn
+    }
+}
+impl Default for CodeConfig {
+    fn default() -> Self {
+        Self {
+            update_cost: crate::resources::ResourceCost::new(),
+            update_cooldown: 5,
+            update_window: CodeUpdateWindow::default(),
+            propagation_speed: 0,
+            propagation_source: CodePropagationSource::Spawn,
+        }
+    }
+}
+impl Default for DroneConfig {
+    fn default() -> Self {
+        Self {
+            env_vars: true,
+            memory_size: 1024,
+            memory_spawn_cost: crate::resources::ResourceCost::new(),
+            memory_upkeep_cost: crate::resources::ResourceCost::new(),
+        }
+    }
+}
+impl Default for WorldResourceConfig {
+    fn default() -> Self {
+        Self {
+            source_regeneration_rate: 10_000,
+            build_cost_multiplier: 10_000,
+            drone_decay_rate: 10_000,
+        }
+    }
+}
+impl Default for WorldCombatConfig {
+    fn default() -> Self {
+        Self {
+            pvp_enabled: true,
+            friendly_fire: false,
+            damage_multiplier: 1.0,
+        }
+    }
+}
+impl WorldConfig {
+    pub fn from_toml_str(contents: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(contents)
+    }
+    pub fn from_world_toml(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, WorldConfigLoadError> {
+        let path = path.as_ref();
+        let contents =
+            std::fs::read_to_string(path).map_err(|source| WorldConfigLoadError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Self::from_toml_str(&contents).map_err(WorldConfigLoadError::Parse)
+    }
+    pub fn load_or_default(path: impl AsRef<std::path::Path>) -> Self {
+        Self::from_world_toml(path).unwrap_or_default()
+    }
+    pub fn propagation_system_enabled(&self) -> bool {
+        self.code.propagation_speed > 0
+    }
+    fn combat_damage_multiplier_fixed(&self) -> u32 {
+        let scaled = (self.combat.damage_multiplier * 10_000.0).round();
+        if !scaled.is_finite() || scaled <= 0.0 {
+            0
+        } else {
+            scaled.min(u32::MAX as f64) as u32
+        }
+    }
+    fn install_resources(&self, app: &mut App) {
+        app.insert_resource(self.clone());
+        app.insert_resource(CombatRules {
+            damage_multiplier: self.combat_damage_multiplier_fixed(),
+        });
+    }
+    fn register_systems(&self, app: &mut App) {
+        if self.propagation_system_enabled() {
+            app.add_systems(Update, code_propagation_system.before(spawn_system));
+        }
+        app.add_systems(
+            Update,
+            (
+                rhai_rule_module_tick_start_system,
+                death_mark_system,
+                spawn_system,
+                regeneration_system,
+                global_storage_system,
+                combat_system,
+                decay_system,
+                rhai_rule_module_tick_end_system,
+                death_cleanup_system,
+                onboarding_system,
+            )
+                .chain(),
+        );
+    }
+}
+#[derive(Debug)]
+pub enum WorldConfigLoadError {
+    Io {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    Parse(toml::de::Error),
+}
+impl std::fmt::Display for WorldConfigLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
+            Self::Parse(source) => write!(f, "failed to parse world.toml: {source}"),
+        }
+    }
+}
+impl std::error::Error for WorldConfigLoadError {}
+fn code_propagation_system() {}
 
 pub struct SwarmWorld {
     pub app: App,
@@ -218,12 +471,15 @@ pub fn create_world_with_shard_config(config: ShardConfig) -> SwarmWorld {
 }
 
 pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
+    create_world_with_mode_and_config(mode, WorldConfig::load_or_default("world.toml"))
+}
+
+pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -> SwarmWorld {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.init_resource::<PendingSpawnQueue>();
     app.init_resource::<RoomDroneCounts>();
     app.init_resource::<PendingCombat>();
-    app.init_resource::<CombatRules>();
     app.init_resource::<ResourceRegistry>();
     app.init_resource::<GlobalStorageConfig>();
     app.init_resource::<PlayerLocalStorage>();
@@ -249,7 +505,11 @@ pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
         ),
         WorldMode::Arena => "arena".to_string(),
     };
-    app.insert_resource(WorldSettings::new(mode, namespace.clone()));
+    let mut settings = WorldSettings::new(mode, namespace.clone());
+    if mode != WorldMode::Tutorial {
+        settings.tick_interval_ms = config.world.tick_interval_ms;
+    }
+    app.insert_resource(settings);
     app.world_mut().resource_mut::<RankingState>().mode = mode;
     app.world_mut()
         .resource_mut::<GlobalStorageConfig>()
@@ -262,22 +522,8 @@ pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
             source.regeneration = (source.regeneration / 10).max(1);
         }
     }
-    app.add_systems(
-        Update,
-        (
-            rhai_rule_module_tick_start_system,
-            death_mark_system,
-            spawn_system,
-            regeneration_system,
-            global_storage_system,
-            combat_system,
-            decay_system,
-            rhai_rule_module_tick_end_system,
-            death_cleanup_system,
-            onboarding_system,
-        )
-            .chain(),
-    );
+    config.install_resources(&mut app);
+    config.register_systems(&mut app);
 
     let room = RoomId(0);
     let mut terrains = RoomTerrains::default();
@@ -703,6 +949,100 @@ mod shard_tests {
     use super::*;
     use crate::command::{CommandAction, CommandAuth};
     use crate::realtime::InMemoryNats;
+
+    #[test]
+    fn world_config_defaults_preserve_existing_rules() {
+        let config = WorldConfig::default();
+        assert_eq!(config.spawn.policy, SpawnPolicy::RandomRoom);
+        assert_eq!(config.spawn.cooldown, 0);
+        assert_eq!(config.spawn.respawn_policy, RespawnPolicy::NewRoom);
+        assert_eq!(config.code.update_cooldown, 5);
+        assert_eq!(config.code.propagation_speed, 0);
+        assert!(config.drone.env_vars);
+        assert_eq!(config.drone.memory_size, 1024);
+        assert!(config.combat.pvp_enabled);
+        assert!(!config.combat.friendly_fire);
+        assert_eq!(config.resources.source_regeneration_rate, 10_000);
+        assert!(!config.propagation_system_enabled());
+    }
+
+    #[test]
+    fn world_config_parses_world_toml_rules() {
+        let config = WorldConfig::from_toml_str(
+            r#"
+[world]
+tick_interval_ms = 1500
+[spawn]
+policy = "ManualSelect"
+respawn = "FixedSpawn"
+cooldown = 12
+[code]
+update_cost = { Energy = 500 }
+update_cooldown = 7
+update_window = { every = 100, duration = 10 }
+propagation_speed = 3
+propagation_source = "Controller"
+[drone]
+env_vars = false
+memory_size = 4096
+memory_spawn_cost = { Energy = 1 }
+memory_upkeep_cost = { Energy = 2 }
+[resources]
+source_regeneration_rate = 9000
+build_cost_multiplier = 11000
+drone_decay_rate = 12000
+[combat]
+pvp_enabled = false
+friendly_fire = true
+damage_multiplier = 1.5
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.world.tick_interval_ms, 1500);
+        assert_eq!(config.spawn.policy, SpawnPolicy::ManualSelect);
+        assert_eq!(config.spawn.respawn_policy, RespawnPolicy::FixedSpawn);
+        assert_eq!(config.code.update_cost.get("Energy"), Some(&500));
+        assert_eq!(config.code.update_window.duration, 10);
+        assert_eq!(config.drone.memory_upkeep_cost.get("Energy"), Some(&2));
+        assert!(!config.combat.pvp_enabled);
+        assert!(config.combat.friendly_fire);
+        assert_eq!(config.combat_damage_multiplier_fixed(), 15_000);
+        assert!(config.propagation_system_enabled());
+    }
+
+    #[test]
+    fn create_world_with_config_installs_resources() {
+        let config = WorldConfig::from_toml_str(
+            "[combat]\ndamage_multiplier = 0.5\n[world]\ntick_interval_ms = 2500\n",
+        )
+        .unwrap();
+        let world = create_world_with_mode_and_config(WorldMode::Default, config);
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<WorldSettings>()
+                .tick_interval_ms,
+            2500
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<CombatRules>()
+                .damage_multiplier,
+            5_000
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<WorldConfig>()
+                .code
+                .update_cooldown,
+            5
+        );
+    }
 
     fn test_command(player_id: PlayerId) -> RawCommand {
         RawCommand {
