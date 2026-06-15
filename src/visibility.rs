@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 use crate::command::{ObjectId, Tick, object_id};
 use crate::components::*;
+use crate::world::{PlayerViewMode, WorldConfig};
 
 pub const VISIBILITY_RADIUS: i32 = 5;
 
@@ -21,14 +22,26 @@ pub fn is_visible_to(world: &mut World, entity: Entity, player_id: PlayerId, tic
         return false;
     };
 
+    if full_map_visible(world) {
+        return position_exists(world, position);
+    }
+
     visible_positions(world, player_id).contains(&(position.room, position.x, position.y))
 }
 
 pub fn is_position_visible_to(world: &mut World, player_id: PlayerId, position: Position) -> bool {
+    if full_map_visible(world) {
+        return position_exists(world, position);
+    }
+
     visible_positions(world, player_id).contains(&(position.room, position.x, position.y))
 }
 
 pub fn visible_positions(world: &mut World, player_id: PlayerId) -> BTreeSet<VisiblePositionKey> {
+    if full_map_visible(world) {
+        return all_positions(world);
+    }
+
     let mut anchors = world
         .query::<(
             &Position,
@@ -97,6 +110,29 @@ fn nearby_rooms(room: RoomId) -> impl Iterator<Item = RoomId> {
     (-1..=1).flat_map(move |dy| (-1..=1).filter_map(move |dx| room.adjacent(dx, dy)))
 }
 
+fn full_map_visible(world: &World) -> bool {
+    world.get_resource::<WorldConfig>().is_some_and(|config| {
+        !config.visibility.fog_of_war || config.visibility.player_view == PlayerViewMode::Full
+    })
+}
+
+fn all_positions(world: &World) -> BTreeSet<VisiblePositionKey> {
+    world
+        .resource::<RoomTerrains>()
+        .0
+        .iter()
+        .flat_map(|(room, terrain)| terrain.iter().map(|(x, y, _)| (*room, x, y)))
+        .collect()
+}
+
+fn position_exists(world: &World, position: Position) -> bool {
+    world
+        .resource::<RoomTerrains>()
+        .0
+        .get(&position.room)
+        .is_some_and(|terrain| terrain.contains(position.x, position.y))
+}
+
 fn is_owned_by(world: &World, entity: Entity, player_id: PlayerId) -> bool {
     world
         .get::<Drone>(entity)
@@ -115,7 +151,9 @@ fn is_owned_by(world: &World, entity: Entity, player_id: PlayerId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::WorldMode;
     use crate::create_world;
+    use crate::world::{WorldConfig, create_world_with_mode_and_config};
 
     #[test]
     fn own_entities_always_visible() {
@@ -183,5 +221,47 @@ mod tests {
                 room: far
             }
         ));
+    }
+
+    #[test]
+    fn fog_of_war_disabled_reveals_full_map() {
+        let mut config = WorldConfig::default();
+        config.visibility.fog_of_war = false;
+        let mut world = create_world_with_mode_and_config(WorldMode::Default, config);
+        let enemy = world.spawn_drone(2, 40, 40, vec![BodyPart::Move]);
+
+        assert!(is_visible_to(world.app.world_mut(), enemy, 1, 7));
+        assert!(is_position_visible_to(
+            world.app.world_mut(),
+            1,
+            Position {
+                x: 49,
+                y: 49,
+                room: RoomId(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn full_player_view_reveals_full_map_with_fog_enabled() {
+        let mut config = WorldConfig::default();
+        config.visibility.player_view = PlayerViewMode::Full;
+        let mut world = create_world_with_mode_and_config(WorldMode::Default, config);
+        let enemy = world.spawn_drone(2, 40, 40, vec![BodyPart::Move]);
+
+        assert!(is_visible_to(world.app.world_mut(), enemy, 1, 7));
+    }
+
+    #[test]
+    fn allied_player_view_preserves_drone_visibility_without_alliance_model() {
+        let mut config = WorldConfig::default();
+        config.visibility.player_view = PlayerViewMode::Allied;
+        let mut world = create_world_with_mode_and_config(WorldMode::Default, config);
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let near_enemy = world.spawn_drone(2, 15, 10, vec![BodyPart::Move]);
+        let far_enemy = world.spawn_drone(2, 40, 40, vec![BodyPart::Move]);
+
+        assert!(is_visible_to(world.app.world_mut(), near_enemy, 1, 7));
+        assert!(!is_visible_to(world.app.world_mut(), far_enemy, 1, 7));
     }
 }

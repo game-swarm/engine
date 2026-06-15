@@ -37,6 +37,7 @@ pub struct WorldConfig {
     pub spawn: SpawnConfig,
     pub code: CodeConfig,
     pub drone: DroneConfig,
+    pub visibility: VisibilityConfig,
     pub resources: WorldResourceConfig,
     pub combat: WorldCombatConfig,
 }
@@ -100,6 +101,33 @@ pub struct DroneConfig {
     pub memory_spawn_cost: crate::resources::ResourceCost,
     pub memory_upkeep_cost: crate::resources::ResourceCost,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlayerViewMode {
+    Drone,
+    Full,
+    Allied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplayPrivacy {
+    Private,
+    Allies,
+    World,
+    Public,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VisibilityConfig {
+    pub fog_of_war: bool,
+    pub player_view: PlayerViewMode,
+    pub public_spectate: bool,
+    pub spectate_delay: Tick,
+    pub replay_privacy: ReplayPrivacy,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorldResourceConfig {
@@ -121,6 +149,7 @@ impl Default for WorldConfig {
             spawn: SpawnConfig::default(),
             code: CodeConfig::default(),
             drone: DroneConfig::default(),
+            visibility: VisibilityConfig::default(),
             resources: WorldResourceConfig::default(),
             combat: WorldCombatConfig::default(),
         }
@@ -188,6 +217,30 @@ impl Default for DroneConfig {
         }
     }
 }
+impl Default for PlayerViewMode {
+    fn default() -> Self {
+        Self::Drone
+    }
+}
+
+impl Default for ReplayPrivacy {
+    fn default() -> Self {
+        Self::Private
+    }
+}
+
+impl Default for VisibilityConfig {
+    fn default() -> Self {
+        Self {
+            fog_of_war: true,
+            player_view: PlayerViewMode::Drone,
+            public_spectate: false,
+            spectate_delay: 0,
+            replay_privacy: ReplayPrivacy::Private,
+        }
+    }
+}
+
 impl Default for WorldResourceConfig {
     fn default() -> Self {
         Self {
@@ -965,6 +1018,11 @@ mod shard_tests {
         assert!(config.combat.pvp_enabled);
         assert!(!config.combat.friendly_fire);
         assert_eq!(config.resources.source_regeneration_rate, 10_000);
+        assert!(config.visibility.fog_of_war);
+        assert_eq!(config.visibility.player_view, PlayerViewMode::Drone);
+        assert!(!config.visibility.public_spectate);
+        assert_eq!(config.visibility.spectate_delay, 0);
+        assert_eq!(config.visibility.replay_privacy, ReplayPrivacy::Private);
         assert!(!config.propagation_system_enabled());
     }
 
@@ -989,6 +1047,12 @@ env_vars = false
 memory_size = 4096
 memory_spawn_cost = { Energy = 1 }
 memory_upkeep_cost = { Energy = 2 }
+[visibility]
+fog_of_war = false
+player_view = "full"
+public_spectate = true
+spectate_delay = 100
+replay_privacy = "public"
 [resources]
 source_regeneration_rate = 9000
 build_cost_multiplier = 11000
@@ -1006,6 +1070,11 @@ damage_multiplier = 1.5
         assert_eq!(config.code.update_cost.get("Energy"), Some(&500));
         assert_eq!(config.code.update_window.duration, 10);
         assert_eq!(config.drone.memory_upkeep_cost.get("Energy"), Some(&2));
+        assert!(!config.visibility.fog_of_war);
+        assert_eq!(config.visibility.player_view, PlayerViewMode::Full);
+        assert!(config.visibility.public_spectate);
+        assert_eq!(config.visibility.spectate_delay, 100);
+        assert_eq!(config.visibility.replay_privacy, ReplayPrivacy::Public);
         assert!(!config.combat.pvp_enabled);
         assert!(config.combat.friendly_fire);
         assert_eq!(config.combat_damage_multiplier_fixed(), 15_000);
