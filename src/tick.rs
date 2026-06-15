@@ -12,6 +12,7 @@ use crate::resources::{
     MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
 };
 use crate::rule_module::run_tick_start_scripts;
+use crate::security::{SecurityAlert, SecurityAuditor};
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
 use crate::world::SwarmWorld;
 
@@ -50,7 +51,7 @@ pub trait TickBroadcaster {
     fn broadcast(&mut self, event: TickBroadcast) -> Result<(), BroadcastError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TickTrace {
     pub tick: Tick,
     pub player_id: PlayerId,
@@ -59,6 +60,8 @@ pub struct TickTrace {
     pub rejections: Vec<CommandRejection>,
     pub metrics: TickMetrics,
     pub state_checksum: u64,
+    #[serde(default)]
+    pub security_alerts: Vec<SecurityAlert>,
 }
 
 impl TickTrace {
@@ -394,7 +397,7 @@ pub enum ReplayError {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TickReport {
     pub tick: Tick,
     pub committed: bool,
@@ -402,6 +405,7 @@ pub struct TickReport {
     pub accepted: Vec<RawCommand>,
     pub rejections: Vec<CommandRejection>,
     pub metrics: TickMetrics,
+    pub security_alerts: Vec<SecurityAlert>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,7 +573,7 @@ where
 
         let checksum = self.world.state_checksum();
         let state = TickState::capture(self.world.app.world_mut());
-        let trace = TickTrace {
+        let mut trace = TickTrace {
             tick,
             player_id: 0,
             commands: accepted.clone(),
@@ -577,9 +581,11 @@ where
             rejections: rejections.clone(),
             metrics: self.metrics.clone(),
             state_checksum: checksum,
+            security_alerts: Vec::new(),
         };
+        trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
 
-        if self.committer.commit(trace).is_err() {
+        if self.committer.commit(trace.clone()).is_err() {
             world_snapshot.restore(self.world.app.world_mut());
             self.metrics.commit_failures += 1;
             return TickReport {
@@ -589,6 +595,7 @@ where
                 accepted,
                 rejections,
                 metrics: self.metrics.clone(),
+                security_alerts: trace.security_alerts,
             };
         }
 
@@ -616,6 +623,7 @@ where
             accepted,
             rejections,
             metrics: self.metrics.clone(),
+            security_alerts: trace.security_alerts,
         }
     }
 }
@@ -690,7 +698,7 @@ where
 
         let checksum = self.world.state_checksum();
         let state = TickState::capture(self.world.app.world_mut());
-        let trace = TickTrace {
+        let mut trace = TickTrace {
             tick,
             player_id: self.player_id,
             commands: accepted.clone(),
@@ -698,9 +706,11 @@ where
             rejections: rejections.clone(),
             metrics: self.metrics.clone(),
             state_checksum: checksum,
+            security_alerts: Vec::new(),
         };
+        trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
 
-        if self.committer.commit(trace).is_err() {
+        if self.committer.commit(trace.clone()).is_err() {
             world_snapshot.restore(self.world.app.world_mut());
             self.metrics.commit_failures += 1;
             return TickReport {
@@ -710,6 +720,7 @@ where
                 accepted,
                 rejections,
                 metrics: self.metrics.clone(),
+                security_alerts: trace.security_alerts,
             };
         }
 
@@ -737,6 +748,7 @@ where
             accepted,
             rejections,
             metrics: self.metrics.clone(),
+            security_alerts: trace.security_alerts,
         }
     }
 }
@@ -809,6 +821,10 @@ pub fn tick_trace_writes(trace: &TickTrace) -> Result<Vec<(Vec<u8>, Vec<u8>)>, C
         (
             tick_key(trace.tick, "metrics"),
             encode(&trace.metrics, "tick metrics")?,
+        ),
+        (
+            tick_key(trace.tick, "security_alerts"),
+            encode(&trace.security_alerts, "tick security alerts")?,
         ),
     ])
 }
@@ -1254,6 +1270,7 @@ mod tests {
                 ..Default::default()
             },
             state_checksum: world.state_checksum(),
+            security_alerts: Vec::new(),
         }
     }
 
@@ -1267,8 +1284,14 @@ mod tests {
             .expect("atomic tick commit should succeed");
         let store = committer.into_inner();
 
-        assert_eq!(store.writes.len(), 4);
-        for suffix in ["state", "commands", "rejections", "metrics"] {
+        assert_eq!(store.writes.len(), 5);
+        for suffix in [
+            "state",
+            "commands",
+            "rejections",
+            "metrics",
+            "security_alerts",
+        ] {
             assert!(
                 store.writes.contains_key(&tick_key(42, suffix)),
                 "missing /tick/42/{suffix}"
@@ -1431,6 +1454,7 @@ mod tests {
             rejections: Vec::new(),
             metrics,
             state_checksum: 99,
+            security_alerts: Vec::new(),
         };
 
         let row = ClickHouseTickMetricsRow::from_trace(&trace, &[10, 20, 30, 40]);
@@ -1495,6 +1519,7 @@ mod tests {
             rejections: Vec::new(),
             metrics,
             state_checksum: world.state_checksum(),
+            security_alerts: Vec::new(),
         }
     }
 

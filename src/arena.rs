@@ -98,7 +98,7 @@ pub struct ArenaRules {
 #[derive(Resource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArenaCodeLock(pub HashMap<PlayerId, ArenaPlayerCode>);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArenaReplay {
     pub privacy: ReplayPrivacy,
     pub public: bool,
