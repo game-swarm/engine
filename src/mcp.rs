@@ -18,6 +18,7 @@ use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
 use crate::resources::{
     MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
 };
+use crate::tick::{TickTrace, tick_key};
 use crate::visibility::{
     VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
 };
@@ -506,7 +507,125 @@ pub struct TickExplanation {
     pub visible_tile_count: usize,
     pub accepted_commands: usize,
     pub rejected_commands: usize,
+    pub accepted: Vec<RawCommand>,
+    pub rejected: Vec<TickCommandRejection>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickCommandRejection {
+    pub command: RawCommand,
+    pub rejection: RejectionReason,
+    pub detail: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerrainParams {
+    pub x: i32,
+    pub y: i32,
+    #[serde(default)]
+    pub room_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerrainResult {
+    pub x: i32,
+    pub y: i32,
+    pub room_id: u32,
+    pub terrain: TerrainType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectsInRangeParams {
+    pub x: i32,
+    pub y: i32,
+    pub range: u32,
+    #[serde(default)]
+    pub room_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectsInRangeResult {
+    pub origin: VisiblePosition,
+    pub range: u32,
+    pub entities: Vec<VisibleEntity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateModuleParams {
+    pub wasm_bytes: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidateModuleResult {
+    pub valid: bool,
+    pub wasm_hash: Option<String>,
+    pub size_bytes: usize,
+    pub issues: Vec<String>,
+    pub estimated_fuel: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RollbackParams {
+    #[serde(default)]
+    pub room_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RollbackResult {
+    pub status: String,
+    pub rolled_back_to: StoredModuleSummary,
+    pub removed_module_id: String,
+    pub load_after_tick: Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredModuleSummary {
+    pub module_id: String,
+    pub player_id: PlayerId,
+    pub room_id: u32,
+    pub wasm_hash: String,
+    pub language: String,
+    pub version_tag: String,
+    pub deployed_at: String,
+    pub load_after_tick: Tick,
+}
+
+fn stored_module_summary(module: &StoredModule) -> StoredModuleSummary {
+    StoredModuleSummary {
+        module_id: module.module_id.clone(),
+        player_id: module.player_id,
+        room_id: module.room_id.0,
+        wasm_hash: module.wasm_hash.clone(),
+        language: module.language.clone(),
+        version_tag: module.version_tag.clone(),
+        deployed_at: module.deployed_at.clone(),
+        load_after_tick: module.load_after_tick,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InspectEntityParams {
+    pub object_id: ObjectId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FullEntityState {
+    pub id: ObjectId,
+    pub position: Option<VisiblePosition>,
+    pub owner: Option<PlayerId>,
+    pub drone: Option<Drone>,
+    pub structure: Option<Structure>,
+    pub source: Option<Source>,
+    pub resource: Option<crate::components::Resource>,
+    pub terrain: Option<TerrainType>,
+    pub controller: Option<Controller>,
+    pub marked_for_death: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -580,6 +699,7 @@ pub struct McpServer {
     revoked_certificates: BTreeSet<String>,
     rate_limiter: RateLimiter,
     now_seconds: Option<u64>,
+    tick_traces: Vec<TickTrace>,
 }
 
 impl McpServer {
@@ -593,6 +713,7 @@ impl McpServer {
             revoked_certificates: BTreeSet::new(),
             rate_limiter: RateLimiter::new(),
             now_seconds: None,
+            tick_traces: Vec::new(),
         }
     }
 
@@ -608,6 +729,7 @@ impl McpServer {
             revoked_certificates: BTreeSet::new(),
             rate_limiter: RateLimiter::new(),
             now_seconds: Some(now_seconds),
+            tick_traces: Vec::new(),
         }
     }
 
@@ -647,14 +769,33 @@ impl McpServer {
         match tool {
             "swarm_get_snapshot" => serde_json::to_value(swarm_get_snapshot(world, context))
                 .map_err(|error| McpError::invalid_params(error.to_string())),
+            "swarm_get_terrain" => {
+                let params: TerrainParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_get_terrain(world, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_objects_in_range" => {
+                let params: ObjectsInRangeParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_get_objects_in_range(world, context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_get_world_rules" => serde_json::to_value(swarm_get_world_rules())
                 .map_err(|error| McpError::invalid_params(error.to_string())),
+            "swarm_get_schema" => Ok(swarm_get_schema()),
             "swarm_get_available_actions" => {
                 serde_json::to_value(swarm_get_available_actions(context))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_explain_last_tick" => {
-                serde_json::to_value(swarm_explain_last_tick(world, context))
+                serde_json::to_value(self.swarm_explain_last_tick(world, context))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_inspect_entity" => {
+                let params: InspectEntityParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_inspect_entity(world, context, params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_profile" => serde_json::to_value(self.swarm_profile(world, context))
@@ -733,6 +874,18 @@ impl McpServer {
                 let params: DeployParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
                 serde_json::to_value(self.swarm_deploy(world, context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_validate_module" => {
+                let params: ValidateModuleParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_validate_module(params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_rollback" => {
+                let params: RollbackParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_rollback(context, params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             method => Err(McpError::method_not_found(method)),
@@ -979,6 +1132,33 @@ impl McpServer {
         })
     }
 
+    pub fn swarm_rollback(
+        &mut self,
+        context: McpContext,
+        params: RollbackParams,
+    ) -> Result<RollbackResult, McpError> {
+        let room_id = RoomId(params.room_id);
+        let latest_index = self
+            .modules
+            .iter()
+            .rposition(|module| module.player_id == context.player_id && module.room_id == room_id)
+            .ok_or_else(|| McpError::invalid_params("no deployed module exists for player/room"))?;
+        let previous_index = self.modules[..latest_index]
+            .iter()
+            .rposition(|module| module.player_id == context.player_id && module.room_id == room_id)
+            .ok_or_else(|| McpError::invalid_params("no previous module version exists"))?;
+
+        let removed = self.modules.remove(latest_index);
+        self.modules[previous_index].load_after_tick = context.tick + 1;
+        let rolled_back_to = stored_module_summary(&self.modules[previous_index]);
+        Ok(RollbackResult {
+            status: "pending_next_tick".to_string(),
+            rolled_back_to,
+            removed_module_id: removed.module_id,
+            load_after_tick: context.tick + 1,
+        })
+    }
+
     pub fn swarm_tournament_precommit(
         &mut self,
         context: McpContext,
@@ -1123,6 +1303,22 @@ impl McpServer {
         &self.modules
     }
 
+    pub fn record_tick_trace(&mut self, trace: TickTrace) {
+        self.tick_traces.push(trace);
+    }
+
+    pub fn tick_traces(&self) -> &[TickTrace] {
+        &self.tick_traces
+    }
+
+    pub fn swarm_explain_last_tick(
+        &self,
+        world: &mut SwarmWorld,
+        context: McpContext,
+    ) -> TickExplanation {
+        swarm_explain_last_tick_from_traces(world, context, &self.tick_traces)
+    }
+
     fn verify_certificate_for_player(
         &self,
         certificate: &PlayerCertificate,
@@ -1205,8 +1401,20 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Get the visible world state for a player at the current tick".to_string(),
         },
         ToolInfo {
+            name: "swarm_get_terrain".to_string(),
+            description: "Get terrain type at room coordinates".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_objects_in_range".to_string(),
+            description: "Get visible entities within range of coordinates".to_string(),
+        },
+        ToolInfo {
             name: "swarm_get_world_rules".to_string(),
             description: "Get the world rules and mods configuration".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_schema".to_string(),
+            description: "Get the CommandIntent JSON Schema".to_string(),
         },
         ToolInfo {
             name: "swarm_get_available_actions".to_string(),
@@ -1215,6 +1423,10 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
         ToolInfo {
             name: "swarm_explain_last_tick".to_string(),
             description: "Explain the last tick's results for a player".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_inspect_entity".to_string(),
+            description: "Inspect full state for an owned or visible entity".to_string(),
         },
         ToolInfo {
             name: "swarm_profile".to_string(),
@@ -1231,6 +1443,14 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
         ToolInfo {
             name: "swarm_deploy".to_string(),
             description: "Deploy a WASM module for a player".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_validate_module".to_string(),
+            description: "Validate a WASM module before deployment".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_rollback".to_string(),
+            description: "Rollback to the previous deployed WASM version".to_string(),
         },
         ToolInfo {
             name: "swarm_tournament_precommit".to_string(),
@@ -1255,13 +1475,21 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
 
 fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
     match tool {
-        "swarm_deploy" | "swarm_tournament_precommit" | "swarm_tournament_create" => {
+        "swarm_deploy"
+        | "swarm_validate_module"
+        | "swarm_rollback"
+        | "swarm_tournament_precommit"
+        | "swarm_tournament_create" => {
             Some(CommandSource::McpDeploy)
         }
         "swarm_get_snapshot"
+        | "swarm_get_terrain"
+        | "swarm_get_objects_in_range"
         | "swarm_get_world_rules"
+        | "swarm_get_schema"
         | "swarm_get_available_actions"
         | "swarm_explain_last_tick"
+        | "swarm_inspect_entity"
         | "swarm_profile"
         | "swarm_dry_run_commands"
         | "swarm_get_docs"
@@ -1284,13 +1512,19 @@ fn tournament_tool_infos() -> Vec<ToolInfo> {
             matches!(
                 tool.name.as_str(),
                 "swarm_get_snapshot"
+                    | "swarm_get_terrain"
+                    | "swarm_get_objects_in_range"
                     | "swarm_get_world_rules"
+                    | "swarm_get_schema"
                     | "swarm_get_available_actions"
                     | "swarm_explain_last_tick"
+                    | "swarm_inspect_entity"
                     | "swarm_profile"
                     | "swarm_dry_run_commands"
                     | "swarm_get_docs"
                     | "swarm_deploy"
+                    | "swarm_validate_module"
+                    | "swarm_rollback"
                     | "swarm_tournament_precommit"
                     | "swarm_tournament_status"
                     | "swarm_tournament_create"
@@ -1347,22 +1581,293 @@ pub fn swarm_get_available_actions(context: McpContext) -> AvailableActionsResul
     }
 }
 
+pub fn swarm_get_schema() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CommandIntent",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "action"],
+        "properties": {
+            "sequence": {"type": "integer", "minimum": 0, "maximum": 4294967295_u64},
+            "action": {"oneOf": command_action_schemas()},
+        }
+    })
+}
+
+fn command_action_schemas() -> Vec<Value> {
+    vec![
+        command_action_schema("Move", &["object_id", "direction"], json!({"object_id": object_id_schema(), "direction": direction_schema()})),
+        command_action_schema("Harvest", &["object_id", "target_id"], json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}})),
+        command_action_schema("Transfer", &["object_id", "target_id", "resource", "amount"], json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema()})),
+        command_action_schema("Withdraw", &["object_id", "target_id", "resource", "amount"], json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema()})),
+        command_action_schema("Attack", &["object_id", "target_id"], json!({"object_id": object_id_schema(), "target_id": object_id_schema()})),
+        command_action_schema("RangedAttack", &["object_id", "target_id", "range"], json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "range": {"type": "integer", "minimum": 1, "maximum": 50}})),
+        command_action_schema("Heal", &["object_id", "target_id"], json!({"object_id": object_id_schema(), "target_id": object_id_schema()})),
+        command_action_schema("ClaimController", &["object_id", "controller_id"], json!({"object_id": object_id_schema(), "controller_id": object_id_schema()})),
+        command_action_schema("Spawn", &["spawn_id", "body"], json!({"spawn_id": object_id_schema(), "body": {"type": "array", "items": body_part_schema(), "minItems": 1, "maxItems": crate::command::MAX_BODY_PARTS}})),
+        command_action_schema("Build", &["object_id", "x", "y", "structure"], json!({"object_id": object_id_schema(), "x": coord_schema(), "y": coord_schema(), "structure": structure_type_schema()})),
+        command_action_schema("TransferToGlobal", &["resource", "amount"], json!({"resource": {"type": "string"}, "amount": amount_schema()})),
+        command_action_schema("TransferFromGlobal", &["resource", "amount"], json!({"resource": {"type": "string"}, "amount": amount_schema()})),
+        command_action_schema("CreateMarketOrder", &["resource", "amount", "price_resource", "price_amount"], json!({"resource": {"type": "string"}, "amount": amount_schema(), "price_resource": {"type": "string"}, "price_amount": amount_schema()})),
+        command_action_schema("BuyMarketOrder", &["order_id"], json!({"order_id": {"type": "integer", "minimum": 0}})),
+        json!({"type": "object", "additionalProperties": false, "required": ["type", "object_id"], "properties": {"type": {"type": "string", "not": {"enum": wasm_action_names()}}, "object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema(), "structure": structure_type_schema()}}),
+    ]
+}
+
+fn command_action_schema(action_type: &str, required: &[&str], properties: Value) -> Value {
+    let mut required_fields = vec!["type".to_string()];
+    required_fields.extend(required.iter().map(|field| (*field).to_string()));
+    let mut map = serde_json::Map::new();
+    map.insert("type".to_string(), json!({"const": action_type}));
+    if let Some(properties) = properties.as_object() {
+        map.extend(properties.clone());
+    }
+    json!({"type": "object", "additionalProperties": false, "required": required_fields, "properties": map})
+}
+
+fn object_id_schema() -> Value { json!({"type": "integer", "minimum": 0}) }
+fn amount_schema() -> Value { json!({"type": "integer", "minimum": 1, "maximum": 4294967295_u64}) }
+fn coord_schema() -> Value { json!({"type": "integer"}) }
+fn direction_schema() -> Value { json!({"type": "string", "enum": ["Top", "TopRight", "BottomRight", "Bottom", "BottomLeft", "TopLeft"]}) }
+fn body_part_schema() -> Value { json!({"type": "string", "enum": ["Move", "Work", "Carry", "Attack", "RangedAttack", "Heal", "Claim", "Tough"]}) }
+fn structure_type_schema() -> Value { json!({"type": "string", "enum": ["Spawn", "Extension", "Tower", "Road", "Wall", "Rampart", "Storage", "Container", "Controller"]}) }
+
 pub fn swarm_explain_last_tick(world: &mut SwarmWorld, context: McpContext) -> TickExplanation {
+    swarm_explain_last_tick_from_traces(world, context, &[])
+}
+
+fn swarm_explain_last_tick_from_traces(
+    world: &mut SwarmWorld,
+    context: McpContext,
+    traces: &[TickTrace],
+) -> TickExplanation {
+    let last_tick = context.tick.saturating_sub(1);
     let snapshot = swarm_get_snapshot(world, context.clone());
+    let trace = traces
+        .iter()
+        .rev()
+        .find(|trace| trace.tick == last_tick && (trace.player_id == context.player_id || trace.player_id == 0));
+    let accepted = trace
+        .map(|trace| {
+            trace
+                .commands
+                .iter()
+                .filter(|command| command.player_id == context.player_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let rejected = trace
+        .map(|trace| {
+            trace
+                .rejections
+                .iter()
+                .filter(|rejection| rejection.command.player_id == context.player_id)
+                .map(|rejection| TickCommandRejection {
+                    command: rejection.command.clone(),
+                    rejection: rejection.rejection.clone(),
+                    detail: rejection.detail.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let notes = if let Some(trace) = trace {
+        vec![format!(
+            "Loaded tick trace from {} for {}",
+            String::from_utf8_lossy(&tick_key(trace.tick, "commands")),
+            if trace.player_id == 0 { "multi-player tick" } else { "player tick" }
+        )]
+    } else {
+        vec![
+            "No persisted tick trace is attached to this in-process MCP server".to_string(),
+            "Call McpServer::record_tick_trace from the tick committer path to enable command explanations".to_string(),
+        ]
+    };
     TickExplanation {
-        tick: context.tick.saturating_sub(1),
+        tick: last_tick,
         player_id: context.player_id,
-        state_checksum: world.state_checksum(),
+        state_checksum: trace.map(|trace| trace.state_checksum).unwrap_or_else(|| world.state_checksum()),
         visible_entity_count: snapshot.entities.len(),
         visible_tile_count: snapshot.visible_tiles.len(),
-        accepted_commands: 0,
-        rejected_commands: 0,
-        notes: vec![
-            "No persisted tick trace is attached to this in-process MCP server yet".to_string(),
-            "Use swarm_dry_run_commands to validate candidate commands without mutating world"
-                .to_string(),
-        ],
+        accepted_commands: accepted.len(),
+        rejected_commands: rejected.len(),
+        accepted,
+        rejected,
+        notes,
     }
+}
+
+pub fn swarm_get_terrain(
+    world: &SwarmWorld,
+    params: TerrainParams,
+) -> Result<TerrainResult, McpError> {
+    let room = RoomId(params.room_id);
+    let terrain = world
+        .get_terrain(room, params.x, params.y)
+        .ok_or_else(|| McpError::invalid_params("coordinates are outside a known room"))?;
+    Ok(TerrainResult {
+        x: params.x,
+        y: params.y,
+        room_id: params.room_id,
+        terrain,
+    })
+}
+
+pub fn swarm_get_objects_in_range(
+    world: &mut SwarmWorld,
+    context: McpContext,
+    params: ObjectsInRangeParams,
+) -> Result<ObjectsInRangeResult, McpError> {
+    let origin = Position {
+        x: params.x,
+        y: params.y,
+        room: RoomId(params.room_id),
+    };
+    if world.get_terrain(origin.room, origin.x, origin.y).is_none() {
+        return Err(McpError::invalid_params("coordinates are outside a known room"));
+    }
+    let visible_positions = visible_positions(world.app.world_mut(), context.player_id);
+    let visible_ids = visible_entity_ids(world.app.world_mut(), context.player_id, context.tick);
+    let mut entities = visible_entities(world.app.world_mut(), &visible_positions, &visible_ids)
+        .into_iter()
+        .filter(|entity| {
+            mcp_hex_distance(origin, visible_entity_position(entity)) <= params.range
+        })
+        .collect::<Vec<_>>();
+    entities.sort_by_key(entity_sort_key);
+    Ok(ObjectsInRangeResult {
+        origin: visible_position(origin),
+        range: params.range,
+        entities,
+    })
+}
+
+pub fn swarm_inspect_entity(
+    world: &mut SwarmWorld,
+    context: McpContext,
+    params: InspectEntityParams,
+) -> Result<FullEntityState, McpError> {
+    let entity = Entity::from_bits(params.object_id);
+    let (position, owner, drone, structure, source, resource, terrain, controller, marked_for_death) = {
+        let entity_ref = world
+            .app
+            .world()
+            .get_entity(entity)
+            .map_err(|_| McpError::invalid_params("entity is not visible or does not exist"))?;
+        (
+            entity_ref.get::<Position>().copied(),
+            entity_ref.get::<Owner>().copied(),
+            entity_ref.get::<Drone>().cloned(),
+            entity_ref.get::<Structure>().cloned(),
+            entity_ref.get::<Source>().cloned(),
+            entity_ref.get::<crate::components::Resource>().cloned(),
+            entity_ref.get::<Terrain>().copied(),
+            entity_ref.get::<Controller>().cloned(),
+            entity_ref.contains::<MarkedForDeath>(),
+        )
+    };
+    let visible = position.is_some_and(|position| is_visible_to(world.app.world_mut(), context.player_id, position));
+    let owned = owner.is_some_and(|owner| owner.0 == context.player_id)
+        || drone.as_ref().is_some_and(|drone| drone.owner == context.player_id)
+        || structure.as_ref().is_some_and(|structure| structure.owner == Some(context.player_id))
+        || controller.as_ref().is_some_and(|controller| controller.owner == Some(context.player_id));
+    if !visible && !owned {
+        return Err(McpError::invalid_params("entity is not visible or does not exist"));
+    }
+    Ok(FullEntityState {
+        id: params.object_id,
+        position: position.map(visible_position),
+        owner: owner.map(|owner| owner.0),
+        drone,
+        structure,
+        source,
+        resource,
+        terrain: terrain.map(|terrain| terrain.0),
+        controller,
+        marked_for_death,
+    })
+}
+
+pub fn swarm_validate_module(params: ValidateModuleParams) -> ValidateModuleResult {
+    let mut issues = Vec::new();
+    let wasm_bytes = match decode_base64(&params.wasm_bytes) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            issues.push(error.message);
+            Vec::new()
+        }
+    };
+    if wasm_bytes.is_empty() {
+        issues.push("wasm_bytes is empty".to_string());
+    }
+    if wasm_bytes.len() > MAX_WASM_BYTES {
+        issues.push("wasm module exceeds max size".to_string());
+    }
+    if !wasm_bytes.is_empty() && !wasm_bytes.starts_with(b"\0asm") {
+        issues.push("wasm_bytes must start with the WebAssembly magic header".to_string());
+    }
+    if wasm_bytes.len() >= 8 && &wasm_bytes[4..8] != b"\x01\0\0\0" {
+        issues.push("wasm module version must be 1".to_string());
+    }
+    if wasm_bytes.len() > 8 {
+        validate_wasm_sections(&wasm_bytes, &mut issues);
+    }
+    let wasm_hash = (!wasm_bytes.is_empty()).then(|| blake3::hash(&wasm_bytes).to_hex().to_string());
+    let estimated_fuel = u64::try_from(wasm_bytes.len()).unwrap_or(u64::MAX).saturating_mul(10);
+    ValidateModuleResult {
+        valid: issues.is_empty(),
+        wasm_hash,
+        size_bytes: wasm_bytes.len(),
+        issues,
+        estimated_fuel,
+    }
+}
+
+fn validate_wasm_sections(bytes: &[u8], issues: &mut Vec<String>) {
+    if bytes.len() < 8 { return; }
+    let mut offset = 8;
+    let mut last_known_section = 0_u8;
+    while offset < bytes.len() {
+        let section_id = bytes[offset];
+        offset += 1;
+        let Some(section_size) = read_uleb_u32(bytes, &mut offset) else {
+            issues.push("wasm section has invalid LEB128 size".to_string());
+            return;
+        };
+        let section_size = section_size as usize;
+        let Some(section_end) = offset.checked_add(section_size) else {
+            issues.push("wasm section size overflows".to_string());
+            return;
+        };
+        if section_end > bytes.len() {
+            issues.push("wasm section extends past end of module".to_string());
+            return;
+        }
+        if section_id > 12 {
+            issues.push(format!("unknown wasm section id {section_id}"));
+        }
+        if section_id != 0 {
+            if section_id <= last_known_section {
+                issues.push("wasm sections are out of order".to_string());
+            }
+            last_known_section = section_id;
+        }
+        offset = section_end;
+    }
+}
+
+fn read_uleb_u32(bytes: &[u8], offset: &mut usize) -> Option<u32> {
+    let mut result = 0_u32;
+    let mut shift = 0;
+    for _ in 0..5 {
+        let byte = *bytes.get(*offset)?;
+        *offset += 1;
+        result |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 { return Some(result); }
+        shift += 7;
+    }
+    None
 }
 
 pub fn swarm_profile(
@@ -2026,6 +2531,25 @@ fn visible_position(position: Position) -> VisiblePosition {
         y: position.y,
         room_id: position.room.0,
     }
+}
+
+fn visible_entity_position(entity: &VisibleEntity) -> Position {
+    let position = match entity {
+        VisibleEntity::Drone(entity) => &entity.position,
+        VisibleEntity::Structure(entity) => &entity.position,
+        VisibleEntity::Source(entity) => &entity.position,
+        VisibleEntity::Resource(entity) => &entity.position,
+        VisibleEntity::Controller(entity) => &entity.position,
+    };
+    Position { x: position.x, y: position.y, room: RoomId(position.room_id) }
+}
+
+fn mcp_hex_distance(from: Position, to: Position) -> u32 {
+    if from.room != to.room { return u32::MAX; }
+    let dx = from.x - to.x;
+    let dy = from.y - to.y;
+    let dz = -dx - dy;
+    dx.unsigned_abs().max(dy.unsigned_abs()).max(dz.unsigned_abs())
 }
 
 fn entity_sort_key(entity: &VisibleEntity) -> (u8, ObjectId) {
