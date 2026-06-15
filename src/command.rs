@@ -100,6 +100,10 @@ pub enum CommandAction {
         spawn_id: ObjectId,
         body: Vec<BodyPart>,
     },
+    Recycle {
+        object_id: ObjectId,
+        spawn_id: ObjectId,
+    },
     Build {
         object_id: ObjectId,
         x: i32,
@@ -209,6 +213,10 @@ impl<'de> Deserialize<'de> for CommandAction {
                 spawn_id: required!(wire.spawn_id, "spawn_id"),
                 body: required!(wire.body, "body"),
             },
+            "Recycle" => Self::Recycle {
+                object_id: required!(wire.object_id, "object_id"),
+                spawn_id: required!(wire.spawn_id, "spawn_id"),
+            },
             "Build" => Self::Build {
                 object_id: required!(wire.object_id, "object_id"),
                 x: required!(wire.x, "x"),
@@ -315,6 +323,14 @@ impl Serialize for CommandAction {
                 map.serialize_entry("type", "Spawn")?;
                 map.serialize_entry("spawn_id", spawn_id)?;
                 map.serialize_entry("body", body)?;
+            }
+            Self::Recycle {
+                object_id,
+                spawn_id,
+            } => {
+                map.serialize_entry("type", "Recycle")?;
+                map.serialize_entry("object_id", object_id)?;
+                map.serialize_entry("spawn_id", spawn_id)?;
             }
             Self::Build {
                 object_id,
@@ -672,6 +688,10 @@ pub fn validate_command(
         CommandAction::SpawnDrone { spawn_id, body } => {
             validate_spawn_drone(world, raw.player_id, *spawn_id, body)
         }
+        CommandAction::Recycle {
+            object_id,
+            spawn_id,
+        } => validate_recycle(world, raw.player_id, *object_id, *spawn_id),
         CommandAction::Build {
             object_id,
             x,
@@ -905,6 +925,11 @@ pub fn available_action_metadata(world: &World) -> Vec<CommandActionMetadata> {
         ),
         builtin_action_metadata("Spawn", "Spawn a drone", &["spawn_id", "body"]),
         builtin_action_metadata(
+            "Recycle",
+            "Recycle a drone for a body cost refund",
+            &["object_id", "spawn_id"],
+        ),
+        builtin_action_metadata(
             "Build",
             "Build a registered structure type",
             &["object_id", "x", "y", "structure"],
@@ -1015,6 +1040,7 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Heal { .. } => "Heal",
         CommandAction::ClaimController { .. } => "ClaimController",
         CommandAction::SpawnDrone { .. } => "Spawn",
+        CommandAction::Recycle { .. } => "Recycle",
         CommandAction::Build { .. } => "Build",
         CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
         CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
@@ -1189,6 +1215,16 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         CommandAction::SpawnDrone { spawn_id, body } => {
             apply_spawn_drone(world, command.raw.player_id, spawn_id, body)
         }
+        CommandAction::Recycle {
+            object_id,
+            spawn_id,
+        } => apply_recycle(
+            world,
+            command.raw.player_id,
+            command.raw.tick,
+            object_id,
+            spawn_id,
+        ),
         CommandAction::Build {
             object_id,
             x,
@@ -1462,6 +1498,22 @@ fn validate_spawn_drone(
         return Err(RejectionReason::TileOccupied);
     }
     Ok(())
+}
+
+fn validate_recycle(
+    world: &mut World,
+    player_id: PlayerId,
+    object_id: ObjectId,
+    spawn_id: ObjectId,
+) -> CommandResult {
+    let (position, drone) = drone_snapshot(world, object_id)?;
+    ensure_owner(&drone, player_id)?;
+
+    let (spawn_position, spawn) = structure_snapshot(world, spawn_id)?;
+    if spawn.structure_type != StructureType::SPAWN || spawn.owner != Some(player_id) {
+        return Err(RejectionReason::NotYourSpawn);
+    }
+    ensure_range(position, spawn_position, 1)
 }
 
 fn validate_build(
@@ -1898,6 +1950,30 @@ fn apply_spawn_drone(
             body,
             position: spawn_output_position(position),
         });
+    Ok(())
+}
+
+fn apply_recycle(
+    world: &mut World,
+    player_id: PlayerId,
+    tick: Tick,
+    object_id: ObjectId,
+    spawn_id: ObjectId,
+) -> CommandResult {
+    let object = entity(object_id)?;
+    let spawn = entity(spawn_id)?;
+    let (position, drone) = drone_snapshot(world, object_id)?;
+    let refund = recycle_refund_cost(world, tick, &drone.body);
+
+    refund_recycle_cost(world, player_id, spawn, &refund)?;
+    world.entity_mut(object).despawn();
+    if let Some(count) = world
+        .resource_mut::<RoomDroneCounts>()
+        .0
+        .get_mut(&(position.room, player_id))
+    {
+        *count = count.saturating_sub(1);
+    }
     Ok(())
 }
 
@@ -2596,6 +2672,65 @@ fn deduct_player_resource_cost(
 fn add_player_resource(world: &mut World, player_id: PlayerId, resource: &str, amount: u32) {
     *world
         .resource_mut::<PlayerGlobalStorage>()
+        .0
+        .entry(player_id)
+        .or_default()
+        .entry(resource.to_string())
+        .or_default() += amount;
+}
+
+fn recycle_refund_cost(world: &World, tick: Tick, body: &[BodyPart]) -> ResourceCost {
+    let full_refund = world
+        .get_resource::<WorldSettings>()
+        .is_some_and(|settings| settings.mode == WorldMode::Tutorial && tick < 500);
+    let mut refund = body_spawn_cost(world, body);
+    if !full_refund {
+        for amount in refund.values_mut() {
+            *amount /= 2;
+        }
+    }
+    refund
+}
+
+fn refund_recycle_cost(
+    world: &mut World,
+    player_id: PlayerId,
+    spawn: Entity,
+    refund: &ResourceCost,
+) -> CommandResult {
+    for (resource, amount) in refund {
+        if *amount == 0 {
+            continue;
+        }
+        if resource == ENERGY_RESOURCE {
+            let overflow = {
+                let mut entity_mut = world.entity_mut(spawn);
+                let mut structure = entity_mut
+                    .get_mut::<Structure>()
+                    .ok_or(RejectionReason::ObjectNotFound)?;
+                let capacity = structure.energy_capacity;
+                match (&mut structure.energy, capacity) {
+                    (Some(energy), Some(capacity)) => {
+                        let accepted = capacity.saturating_sub(*energy).min(*amount);
+                        *energy += accepted;
+                        amount.saturating_sub(accepted)
+                    }
+                    _ => *amount,
+                }
+            };
+            if overflow > 0 {
+                add_player_local_resource(world, player_id, resource, overflow);
+            }
+        } else {
+            add_player_local_resource(world, player_id, resource, *amount);
+        }
+    }
+    Ok(())
+}
+
+fn add_player_local_resource(world: &mut World, player_id: PlayerId, resource: &str, amount: u32) {
+    *world
+        .resource_mut::<PlayerLocalStorage>()
         .0
         .entry(player_id)
         .or_default()
