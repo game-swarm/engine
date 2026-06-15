@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
@@ -52,6 +52,79 @@ impl McpError {
             code: -32601,
             message: format!("unknown MCP tool: {method}"),
         }
+    }
+
+    fn rate_limited(retry_after_seconds: u64) -> Self {
+        Self {
+            code: -32000,
+            message: format!("rate limited, retry after {retry_after_seconds} seconds"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RateBucket {
+    tokens: u32,
+    last_tick: Tick,
+}
+
+#[derive(Debug, Default)]
+pub struct RateLimiter {
+    buckets: HashMap<(PlayerId, CommandSource), RateBucket>,
+}
+
+impl RateLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn check(
+        &mut self,
+        player_id: PlayerId,
+        source: CommandSource,
+        tick: Tick,
+    ) -> Result<(), McpError> {
+        let limit = rate_limit_for_source(source);
+        let bucket = self
+            .buckets
+            .entry((player_id, source))
+            .or_insert(RateBucket {
+                tokens: limit,
+                last_tick: tick,
+            });
+
+        if tick > bucket.last_tick {
+            let elapsed_ticks = tick.saturating_sub(bucket.last_tick);
+            let refill = elapsed_ticks.saturating_mul(u64::from(limit));
+            bucket.tokens =
+                u32::try_from((u64::from(bucket.tokens) + refill).min(u64::from(limit)))
+                    .unwrap_or(limit);
+            bucket.last_tick = tick;
+        }
+
+        if bucket.tokens == 0 {
+            return Err(McpError::rate_limited(1));
+        }
+
+        bucket.tokens -= 1;
+        Ok(())
+    }
+}
+
+fn rate_limit_for_source(source: CommandSource) -> u32 {
+    match source {
+        CommandSource::Wasm => 100,
+        CommandSource::McpDeploy => 5,
+        CommandSource::McpQuery => 50,
+        CommandSource::Admin => 20,
+        CommandSource::Replay => 200,
+        CommandSource::TestHarness => 1_000,
+        CommandSource::Tutorial => 25,
+        CommandSource::Deploy => 5,
+        CommandSource::Rollback => 5,
+        CommandSource::RuleMod => 25,
+        CommandSource::Simulate => 50,
+        CommandSource::DryRun => 20,
     }
 }
 
@@ -451,6 +524,7 @@ pub struct McpServer {
     issuer: CertificateIssuer,
     sessions: BTreeMap<String, WebAuthSession>,
     revoked_certificates: BTreeSet<String>,
+    rate_limiter: RateLimiter,
     now_seconds: Option<u64>,
 }
 
@@ -462,6 +536,7 @@ impl McpServer {
             issuer: CertificateIssuer::new(),
             sessions: BTreeMap::new(),
             revoked_certificates: BTreeSet::new(),
+            rate_limiter: RateLimiter::new(),
             now_seconds: None,
         }
     }
@@ -475,6 +550,7 @@ impl McpServer {
             },
             sessions: BTreeMap::new(),
             revoked_certificates: BTreeSet::new(),
+            rate_limiter: RateLimiter::new(),
             now_seconds: Some(now_seconds),
         }
     }
@@ -508,6 +584,10 @@ impl McpServer {
         tool: &str,
         params: Value,
     ) -> Result<Value, McpError> {
+        let source = mcp_tool_source(tool).ok_or_else(|| McpError::method_not_found(tool))?;
+        self.rate_limiter
+            .check(context.player_id, source, context.tick)?;
+
         match tool {
             "swarm_get_snapshot" => serde_json::to_value(swarm_get_snapshot(world, context))
                 .map_err(|error| McpError::invalid_params(error.to_string())),
@@ -1008,6 +1088,27 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Inspect AI tournament preparation and locked-code status".to_string(),
         },
     ]
+}
+
+fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
+    match tool {
+        "swarm_deploy" | "swarm_tournament_precommit" => Some(CommandSource::McpDeploy),
+        "swarm_get_snapshot"
+        | "swarm_get_world_rules"
+        | "swarm_get_available_actions"
+        | "swarm_explain_last_tick"
+        | "swarm_profile"
+        | "swarm_dry_run_commands"
+        | "swarm_get_docs"
+        | "resources/list"
+        | "resources/read"
+        | "swarm_oauth2_callback"
+        | "swarm_token_refresh"
+        | "swarm_auth_revoke"
+        | "swarm_tournament_status"
+        | "swarm_oauth2_login" => Some(CommandSource::McpQuery),
+        _ => None,
+    }
 }
 
 fn tournament_tool_infos() -> Vec<ToolInfo> {
@@ -2357,6 +2458,134 @@ mod tests {
         );
         assert!(denied.result.is_none());
         assert_eq!(denied.error.unwrap().code, -32601);
+    }
+
+    #[test]
+    fn json_rpc_rejects_excess_query_calls_per_tick() {
+        let mut world = create_world();
+        let mut server = McpServer::new();
+        let context = McpContext {
+            player_id: 1,
+            tick: 12,
+        };
+
+        for id in 0..50 {
+            let response = server.handle_json_rpc(
+                &mut world,
+                context.clone(),
+                JsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: json!(id),
+                    method: "swarm_get_world_rules".to_string(),
+                    params: Value::Null,
+                },
+            );
+            assert!(response.error.is_none(), "{response:?}");
+        }
+
+        let limited = server.handle_json_rpc(
+            &mut world,
+            context,
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!(51),
+                method: "swarm_get_world_rules".to_string(),
+                params: Value::Null,
+            },
+        );
+
+        let message = limited.error.expect("rate limit error").message;
+        assert!(message.contains("rate limited, retry after 1 seconds"));
+    }
+
+    #[test]
+    fn rate_limiter_isolates_mcp_players_and_sources() {
+        let mut world = create_world();
+        let mut server = McpServer::new();
+        let player_one = McpContext {
+            player_id: 1,
+            tick: 20,
+        };
+
+        for id in 0..50 {
+            assert!(
+                server
+                    .call_tool(
+                        &mut world,
+                        player_one.clone(),
+                        "swarm_get_world_rules",
+                        json!({ "request_id": id })
+                    )
+                    .is_ok()
+            );
+        }
+        let limited = server
+            .call_tool(
+                &mut world,
+                player_one.clone(),
+                "swarm_get_world_rules",
+                Value::Null,
+            )
+            .expect_err("same player and source should be limited");
+        assert!(
+            limited
+                .message
+                .contains("rate limited, retry after 1 seconds")
+        );
+
+        assert!(
+            server
+                .call_tool(
+                    &mut world,
+                    McpContext {
+                        player_id: 2,
+                        tick: 20,
+                    },
+                    "swarm_get_world_rules",
+                    Value::Null,
+                )
+                .is_ok()
+        );
+
+        let deploy_source_error = server
+            .call_tool(
+                &mut world,
+                player_one,
+                "swarm_tournament_precommit",
+                json!({ "module_id": "missing" }),
+            )
+            .expect_err("deploy-source call should execute and fail validation");
+        assert!(!deploy_source_error.message.contains("rate limited"));
+    }
+
+    #[test]
+    fn rate_limiter_enforces_source_rates_and_refills_next_tick() {
+        let mut limiter = RateLimiter::new();
+
+        for _ in 0..100 {
+            limiter.check(1, CommandSource::Wasm, 7).unwrap();
+        }
+        let wasm_limited = limiter
+            .check(1, CommandSource::Wasm, 7)
+            .expect_err("WASM limit is 100 per tick");
+        assert!(
+            wasm_limited
+                .message
+                .contains("rate limited, retry after 1 seconds")
+        );
+        limiter.check(1, CommandSource::Wasm, 8).unwrap();
+
+        for _ in 0..5 {
+            limiter.check(1, CommandSource::McpDeploy, 7).unwrap();
+        }
+        let deploy_limited = limiter
+            .check(1, CommandSource::McpDeploy, 7)
+            .expect_err("MCP deploy limit is 5 per tick");
+        assert!(
+            deploy_limited
+                .message
+                .contains("rate limited, retry after 1 seconds")
+        );
     }
 
     #[test]
