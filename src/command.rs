@@ -5,13 +5,11 @@ use std::collections::HashSet;
 
 use crate::components::*;
 use crate::resources::{
-    GlobalStorageConfig, GlobalTransferDirection, PendingGlobalTransfer, PendingGlobalTransfers,
-    PlayerGlobalStorage, PlayerLocalStorage, ResourceRegistry,
+    GlobalStorageConfig, GlobalTransferDirection, MarketConfig, MarketOrder, MarketOrders,
+    PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
+    ResourceRegistry,
 };
-use crate::systems::{
-    CombatRules, PendingCombat, PendingSpawn, PendingSpawnQueue, RoomDroneCounts, heal_amount,
-    melee_attack_damage, ranged_attack_damage,
-};
+use crate::systems::{PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
 
 pub type ObjectId = u64;
 pub type Tick = u64;
@@ -83,10 +81,6 @@ pub enum CommandAction {
         object_id: ObjectId,
         target_id: ObjectId,
     },
-    RangedAttack {
-        object_id: ObjectId,
-        target_id: ObjectId,
-    },
     Heal {
         object_id: ObjectId,
         target_id: ObjectId,
@@ -110,9 +104,14 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
-    ClaimController {
-        object_id: ObjectId,
-        target_id: ObjectId,
+    CreateMarketOrder {
+        resource: String,
+        amount: u32,
+        price_resource: String,
+        price_amount: u32,
+    },
+    BuyMarketOrder {
+        order_id: u64,
     },
 }
 
@@ -197,8 +196,8 @@ pub enum RejectionReason {
     NotFriendly,
     GlobalStorageDisabled,
     TransferInProgress,
-    NotController,
-    ControllerAlreadyOwned,
+    TerminalRequired,
+    OrderNotFound,
 }
 
 pub type CommandResult = Result<(), RejectionReason>;
@@ -340,10 +339,6 @@ pub fn validate_command(
             object_id,
             target_id,
         } => validate_attack(world, raw.player_id, *object_id, *target_id),
-        CommandAction::RangedAttack {
-            object_id,
-            target_id,
-        } => validate_ranged_attack(world, raw.player_id, *object_id, *target_id),
         CommandAction::Heal {
             object_id,
             target_id,
@@ -363,10 +358,22 @@ pub fn validate_command(
         CommandAction::TransferFromGlobal { resource, amount } => {
             validate_transfer_from_global(world, raw.player_id, resource, *amount)
         }
-        CommandAction::ClaimController {
-            object_id,
-            target_id,
-        } => validate_claim_controller(world, raw.player_id, *object_id, *target_id),
+        CommandAction::CreateMarketOrder {
+            resource,
+            amount,
+            price_resource,
+            price_amount,
+        } => validate_create_market_order(
+            world,
+            raw.player_id,
+            resource,
+            *amount,
+            price_resource,
+            *price_amount,
+        ),
+        CommandAction::BuyMarketOrder { order_id } => {
+            validate_buy_market_order(world, raw.player_id, *order_id)
+        }
     }?;
 
     Ok(ValidatedCommand { raw })
@@ -483,16 +490,17 @@ pub fn source_allows_action(source: CommandSource, action: &CommandAction) -> bo
 fn action_triggers_combat(action: &CommandAction) -> bool {
     matches!(
         action,
-        CommandAction::Attack { .. }
-            | CommandAction::RangedAttack { .. }
-            | CommandAction::Heal { .. }
+        CommandAction::Attack { .. } | CommandAction::Heal { .. }
     )
 }
 
 fn action_uses_global_storage(action: &CommandAction) -> bool {
     matches!(
         action,
-        CommandAction::TransferToGlobal { .. } | CommandAction::TransferFromGlobal { .. }
+        CommandAction::TransferToGlobal { .. }
+            | CommandAction::TransferFromGlobal { .. }
+            | CommandAction::CreateMarketOrder { .. }
+            | CommandAction::BuyMarketOrder { .. }
     )
 }
 
@@ -564,13 +572,13 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Transfer { .. } => "Transfer",
         CommandAction::Withdraw { .. } => "Withdraw",
         CommandAction::Attack { .. } => "Attack",
-        CommandAction::RangedAttack { .. } => "RangedAttack",
         CommandAction::Heal { .. } => "Heal",
         CommandAction::SpawnDrone { .. } => "Spawn",
         CommandAction::Build { .. } => "Build",
         CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
         CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
-        CommandAction::ClaimController { .. } => "ClaimController",
+        CommandAction::CreateMarketOrder { .. } => "CreateMarketOrder",
+        CommandAction::BuyMarketOrder { .. } => "BuyMarketOrder",
     };
 
     match rejection {
@@ -723,10 +731,6 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             object_id,
             target_id,
         } => apply_attack(world, object_id, target_id),
-        CommandAction::RangedAttack {
-            object_id,
-            target_id,
-        } => apply_ranged_attack(world, object_id, target_id),
         CommandAction::Heal {
             object_id,
             target_id,
@@ -746,10 +750,22 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         CommandAction::TransferFromGlobal { resource, amount } => {
             apply_transfer_from_global(world, command.raw.player_id, &resource, amount)
         }
-        CommandAction::ClaimController {
-            object_id,
-            target_id,
-        } => apply_claim_controller(world, command.raw.player_id, object_id, target_id),
+        CommandAction::CreateMarketOrder {
+            resource,
+            amount,
+            price_resource,
+            price_amount,
+        } => apply_create_market_order(
+            world,
+            command.raw.player_id,
+            &resource,
+            amount,
+            &price_resource,
+            price_amount,
+        ),
+        CommandAction::BuyMarketOrder { order_id } => {
+            apply_buy_market_order(world, command.raw.player_id, order_id)
+        }
     }
 }
 
@@ -816,9 +832,6 @@ fn validate_transfer(
     }
 
     let (target_position, space) = target_resource_space(world, target_id, resource)?;
-    if is_controller(world, target_id) && controller_owner(world, target_id)? != Some(player_id) {
-        return Err(RejectionReason::NotYourRoom);
-    }
     if space < amount {
         return Err(RejectionReason::TargetFull);
     }
@@ -863,41 +876,14 @@ fn validate_attack(
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
-    validate_attack_with_part(world, player_id, object_id, target_id, BodyPart::Attack, 1)
-}
-
-fn validate_ranged_attack(
-    world: &mut World,
-    player_id: PlayerId,
-    object_id: ObjectId,
-    target_id: ObjectId,
-) -> CommandResult {
-    validate_attack_with_part(
-        world,
-        player_id,
-        object_id,
-        target_id,
-        BodyPart::RangedAttack,
-        3,
-    )
-}
-
-fn validate_attack_with_part(
-    world: &mut World,
-    player_id: PlayerId,
-    object_id: ObjectId,
-    target_id: ObjectId,
-    body_part: BodyPart,
-    range: u32,
-) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, body_part, true)?;
+    ensure_drone_can_act(&drone, BodyPart::Attack, true)?;
     let (target_position, target_owner) = attackable_snapshot(world, target_id)?;
     if target_owner == Some(player_id) {
         return Err(RejectionReason::FriendlyTarget);
     }
-    ensure_range(position, target_position, range)
+    ensure_range(position, target_position, 1)
 }
 
 fn validate_heal(
@@ -993,22 +979,6 @@ fn validate_build(
     ensure_range(position, target, 1)
 }
 
-fn validate_claim_controller(
-    world: &mut World,
-    player_id: PlayerId,
-    object_id: ObjectId,
-    target_id: ObjectId,
-) -> CommandResult {
-    let (position, drone) = drone_snapshot(world, object_id)?;
-    ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::Claim, true)?;
-    let (target_position, controller) = controller_snapshot(world, target_id)?;
-    if controller.owner == Some(player_id) {
-        return Err(RejectionReason::ControllerAlreadyOwned);
-    }
-    ensure_range(position, target_position, 1)
-}
-
 fn validate_transfer_to_global(
     world: &mut World,
     player_id: PlayerId,
@@ -1072,6 +1042,60 @@ fn validate_transfer_from_global(
             required: amount,
             available,
         });
+    }
+    Ok(())
+}
+
+fn validate_create_market_order(
+    world: &mut World,
+    player_id: PlayerId,
+    resource: &str,
+    amount: u32,
+    _price_resource: &str,
+    _price_amount: u32,
+) -> CommandResult {
+    ensure_market_enabled(world, player_id)?;
+    let available = player_global_amount(world, player_id, resource);
+    if available < amount {
+        return Err(RejectionReason::InsufficientResource {
+            resource: resource.to_string(),
+            required: amount,
+            available,
+        });
+    }
+    Ok(())
+}
+
+fn validate_buy_market_order(
+    world: &mut World,
+    player_id: PlayerId,
+    order_id: u64,
+) -> CommandResult {
+    ensure_market_enabled(world, player_id)?;
+    let order = world
+        .resource::<MarketOrders>()
+        .orders
+        .get(&order_id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+
+    let available = player_global_amount(world, player_id, &order.price_resource);
+    if available < order.price_amount {
+        return Err(RejectionReason::InsufficientResource {
+            resource: order.price_resource,
+            required: order.price_amount,
+            available,
+        });
+    }
+
+    let config = world.resource::<GlobalStorageConfig>();
+    if global_storage_committed(world, player_id).saturating_add(order.amount) > config.capacity {
+        return Err(RejectionReason::TargetFull);
+    }
+    if global_storage_committed(world, order.seller).saturating_add(order.price_amount)
+        > config.capacity
+    {
+        return Err(RejectionReason::TargetFull);
     }
     Ok(())
 }
@@ -1171,46 +1195,36 @@ fn apply_withdraw(
 
 fn apply_attack(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> CommandResult {
     let (_, drone) = drone_snapshot(world, object_id)?;
-    let rules = *world.resource::<CombatRules>();
-    let damage = melee_attack_damage(count_body_parts(&drone, BodyPart::Attack), rules);
+    let damage = drone
+        .body
+        .iter()
+        .filter(|part| **part == BodyPart::Attack)
+        .count() as u32
+        * 30;
     let target = entity(target_id)?;
-    world
-        .resource_mut::<PendingCombat>()
-        .queue_damage(target, damage);
-    Ok(())
-}
-
-fn apply_ranged_attack(
-    world: &mut World,
-    object_id: ObjectId,
-    target_id: ObjectId,
-) -> CommandResult {
-    let (_, drone) = drone_snapshot(world, object_id)?;
-    let rules = *world.resource::<CombatRules>();
-    let damage = ranged_attack_damage(count_body_parts(&drone, BodyPart::RangedAttack), rules);
-    let target = entity(target_id)?;
-    world
-        .resource_mut::<PendingCombat>()
-        .queue_damage(target, damage);
+    if let Some(mut target_drone) = world.entity_mut(target).get_mut::<Drone>() {
+        target_drone.hits = target_drone.hits.saturating_sub(damage);
+    } else if let Some(mut structure) = world.entity_mut(target).get_mut::<Structure>() {
+        structure.hits = structure.hits.saturating_sub(damage);
+    }
     Ok(())
 }
 
 fn apply_heal(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> CommandResult {
     let (_, healer) = drone_snapshot(world, object_id)?;
-    let heal = heal_amount(count_body_parts(&healer, BodyPart::Heal));
-    let target = entity(target_id)?;
-    world
-        .resource_mut::<PendingCombat>()
-        .queue_heal(target, heal);
-    Ok(())
-}
-
-fn count_body_parts(drone: &Drone, part: BodyPart) -> usize {
-    drone
+    let heal = healer
         .body
         .iter()
-        .filter(|body_part| **body_part == part)
-        .count()
+        .filter(|part| **part == BodyPart::Heal)
+        .count() as u32
+        * 12;
+    let target = entity(target_id)?;
+    let mut entity_mut = world.entity_mut(target);
+    let mut drone = entity_mut
+        .get_mut::<Drone>()
+        .ok_or(RejectionReason::ObjectNotFound)?;
+    drone.hits = (drone.hits + heal).min(drone.hits_max);
+    Ok(())
 }
 
 fn apply_spawn_drone(
@@ -1264,25 +1278,6 @@ fn apply_build(
         position,
         structure_defaults(structure_type, Some(player_id)),
     ));
-    Ok(())
-}
-
-fn apply_claim_controller(
-    world: &mut World,
-    player_id: PlayerId,
-    _object_id: ObjectId,
-    target_id: ObjectId,
-) -> CommandResult {
-    let target = entity(target_id)?;
-    let mut entity_mut = world.entity_mut(target);
-    let mut controller = entity_mut
-        .get_mut::<Controller>()
-        .ok_or(RejectionReason::NotController)?;
-    controller.owner = Some(player_id);
-    controller.level = 1;
-    controller.progress = 0;
-    controller.progress_total = controller_progress_total(1);
-    controller.downgrade_timer = DEFAULT_CONTROLLER_DOWNGRADE_TIMER;
     Ok(())
 }
 
@@ -1352,6 +1347,67 @@ fn apply_transfer_from_global(
     Ok(())
 }
 
+fn apply_create_market_order(
+    world: &mut World,
+    player_id: PlayerId,
+    resource: &str,
+    amount: u32,
+    price_resource: &str,
+    price_amount: u32,
+) -> CommandResult {
+    subtract_player_resource(
+        world
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(player_id)
+            .or_default(),
+        resource,
+        amount,
+    );
+
+    let mut orders = world.resource_mut::<MarketOrders>();
+    let id = orders.next_order_id;
+    orders.next_order_id += 1;
+    orders.orders.insert(
+        id,
+        MarketOrder {
+            id,
+            seller: player_id,
+            resource: resource.to_string(),
+            amount,
+            price_resource: price_resource.to_string(),
+            price_amount,
+        },
+    );
+    Ok(())
+}
+
+fn apply_buy_market_order(world: &mut World, player_id: PlayerId, order_id: u64) -> CommandResult {
+    let order = world
+        .resource_mut::<MarketOrders>()
+        .orders
+        .shift_remove(&order_id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+
+    subtract_player_resource(
+        world
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(player_id)
+            .or_default(),
+        &order.price_resource,
+        order.price_amount,
+    );
+    add_player_resource(world, player_id, &order.resource, order.amount);
+    add_player_resource(
+        world,
+        order.seller,
+        &order.price_resource,
+        order.price_amount,
+    );
+    Ok(())
+}
+
 fn drone_snapshot(
     world: &mut World,
     object_id: ObjectId,
@@ -1404,24 +1460,6 @@ fn structure_snapshot(
         .ok_or(RejectionReason::ObjectNotFound)?
         .clone();
     Ok((position, structure))
-}
-
-fn controller_snapshot(
-    world: &mut World,
-    object_id: ObjectId,
-) -> Result<(Position, Controller), RejectionReason> {
-    let entity = entity(object_id)?;
-    let entity_ref = world
-        .get_entity(entity)
-        .map_err(|_| RejectionReason::ObjectNotFound)?;
-    let position = *entity_ref
-        .get::<Position>()
-        .ok_or(RejectionReason::ObjectNotFound)?;
-    let controller = entity_ref
-        .get::<Controller>()
-        .ok_or(RejectionReason::NotController)?
-        .clone();
-    Ok((position, controller))
 }
 
 fn attackable_snapshot(
@@ -1502,15 +1540,6 @@ fn target_resource_space(
                 .unwrap_or(0)
                 .saturating_sub(structure.energy.unwrap_or(0)),
         ));
-    }
-    if let Some(controller) = entity_ref.get::<Controller>() {
-        if resource != "Energy" {
-            return Err(RejectionReason::TargetFull);
-        }
-        if controller.owner.is_none() {
-            return Err(RejectionReason::NotYourRoom);
-        }
-        return Ok((position, u32::MAX));
     }
     Err(RejectionReason::ObjectNotFound)
 }
@@ -1696,6 +1725,44 @@ fn global_storage_committed(world: &World, player_id: PlayerId) -> u32 {
     stored.saturating_add(pending)
 }
 
+fn ensure_market_enabled(world: &mut World, player_id: PlayerId) -> CommandResult {
+    if !world.resource::<GlobalStorageConfig>().enabled {
+        return Err(RejectionReason::GlobalStorageDisabled);
+    }
+    if world.resource::<MarketConfig>().market_requires_terminal && !owns_terminal(world, player_id)
+    {
+        return Err(RejectionReason::TerminalRequired);
+    }
+    Ok(())
+}
+
+fn owns_terminal(world: &mut World, player_id: PlayerId) -> bool {
+    world.query::<&Structure>().iter(world).any(|structure| {
+        structure.owner == Some(player_id)
+            && matches!(structure.structure_type, StructureType::Terminal)
+    })
+}
+
+fn player_global_amount(world: &World, player_id: PlayerId, resource: &str) -> u32 {
+    world
+        .resource::<PlayerGlobalStorage>()
+        .0
+        .get(&player_id)
+        .and_then(|storage| storage.get(resource))
+        .copied()
+        .unwrap_or_default()
+}
+
+fn add_player_resource(world: &mut World, player_id: PlayerId, resource: &str, amount: u32) {
+    *world
+        .resource_mut::<PlayerGlobalStorage>()
+        .0
+        .entry(player_id)
+        .or_default()
+        .entry(resource.to_string())
+        .or_default() += amount;
+}
+
 fn transfer_fee(amount: u32, fee_per_10_000: u32) -> u32 {
     amount.saturating_mul(fee_per_10_000) / 10_000
 }
@@ -1737,12 +1804,6 @@ fn add_to_target(world: &mut World, entity: Entity, resource: &str, amount: u32)
             }
         }
     }
-    if let Some(mut controller) = world.entity_mut(entity).get_mut::<Controller>() {
-        if resource == "Energy" {
-            add_controller_progress(&mut controller, amount);
-            return Ok(());
-        }
-    }
     Err(RejectionReason::ObjectNotFound)
 }
 
@@ -1777,54 +1838,6 @@ fn take_from_target(
         return Ok(());
     }
     Err(RejectionReason::ObjectNotFound)
-}
-
-pub const DEFAULT_CONTROLLER_DOWNGRADE_TIMER: u32 = 5_000;
-
-pub fn controller_progress_total(level: u8) -> u32 {
-    match level {
-        1 => 200,
-        2 => 500,
-        3 => 1_500,
-        4 => 5_000,
-        5 => 15_000,
-        6 => 50_000,
-        7 | 8 => 150_000,
-        _ => 200,
-    }
-}
-
-fn add_controller_progress(controller: &mut Controller, amount: u32) {
-    if controller.owner.is_none() || controller.level >= 8 {
-        return;
-    }
-    controller.progress = controller.progress.saturating_add(amount);
-    while controller.level < 8 && controller.progress >= controller.progress_total {
-        controller.progress -= controller.progress_total;
-        controller.level += 1;
-        controller.progress_total = controller_progress_total(controller.level);
-    }
-}
-
-fn is_controller(world: &mut World, object_id: ObjectId) -> bool {
-    entity(object_id)
-        .ok()
-        .and_then(|entity| world.get_entity(entity).ok())
-        .is_some_and(|entity_ref| entity_ref.contains::<Controller>())
-}
-
-fn controller_owner(
-    world: &mut World,
-    object_id: ObjectId,
-) -> Result<Option<PlayerId>, RejectionReason> {
-    let entity = entity(object_id)?;
-    let entity_ref = world
-        .get_entity(entity)
-        .map_err(|_| RejectionReason::ObjectNotFound)?;
-    Ok(entity_ref
-        .get::<Controller>()
-        .ok_or(RejectionReason::NotController)?
-        .owner)
 }
 
 pub fn body_cost(body: &[BodyPart]) -> u32 {

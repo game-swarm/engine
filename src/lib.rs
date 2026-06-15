@@ -4,7 +4,6 @@ pub mod hot_cache;
 pub mod mcp;
 pub mod mod_cli;
 pub mod onboarding;
-pub mod ranking;
 pub mod realtime;
 pub mod resources;
 pub mod rule_module;
@@ -17,19 +16,18 @@ pub use command::*;
 pub use components::*;
 pub use hot_cache::*;
 pub use mcp::{
-    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player, DeployParams,
-    DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer, StoredModule,
-    VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
+    DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer,
+    StoredModule, VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
     VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot, WorldRuleMod, WorldRules,
+    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player,
 };
 pub use onboarding::*;
-pub use ranking::*;
 pub use realtime::*;
 pub use resources::*;
 pub use rule_module::*;
 pub use tick::*;
 pub use visibility::*;
-pub use world::{create_world, SwarmWorld};
+pub use world::{SwarmWorld, create_world};
 
 #[cfg(test)]
 mod tests {
@@ -100,37 +98,23 @@ mod tests {
             .id()
     }
 
-    fn spawn_controller(
-        world: &mut crate::SwarmWorld,
-        owner: Option<PlayerId>,
-        x: i32,
-        y: i32,
-    ) -> bevy::prelude::Entity {
-        world
-            .app
-            .world_mut()
-            .spawn((
-                Position {
-                    x,
-                    y,
-                    room: RoomId(0),
-                },
-                Controller {
-                    owner,
-                    level: 1,
-                    progress: 0,
-                    progress_total: controller_progress_total(1),
-                    downgrade_timer: DEFAULT_CONTROLLER_DOWNGRADE_TIMER,
-                    safe_mode: 0,
-                    safe_mode_available: 0,
-                    safe_mode_cooldown: 0,
-                },
-            ))
-            .id()
-    }
-
-    fn controller_snapshot(world: &crate::SwarmWorld, entity: bevy::prelude::Entity) -> Controller {
-        world.app.world().get::<Controller>(entity).unwrap().clone()
+    fn spawn_terminal(world: &mut crate::SwarmWorld, owner: PlayerId, x: i32, y: i32) {
+        world.app.world_mut().spawn((
+            Position {
+                x,
+                y,
+                room: RoomId(0),
+            },
+            Structure {
+                structure_type: StructureType::Terminal,
+                owner: Some(owner),
+                hits: 5_000,
+                hits_max: 5_000,
+                energy: None,
+                energy_capacity: None,
+                cooldown: 0,
+            },
+        ));
     }
 
     fn first_source_id(world: &mut crate::SwarmWorld) -> ObjectId {
@@ -426,152 +410,6 @@ mod tests {
                 .get(&(RoomId(0), 42)),
             Some(&0)
         );
-    }
-
-    #[test]
-    fn claim_controller_requires_claim_body_and_sets_owner() {
-        let mut world = create_world();
-        let controller = spawn_controller(&mut world, None, 11, 10);
-        let worker = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Work]);
-        let claimer = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Claim]);
-
-        assert_eq!(
-            submit(
-                &mut world,
-                1,
-                1,
-                CommandAction::ClaimController {
-                    object_id: object_id(worker),
-                    target_id: object_id(controller),
-                },
-            ),
-            Err(RejectionReason::MissingBodyPart {
-                part: BodyPart::Claim
-            })
-        );
-
-        submit(
-            &mut world,
-            1,
-            2,
-            CommandAction::ClaimController {
-                object_id: object_id(claimer),
-                target_id: object_id(controller),
-            },
-        )
-        .unwrap();
-
-        let controller = controller_snapshot(&world, controller);
-        assert_eq!(controller.owner, Some(1));
-        assert_eq!(controller.level, 1);
-        assert_eq!(controller.progress, 0);
-        assert_eq!(controller.progress_total, controller_progress_total(1));
-    }
-
-    #[test]
-    fn claim_controller_switches_enemy_room_owner() {
-        let mut world = create_world();
-        let controller = spawn_controller(&mut world, Some(2), 11, 10);
-        let claimer = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Claim]);
-
-        submit(
-            &mut world,
-            1,
-            1,
-            CommandAction::ClaimController {
-                object_id: object_id(claimer),
-                target_id: object_id(controller),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(controller_snapshot(&world, controller).owner, Some(1));
-        assert_eq!(
-            submit(
-                &mut world,
-                1,
-                2,
-                CommandAction::ClaimController {
-                    object_id: object_id(claimer),
-                    target_id: object_id(controller),
-                },
-            ),
-            Err(RejectionReason::ControllerAlreadyOwned)
-        );
-    }
-
-    #[test]
-    fn transfer_energy_to_owned_controller_upgrades_rcl() {
-        let mut world = create_world();
-        let controller = spawn_controller(&mut world, Some(1), 11, 10);
-        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Carry]);
-        world
-            .app
-            .world_mut()
-            .get_mut::<Drone>(drone)
-            .unwrap()
-            .carry
-            .insert("Energy".to_string(), 250);
-
-        submit(
-            &mut world,
-            1,
-            1,
-            CommandAction::Transfer {
-                object_id: object_id(drone),
-                target_id: object_id(controller),
-                resource: "Energy".to_string(),
-                amount: 250,
-            },
-        )
-        .unwrap();
-
-        let controller = controller_snapshot(&world, controller);
-        assert_eq!(controller.owner, Some(1));
-        assert_eq!(controller.level, 2);
-        assert_eq!(controller.progress, 50);
-        assert_eq!(controller.progress_total, controller_progress_total(2));
-        assert_eq!(
-            world
-                .app
-                .world()
-                .get::<Drone>(drone)
-                .unwrap()
-                .carry
-                .get("Energy"),
-            Some(&0)
-        );
-    }
-
-    #[test]
-    fn non_owner_cannot_upgrade_controller() {
-        let mut world = create_world();
-        let controller = spawn_controller(&mut world, Some(2), 11, 10);
-        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Carry]);
-        world
-            .app
-            .world_mut()
-            .get_mut::<Drone>(drone)
-            .unwrap()
-            .carry
-            .insert("Energy".to_string(), 200);
-
-        assert_eq!(
-            submit(
-                &mut world,
-                1,
-                1,
-                CommandAction::Transfer {
-                    object_id: object_id(drone),
-                    target_id: object_id(controller),
-                    resource: "Energy".to_string(),
-                    amount: 200,
-                },
-            ),
-            Err(RejectionReason::NotYourRoom)
-        );
-        assert_eq!(controller_snapshot(&world, controller).owner, Some(2));
-        assert_eq!(controller_snapshot(&world, controller).level, 1);
     }
 
     #[test]
@@ -1311,12 +1149,14 @@ mod tests {
                 .and_then(|storage| storage.get("Energy")),
             Some(&990)
         );
-        assert!(world
-            .app
-            .world()
-            .resource::<PendingGlobalTransfers>()
-            .0
-            .is_empty());
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<PendingGlobalTransfers>()
+                .0
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1374,6 +1214,232 @@ mod tests {
     }
 
     #[test]
+    fn market_order_locks_seller_global_storage() {
+        let mut world = create_world();
+        spawn_terminal(&mut world, 1, 5, 5);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::CreateMarketOrder {
+                resource: "Energy".to_string(),
+                amount: 250,
+                price_resource: "Credits".to_string(),
+                price_amount: 50,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<PlayerGlobalStorage>()
+                .0
+                .get(&1)
+                .and_then(|storage| storage.get("Energy")),
+            Some(&750)
+        );
+        assert_eq!(
+            world.app.world().resource::<MarketOrders>().orders[&1].amount,
+            250
+        );
+    }
+
+    #[test]
+    fn market_buy_delivers_resource_to_buyer_and_payment_to_seller_global_storage() {
+        let mut world = create_world();
+        spawn_terminal(&mut world, 1, 5, 5);
+        spawn_terminal(&mut world, 2, 6, 5);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(2)
+            .or_default()
+            .insert("Credits".to_string(), 100);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::CreateMarketOrder {
+                resource: "Energy".to_string(),
+                amount: 250,
+                price_resource: "Credits".to_string(),
+                price_amount: 50,
+            },
+        )
+        .unwrap();
+        submit(
+            &mut world,
+            2,
+            2,
+            CommandAction::BuyMarketOrder { order_id: 1 },
+        )
+        .unwrap();
+
+        let storage = &world.app.world().resource::<PlayerGlobalStorage>().0;
+        assert_eq!(storage.get(&1).and_then(|s| s.get("Energy")), Some(&750));
+        assert_eq!(storage.get(&1).and_then(|s| s.get("Credits")), Some(&50));
+        assert_eq!(storage.get(&2).and_then(|s| s.get("Energy")), Some(&250));
+        assert_eq!(storage.get(&2).and_then(|s| s.get("Credits")), Some(&50));
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<MarketOrders>()
+                .orders
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn market_terminal_gate_is_configurable() {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 100);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::CreateMarketOrder {
+                    resource: "Energy".to_string(),
+                    amount: 10,
+                    price_resource: "Credits".to_string(),
+                    price_amount: 1,
+                },
+            ),
+            Err(RejectionReason::TerminalRequired)
+        );
+
+        world
+            .app
+            .world_mut()
+            .resource_mut::<MarketConfig>()
+            .market_requires_terminal = false;
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                2,
+                CommandAction::CreateMarketOrder {
+                    resource: "Energy".to_string(),
+                    amount: 10,
+                    price_resource: "Credits".to_string(),
+                    price_amount: 1,
+                },
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn snapshot_includes_market_orders() {
+        let mut world = create_world();
+        spawn_terminal(&mut world, 1, 5, 5);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 100);
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::CreateMarketOrder {
+                resource: "Energy".to_string(),
+                amount: 10,
+                price_resource: "Credits".to_string(),
+                price_amount: 1,
+            },
+        )
+        .unwrap();
+
+        let snapshot = crate::swarm_get_snapshot(
+            &mut world,
+            crate::McpContext {
+                player_id: 1,
+                tick: 1,
+            },
+        );
+
+        assert_eq!(snapshot.market_orders.len(), 1);
+        assert_eq!(snapshot.market_orders[0].id, 1);
+        assert_eq!(snapshot.market_orders[0].resource, "Energy");
+    }
+
+    #[test]
+    fn tick_state_capture_restore_includes_market_orders() {
+        let mut world = create_world();
+        spawn_terminal(&mut world, 1, 5, 5);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 100);
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::CreateMarketOrder {
+                resource: "Energy".to_string(),
+                amount: 10,
+                price_resource: "Credits".to_string(),
+                price_amount: 1,
+            },
+        )
+        .unwrap();
+
+        let state = crate::TickState::capture(world.app.world_mut());
+        world
+            .app
+            .world_mut()
+            .resource_mut::<MarketOrders>()
+            .orders
+            .clear();
+
+        state.restore(world.app.world_mut());
+
+        assert_eq!(
+            world.app.world().resource::<MarketOrders>().orders[&1].resource,
+            "Energy"
+        );
+    }
+
+    #[test]
     fn global_storage_tax_is_progressive() {
         let mut world = create_world();
         world
@@ -1427,102 +1493,8 @@ mod tests {
     }
 
     #[test]
-    fn attack_ranged_attack_and_heal_update_hits_on_tick() {
+    fn attack_and_heal_update_hits() {
         let mut world = create_world();
-        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack, BodyPart::Attack]);
-        let target = world.spawn_drone(2, 11, 10, vec![BodyPart::Move]);
-
-        assert_eq!(
-            submit(
-                &mut world,
-                1,
-                1,
-                CommandAction::Attack {
-                    object_id: object_id(attacker),
-                    target_id: object_id(target)
-                }
-            ),
-            Ok(())
-        );
-        assert_eq!(
-            world
-                .app
-                .world()
-                .entity(target)
-                .get::<Drone>()
-                .unwrap()
-                .hits,
-            100
-        );
-        world.run_tick();
-        assert_eq!(
-            world
-                .app
-                .world()
-                .entity(target)
-                .get::<Drone>()
-                .unwrap()
-                .hits,
-            40
-        );
-
-        let ranged = world.spawn_drone(1, 14, 10, vec![BodyPart::RangedAttack]);
-        assert_eq!(
-            submit(
-                &mut world,
-                1,
-                2,
-                CommandAction::RangedAttack {
-                    object_id: object_id(ranged),
-                    target_id: object_id(target)
-                }
-            ),
-            Ok(())
-        );
-        world.run_tick();
-        assert_eq!(
-            world
-                .app
-                .world()
-                .entity(target)
-                .get::<Drone>()
-                .unwrap()
-                .hits,
-            15
-        );
-
-        let healer = world.spawn_drone(2, 12, 10, vec![BodyPart::Heal, BodyPart::Heal]);
-        assert_eq!(
-            submit(
-                &mut world,
-                2,
-                3,
-                CommandAction::Heal {
-                    object_id: object_id(healer),
-                    target_id: object_id(target)
-                }
-            ),
-            Ok(())
-        );
-        world.run_tick();
-        assert_eq!(
-            world
-                .app
-                .world()
-                .entity(target)
-                .get::<Drone>()
-                .unwrap()
-                .hits,
-            39
-        );
-    }
-
-    #[test]
-    fn damage_multiplier_world_rule_scales_attack_damage() {
-        let mut world = create_world();
-        world.app.world_mut().insert_resource(CombatRules {
-            damage_multiplier: 15_000,
-        });
         let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
         let target = world.spawn_drone(2, 11, 10, vec![BodyPart::Move]);
 
@@ -1538,7 +1510,6 @@ mod tests {
             ),
             Ok(())
         );
-        world.run_tick();
         assert_eq!(
             world
                 .app
@@ -1547,7 +1518,31 @@ mod tests {
                 .get::<Drone>()
                 .unwrap()
                 .hits,
-            55
+            70
+        );
+
+        let healer = world.spawn_drone(2, 12, 10, vec![BodyPart::Heal]);
+        assert_eq!(
+            submit(
+                &mut world,
+                2,
+                2,
+                CommandAction::Heal {
+                    object_id: object_id(healer),
+                    target_id: object_id(target)
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(target)
+                .get::<Drone>()
+                .unwrap()
+                .hits,
+            82
         );
     }
 

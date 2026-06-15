@@ -9,7 +9,7 @@ use crate::command::{
 };
 use crate::components::*;
 use crate::resources::{
-    PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
+    MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
 };
 use crate::rule_module::run_tick_start_scripts;
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
@@ -961,6 +961,7 @@ pub struct WorldSnapshot {
     local_storage: PlayerLocalStorage,
     global_storage: PlayerGlobalStorage,
     pending_global_transfers: PendingGlobalTransfers,
+    market_orders: MarketOrders,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1051,6 +1052,7 @@ impl WorldSnapshot {
             local_storage: world.resource::<PlayerLocalStorage>().clone(),
             global_storage: world.resource::<PlayerGlobalStorage>().clone(),
             pending_global_transfers: world.resource::<PendingGlobalTransfers>().clone(),
+            market_orders: world.resource::<MarketOrders>().clone(),
         }
     }
 
@@ -1089,6 +1091,7 @@ impl WorldSnapshot {
         *world.resource_mut::<PlayerLocalStorage>() = self.local_storage;
         *world.resource_mut::<PlayerGlobalStorage>() = self.global_storage;
         *world.resource_mut::<PendingGlobalTransfers>() = self.pending_global_transfers;
+        *world.resource_mut::<MarketOrders>() = self.market_orders;
     }
 
     fn tracked_entities(world: &mut World) -> Vec<Entity> {
