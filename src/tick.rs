@@ -475,25 +475,14 @@ fn collect_player_commands<E: PlayerExecutor + ?Sized>(
     }
 }
 
-fn serial_execution_queue(
-    collected: Vec<CollectedPlayerCommands>,
-    tick: Tick,
-    state_checksum: u64,
-) -> Vec<RawCommand> {
-    let mut by_player = collected
-        .into_iter()
-        .map(|mut collected| {
-            collected.commands.sort_by_key(|command| command.sequence);
-            (collected.player_id, collected.commands)
-        })
-        .collect::<HashMap<_, _>>();
-    let player_order =
-        seeded_player_shuffle(by_player.keys().copied().collect(), tick, state_checksum);
+fn serial_execution_queue(collected: Vec<CollectedPlayerCommands>) -> Vec<RawCommand> {
+    let mut by_player = collected.into_iter().collect::<Vec<_>>();
+    by_player.sort_by_key(|collected| collected.player_id);
+
     let mut queue = Vec::new();
-    for player_id in player_order {
-        if let Some(commands) = by_player.remove(&player_id) {
-            queue.extend(commands);
-        }
+    for mut collected in by_player {
+        collected.commands.sort_by_key(|command| command.sequence);
+        queue.extend(collected.commands);
     }
     queue
 }
@@ -559,7 +548,7 @@ where
                 commands: result.commands,
             })
             .collect::<Vec<_>>();
-        let raw_commands = serial_execution_queue(collected, tick, state_checksum);
+        let raw_commands = serial_execution_queue(collected);
 
         let world_snapshot = WorldSnapshot::capture(self.world.app.world_mut());
         let execution = execute_deterministic(&mut self.world, raw_commands);
@@ -1190,27 +1179,51 @@ mod tests {
     use crate::command::{CommandAction, CommandAuth, Direction, RejectionReason, object_id};
     use crate::systems::PendingSpawnQueue;
     use crate::{BodyPart, CommandIntent, Structure, StructureType, create_world, energy_cost};
-    use std::sync::{Arc, Barrier, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
 
     use super::*;
 
     #[derive(Debug)]
-    struct BarrierExecutor {
-        player_id: PlayerId,
-        sequence: u32,
-        action: CommandAction,
-        barrier: Arc<Barrier>,
-        arrivals: Arc<Mutex<Vec<PlayerId>>>,
+    struct OverlapState {
+        arrived: usize,
+        active: usize,
+        max_active: usize,
     }
 
-    impl PlayerExecutor for BarrierExecutor {
+    #[derive(Debug)]
+    struct OverlapExecutor {
+        player_id: PlayerId,
+        expected_players: usize,
+        sequence: u32,
+        action: CommandAction,
+        overlap: Arc<(Mutex<OverlapState>, Condvar)>,
+    }
+
+    impl PlayerExecutor for OverlapExecutor {
         fn collect(&mut self, snapshot: TickSnapshot) -> Result<Vec<CommandIntent>, ExecutorError> {
             assert_eq!(snapshot.player_id, self.player_id);
-            self.arrivals.lock().unwrap().push(self.player_id);
-            let wait = self.barrier.wait();
-            if wait.is_leader() {
-                assert_eq!(self.arrivals.lock().unwrap().len(), 2);
+            let (state, completed) = &*self.overlap;
+            let mut state = state.lock().unwrap();
+            state.arrived += 1;
+            state.active += 1;
+            state.max_active = state.max_active.max(state.active);
+            completed.notify_all();
+
+            let wait = completed
+                .wait_timeout_while(state, Duration::from_millis(250), |state| {
+                    state.arrived < self.expected_players
+                })
+                .unwrap();
+            state = wait.0;
+            state.active -= 1;
+            completed.notify_all();
+            if state.arrived < self.expected_players {
+                return Err(ExecutorError::Error(
+                    "player collection did not overlap".to_string(),
+                ));
             }
+
             Ok(vec![CommandIntent {
                 sequence: self.sequence,
                 action: self.action.clone(),
@@ -1351,33 +1364,39 @@ mod tests {
         let mut world = create_world();
         let first = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         let second = world.spawn_drone(2, 10, 12, vec![BodyPart::Move]);
-        let barrier = Arc::new(Barrier::new(2));
-        let arrivals = Arc::new(Mutex::new(Vec::new()));
+        let overlap = Arc::new((
+            Mutex::new(OverlapState {
+                arrived: 0,
+                active: 0,
+                max_active: 0,
+            }),
+            Condvar::new(),
+        ));
         let mut executors: HashMap<PlayerId, Box<dyn PlayerExecutor>> = HashMap::new();
         executors.insert(
             1,
-            Box::new(BarrierExecutor {
+            Box::new(OverlapExecutor {
                 player_id: 1,
+                expected_players: 2,
                 sequence: 1,
                 action: CommandAction::Move {
                     object_id: object_id(first),
                     direction: Direction::Top,
                 },
-                barrier: barrier.clone(),
-                arrivals: arrivals.clone(),
+                overlap: overlap.clone(),
             }),
         );
         executors.insert(
             2,
-            Box::new(BarrierExecutor {
+            Box::new(OverlapExecutor {
                 player_id: 2,
+                expected_players: 2,
                 sequence: 1,
                 action: CommandAction::Move {
                     object_id: object_id(second),
                     direction: Direction::Top,
                 },
-                barrier,
-                arrivals,
+                overlap: overlap.clone(),
             }),
         );
         let mut scheduler = MultiPlayerTickScheduler::new(
@@ -1396,6 +1415,7 @@ mod tests {
         assert_eq!(scheduler.broadcaster.broadcasts.len(), 1);
         assert_eq!(report.accepted.len(), 2);
         assert_eq!(report.rejections.len(), 0);
+        assert_eq!(overlap.0.lock().unwrap().max_active, 2);
         assert_eq!(
             scheduler
                 .world
@@ -1428,6 +1448,31 @@ mod tests {
 
         assert_eq!(first, second);
         assert_ne!(first, players);
+    }
+
+    #[test]
+    fn serial_execution_queue_orders_players_by_id_and_commands_by_sequence() {
+        let queue = serial_execution_queue(vec![
+            CollectedPlayerCommands {
+                player_id: 20,
+                commands: vec![
+                    raw_harvest(20, 3, 1, 300, 400),
+                    raw_harvest(20, 1, 1, 301, 401),
+                ],
+            },
+            CollectedPlayerCommands {
+                player_id: 10,
+                commands: vec![raw_harvest(10, 2, 1, 100, 200)],
+            },
+        ]);
+
+        assert_eq!(
+            queue
+                .iter()
+                .map(|command| (command.player_id, command.sequence))
+                .collect::<Vec<_>>(),
+            vec![(10, 2), (20, 1), (20, 3)]
+        );
     }
 
     #[test]
