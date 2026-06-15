@@ -8,7 +8,7 @@ use crate::onboarding::{OnboardingEvent, send_onboarding_event};
 use crate::resources::{
     GlobalStorageConfig, GlobalTransferDirection, MarketConfig, MarketOrder, MarketOrders,
     PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
-    ResourceRegistry,
+    ResourceCost, ResourceRegistry,
 };
 use crate::systems::{PendingControllerUpgrade, PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
 
@@ -24,6 +24,7 @@ pub const MAX_FUEL: u64 = 10_000_000;
 pub const MAX_REFUND_PER_TICK: u64 = MAX_FUEL / 10;
 pub const MAX_NEXT_TICK_FUEL_BUDGET: u64 = MAX_FUEL + MAX_REFUND_PER_TICK;
 pub const MAX_RANGED_ATTACK_RANGE: u32 = 3;
+const ENERGY_RESOURCE: &str = "Energy";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommandSource {
@@ -1015,18 +1016,20 @@ fn validate_spawn_drone(
     if body.len() > MAX_BODY_PARTS {
         return Err(RejectionReason::BodyTooLarge);
     }
-    let cost = body_energy_cost(world, body);
+    let cost = body_spawn_cost(world, body);
+    let energy_cost = cost.get(ENERGY_RESOURCE).copied().unwrap_or_default();
     let energy = structure.energy.unwrap_or(0);
-    if cost > structure.energy_capacity.unwrap_or(0) {
+    if energy_cost > structure.energy_capacity.unwrap_or(0) {
         return Err(RejectionReason::ExceedsRoomCapacity);
     }
-    if cost > energy {
+    if energy_cost > energy {
         return Err(RejectionReason::InsufficientResource {
-            resource: "Energy".to_string(),
-            required: cost,
+            resource: ENERGY_RESOURCE.to_string(),
+            required: energy_cost,
             available: energy,
         });
     }
+    ensure_player_resource_cost(world, player_id, &cost, true)?;
     if world
         .resource::<RoomDroneCounts>()
         .0
@@ -1053,11 +1056,13 @@ fn validate_build(
     object_id: ObjectId,
     x: i32,
     y: i32,
-    _structure: StructureType,
+    structure: StructureType,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
     ensure_drone_can_act(&drone, BodyPart::Work, true)?;
+    let cost = build_cost(world, structure);
+    ensure_player_resource_cost(world, player_id, &cost, false)?;
 
     let target = Position {
         x,
@@ -1377,17 +1382,19 @@ fn apply_spawn_drone(
         .entity(spawn)
         .get::<Position>()
         .ok_or(RejectionReason::ObjectNotFound)?;
-    let cost = body_energy_cost(world, &body);
+    let cost = body_spawn_cost(world, &body);
+    let energy_cost = cost.get(ENERGY_RESOURCE).copied().unwrap_or_default();
     {
         let mut entity_mut = world.entity_mut(spawn);
         let mut structure = entity_mut
             .get_mut::<Structure>()
             .ok_or(RejectionReason::ObjectNotFound)?;
         if let Some(energy) = &mut structure.energy {
-            *energy = energy.saturating_sub(cost);
+            *energy = energy.saturating_sub(energy_cost);
         }
         structure.cooldown = 1;
     }
+    deduct_player_resource_cost(world, player_id, &cost, true);
     world
         .resource_mut::<PendingSpawnQueue>()
         .0
@@ -1408,6 +1415,8 @@ fn apply_build(
     structure_type: StructureType,
 ) -> CommandResult {
     let (position, _) = drone_snapshot(world, object_id)?;
+    let cost = build_cost(world, structure_type);
+    deduct_player_resource_cost(world, player_id, &cost, false);
     let position = Position {
         x,
         y,
@@ -1941,6 +1950,54 @@ fn player_global_amount(world: &World, player_id: PlayerId, resource: &str) -> u
         .unwrap_or_default()
 }
 
+fn player_local_amount(world: &World, player_id: PlayerId, resource: &str) -> u32 {
+    world
+        .resource::<PlayerLocalStorage>()
+        .0
+        .get(&player_id)
+        .and_then(|storage| storage.get(resource))
+        .copied()
+        .unwrap_or_default()
+}
+
+fn ensure_player_resource_cost(
+    world: &World,
+    player_id: PlayerId,
+    cost: &ResourceCost,
+    skip_energy: bool,
+) -> CommandResult {
+    for (resource, required) in cost {
+        if skip_energy && resource == ENERGY_RESOURCE {
+            continue;
+        }
+        let available = player_local_amount(world, player_id, resource);
+        if available < *required {
+            return Err(RejectionReason::InsufficientResource {
+                resource: resource.clone(),
+                required: *required,
+                available,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn deduct_player_resource_cost(
+    world: &mut World,
+    player_id: PlayerId,
+    cost: &ResourceCost,
+    skip_energy: bool,
+) {
+    let mut local_storage = world.resource_mut::<PlayerLocalStorage>();
+    let storage = local_storage.0.entry(player_id).or_default();
+    for (resource, amount) in cost {
+        if skip_energy && resource == ENERGY_RESOURCE {
+            continue;
+        }
+        subtract_player_resource(storage, resource, *amount);
+    }
+}
+
 fn add_player_resource(world: &mut World, player_id: PlayerId, resource: &str, amount: u32) {
     *world
         .resource_mut::<PlayerGlobalStorage>()
@@ -2041,11 +2098,18 @@ pub fn body_cost(body: &[BodyPart]) -> u32 {
     ResourceRegistry::default().body_energy_cost(body)
 }
 
-fn body_energy_cost(world: &World, body: &[BodyPart]) -> u32 {
+fn body_spawn_cost(world: &World, body: &[BodyPart]) -> ResourceCost {
     world
         .get_resource::<ResourceRegistry>()
-        .map(|registry| registry.body_energy_cost(body))
-        .unwrap_or_else(|| body_cost(body))
+        .map(|registry| registry.body_cost(body))
+        .unwrap_or_else(|| ResourceRegistry::default().body_cost(body))
+}
+
+fn build_cost(world: &World, structure: StructureType) -> ResourceCost {
+    world
+        .get_resource::<ResourceRegistry>()
+        .and_then(|registry| registry.action_costs.build.get(&structure).cloned())
+        .unwrap_or_default()
 }
 
 fn entity(object_id: ObjectId) -> Result<Entity, RejectionReason> {
