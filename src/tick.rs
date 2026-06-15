@@ -9,13 +9,14 @@ use crate::command::{
     apply_command, source_gate, validate_command,
 };
 use crate::components::*;
+use crate::replay_storage::WorldDelta;
 use crate::resources::{
     MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
 };
-use crate::rule_module::run_tick_start_scripts;
+use crate::rule_module::{RhaiRuleModules, run_tick_start_scripts};
 use crate::security::{SecurityAlert, SecurityAuditor};
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
-use crate::world::SwarmWorld;
+use crate::world::{SwarmWorld, WorldConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickSnapshot {
@@ -41,6 +42,50 @@ pub enum CommitError {
 
 pub trait TickCommitter {
     fn commit(&mut self, trace: TickTrace) -> Result<(), CommitError>;
+
+    fn commit_with_environment(
+        &mut self,
+        trace: TickTrace,
+        _environment: ReplayEnvironment,
+    ) -> Result<(), CommitError> {
+        self.commit(trace)
+    }
+}
+
+pub const DEFAULT_KEYFRAME_INTERVAL: Tick = 100;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModsLock {
+    pub modules: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldConfigSnapshot {
+    pub config: WorldConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplayEnvironment {
+    pub mods_lock: ModsLock,
+    pub world_config: WorldConfigSnapshot,
+}
+
+impl ReplayEnvironment {
+    pub fn capture(world: &World) -> Self {
+        let modules = world
+            .get_resource::<RhaiRuleModules>()
+            .map(RhaiRuleModules::module_version_hashes)
+            .unwrap_or_default();
+        let config = world
+            .get_resource::<WorldConfig>()
+            .cloned()
+            .unwrap_or_default();
+
+        Self {
+            mods_lock: ModsLock { modules },
+            world_config: WorldConfigSnapshot { config },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,6 +431,12 @@ pub enum ReplayError {
     MissingPreviousState {
         tick: Tick,
     },
+    MissingKeyframe {
+        tick: Tick,
+    },
+    MissingDelta {
+        tick: Tick,
+    },
     StateMismatch {
         tick: Tick,
         expected_checksum: u64,
@@ -570,7 +621,12 @@ where
         };
         trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
 
-        if self.committer.commit(trace.clone()).is_err() {
+        let environment = ReplayEnvironment::capture(self.world.app.world());
+        if self
+            .committer
+            .commit_with_environment(trace.clone(), environment)
+            .is_err()
+        {
             world_snapshot.restore(self.world.app.world_mut());
             self.metrics.commit_failures += 1;
             return TickReport {
@@ -695,7 +751,12 @@ where
         };
         trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
 
-        if self.committer.commit(trace.clone()).is_err() {
+        let environment = ReplayEnvironment::capture(self.world.app.world());
+        if self
+            .committer
+            .commit_with_environment(trace.clone(), environment)
+            .is_err()
+        {
             world_snapshot.restore(self.world.app.world_mut());
             self.metrics.commit_failures += 1;
             return TickReport {
@@ -780,17 +841,45 @@ where
     S: AtomicTickStore,
 {
     fn commit(&mut self, trace: TickTrace) -> Result<(), CommitError> {
-        self.store.atomic_commit(tick_trace_writes(&trace)?)
+        let environment = ReplayEnvironment {
+            mods_lock: ModsLock::default(),
+            world_config: WorldConfigSnapshot {
+                config: WorldConfig::default(),
+            },
+        };
+        self.commit_with_environment(trace, environment)
+    }
+
+    fn commit_with_environment(
+        &mut self,
+        trace: TickTrace,
+        environment: ReplayEnvironment,
+    ) -> Result<(), CommitError> {
+        self.store
+            .atomic_commit(tick_trace_writes_with_environment(&trace, &environment)?)
     }
 }
 
 pub fn tick_trace_writes(trace: &TickTrace) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommitError> {
+    let environment = ReplayEnvironment {
+        mods_lock: ModsLock::default(),
+        world_config: WorldConfigSnapshot {
+            config: WorldConfig::default(),
+        },
+    };
+    tick_trace_writes_with_environment(trace, &environment)
+}
+
+pub fn tick_trace_writes_with_environment(
+    trace: &TickTrace,
+    environment: &ReplayEnvironment,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommitError> {
     fn encode<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, CommitError> {
         serde_json::to_vec(value)
             .map_err(|error| CommitError::Failed(format!("encode {label}: {error}")))
     }
 
-    Ok(vec![
+    let mut writes = vec![
         (
             tick_key(trace.tick, "state"),
             encode(&trace.state, "tick state")?,
@@ -811,7 +900,32 @@ pub fn tick_trace_writes(trace: &TickTrace) -> Result<Vec<(Vec<u8>, Vec<u8>)>, C
             tick_key(trace.tick, "security_alerts"),
             encode(&trace.security_alerts, "tick security alerts")?,
         ),
-    ])
+    ];
+
+    if trace.tick == 0 || trace.tick % DEFAULT_KEYFRAME_INTERVAL == 0 {
+        writes.push((
+            tick_key(trace.tick, "keyframe"),
+            encode(&trace.state, "tick keyframe")?,
+        ));
+        writes.push((
+            tick_key(trace.tick, "mods_lock"),
+            encode(&environment.mods_lock, "mods lock")?,
+        ));
+        writes.push((
+            tick_key(trace.tick, "world_config"),
+            encode(&environment.world_config, "world config")?,
+        ));
+    } else {
+        let delta = WorldDelta {
+            from_tick: trace.tick.saturating_sub(1),
+            to_tick: trace.tick,
+            entity_changes: Vec::new(),
+            commands: trace.commands.clone(),
+        };
+        writes.push((tick_key(trace.tick, "delta"), encode(&delta, "tick delta")?));
+    }
+
+    Ok(writes)
 }
 
 pub fn tick_key(tick: Tick, suffix: &str) -> Vec<u8> {
@@ -937,8 +1051,8 @@ impl TickBroadcaster for InMemoryTickBroadcaster {
 
 pub type TickState = WorldSnapshot;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-struct SnapshotEntity(u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SnapshotEntity(pub u64);
 
 impl From<Entity> for SnapshotEntity {
     fn from(entity: Entity) -> Self {
@@ -966,7 +1080,7 @@ pub struct WorldSnapshot {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct EntitySnapshot {
+pub struct EntitySnapshot {
     position: Option<Position>,
     owner: Option<Owner>,
     drone: Option<Drone>,
@@ -979,6 +1093,20 @@ struct EntitySnapshot {
 }
 
 impl WorldSnapshot {
+    pub fn entities(&self) -> &HashMap<SnapshotEntity, EntitySnapshot> {
+        &self.entities
+    }
+
+    pub fn delta_to(
+        &self,
+        after: &WorldSnapshot,
+        from_tick: Tick,
+        to_tick: Tick,
+        commands: Vec<RawCommand>,
+    ) -> WorldDelta {
+        WorldDelta::between(self, after, from_tick, to_tick, commands)
+    }
+
     fn player_resource_totals(&self) -> HashMap<PlayerId, u64> {
         let mut totals = HashMap::<PlayerId, u64>::new();
         add_player_resource_totals(&mut totals, &self.local_storage.0);
@@ -1293,13 +1421,14 @@ mod tests {
             .expect("atomic tick commit should succeed");
         let store = committer.into_inner();
 
-        assert_eq!(store.writes.len(), 5);
+        assert_eq!(store.writes.len(), 6);
         for suffix in [
             "state",
             "commands",
             "rejections",
             "metrics",
             "security_alerts",
+            "delta",
         ] {
             assert!(
                 store.writes.contains_key(&tick_key(42, suffix)),
@@ -1313,6 +1442,10 @@ mod tests {
         let metrics: TickMetrics =
             serde_json::from_slice(&store.writes[&tick_key(42, "metrics")]).unwrap();
         assert_eq!(metrics.accepted_commands, 1);
+        let delta: crate::replay_storage::WorldDelta =
+            serde_json::from_slice(&store.writes[&tick_key(42, "delta")]).unwrap();
+        assert_eq!(delta.to_tick, 42);
+        assert_eq!(delta.commands.len(), 1);
     }
 
     #[test]

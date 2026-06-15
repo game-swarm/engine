@@ -10,6 +10,7 @@ pub mod mod_cli;
 pub mod onboarding;
 pub mod ranking;
 pub mod realtime;
+pub mod replay_storage;
 pub mod resources;
 pub mod rule_module;
 pub mod security;

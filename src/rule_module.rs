@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -317,6 +318,24 @@ impl RhaiRuleModules {
 
     pub fn script_modules(&self) -> &[RhaiScriptModule] {
         &self.script_modules
+    }
+
+    pub fn module_version_hashes(&self) -> BTreeMap<String, String> {
+        let mut hashes = BTreeMap::new();
+        for module in &self.modules {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(module.name.as_bytes());
+            hasher.update(&module.ast_nodes.to_le_bytes());
+            hasher.update(&[u8::from(module.enabled)]);
+            hashes.insert(module.name.clone(), hasher.finalize().to_hex().to_string());
+        }
+        for module in &self.script_modules {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(module.name.as_bytes());
+            hasher.update(module.root.to_string_lossy().as_bytes());
+            hashes.insert(module.name.clone(), hasher.finalize().to_hex().to_string());
+        }
+        hashes
     }
 
     pub fn last_hook_report(&self) -> &RhaiHookReport {
