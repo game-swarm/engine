@@ -49,11 +49,11 @@ pub struct ModsLock {
 impl ModsLock {
     pub fn from_rhai_modules(modules: &crate::rule_module::RhaiRuleModules) -> Self {
         let modules = modules
-            .active_modules()
+            .module_version_hashes()
             .iter()
-            .map(|m| ModVersionHash {
-                module_id: m.name.clone(),
-                version_hash: m.version_hash.clone(),
+            .map(|(id, hash)| ModVersionHash {
+                module_id: id.clone(),
+                version_hash: hash.clone(),
             })
             .collect();
         Self { modules }
