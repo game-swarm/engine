@@ -375,6 +375,10 @@ pub fn run_init_scripts(world: &mut World) -> RhaiHookReport {
     run_script_hook(world, RhaiRuleHook::Init)
 }
 
+pub fn rhai_rule_module_tick_start_system(world: &mut World) {
+    let _ = run_tick_start_scripts(world);
+}
+
 pub fn run_tick_start_scripts(world: &mut World) -> RhaiHookReport {
     run_script_hook(world, RhaiRuleHook::TickStart)
 }

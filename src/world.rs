@@ -11,7 +11,10 @@ use crate::resources::{
     GlobalStorageConfig, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, ResourceRegistry,
 };
-use crate::rule_module::{rhai_rule_module_tick_end_system, run_init_scripts, RhaiRuleModules};
+use crate::rule_module::{
+    rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system, run_init_scripts,
+    RhaiRuleModules,
+};
 use crate::systems::*;
 
 pub struct SwarmWorld {
@@ -195,6 +198,7 @@ pub fn create_world() -> SwarmWorld {
     app.add_systems(
         Update,
         (
+            rhai_rule_module_tick_start_system,
             death_mark_system,
             spawn_system,
             regeneration_system,
