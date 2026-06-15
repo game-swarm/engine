@@ -9,6 +9,7 @@ pub mod onboarding;
 pub mod realtime;
 pub mod resources;
 pub mod rule_module;
+pub mod security;
 pub mod systems;
 pub mod tick;
 pub mod visibility;
