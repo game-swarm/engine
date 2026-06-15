@@ -66,15 +66,22 @@ fn main() {
     let healthy = Arc::new(AtomicBool::new(false));
     start_health_server(health_addr, Arc::clone(&healthy));
 
+    let fdb_store = swarm_engine::FoundationDbStore::connect(Some(&fdb_cluster_file));
     let fdb_endpoint = read_fdb_endpoint(&fdb_cluster_file);
     let nats_endpoint = parse_nats_endpoint(&nats_url);
+
+    let fdb_connected = fdb_store.is_ok();
+    match &fdb_store {
+        Ok(_) => println!("fdb connected cluster_file={fdb_cluster_file}"),
+        Err(error) => eprintln!("fdb unavailable: {error}"),
+    }
 
     match &fdb_endpoint {
         Ok(endpoint) => println!(
             "fdb cluster file loaded path={} coordinator={}:{}",
             fdb_cluster_file, endpoint.host, endpoint.port
         ),
-        Err(error) => eprintln!("fdb unavailable: {error}"),
+        Err(error) => eprintln!("fdb coordinator probe unavailable: {error}"),
     }
 
     match &nats_endpoint {
@@ -86,6 +93,9 @@ fn main() {
     }
 
     let mut world = create_world_with_mode(mode);
+    if let Ok(store) = fdb_store {
+        world.app.insert_resource(store);
+    }
     world.spawn_drone(
         1,
         10,
@@ -95,10 +105,11 @@ fn main() {
 
     let mut tick: u64 = 0;
     loop {
-        let fdb_ok = fdb_endpoint
-            .as_ref()
-            .map(|endpoint| tcp_check(endpoint))
-            .unwrap_or(false);
+        let fdb_ok = fdb_connected
+            && fdb_endpoint
+                .as_ref()
+                .map(|endpoint| tcp_check(endpoint))
+                .unwrap_or(false);
         let nats_ok = nats_endpoint
             .as_ref()
             .map(|endpoint| tcp_check(endpoint))

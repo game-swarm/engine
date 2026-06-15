@@ -1557,7 +1557,7 @@ pub fn swarm_get_snapshot(world: &mut SwarmWorld, context: McpContext) -> Visibl
     let authoritative = world
         .app
         .world_mut()
-        .resource_mut::<crate::hot_cache::InMemoryFoundationDb>()
+        .resource_mut::<crate::fdb::FoundationDbStore>()
         .write_visible_snapshot(snapshot);
     let mut cache = world
         .app

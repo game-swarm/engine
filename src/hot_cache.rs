@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use bevy::prelude::Resource;
 
+use serde::{Deserialize, Serialize};
+
 use crate::command::Tick;
 use crate::components::PlayerId;
 use crate::mcp::VisibleWorldSnapshot;
@@ -18,7 +20,7 @@ impl SnapshotKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachedSnapshot {
     pub snapshot: VisibleWorldSnapshot,
     pub fingerprint: [u8; 32],
@@ -46,30 +48,6 @@ pub trait FoundationDbSnapshotStore {
 pub trait DragonflySnapshotCache {
     fn get_snapshot(&mut self, key: SnapshotKey) -> Option<CachedSnapshot>;
     fn put_snapshot(&mut self, key: SnapshotKey, snapshot: CachedSnapshot);
-}
-
-#[derive(Resource, Debug, Default)]
-pub struct InMemoryFoundationDb {
-    snapshots: BTreeMap<SnapshotKey, CachedSnapshot>,
-}
-
-impl InMemoryFoundationDb {
-    pub fn write_visible_snapshot(&mut self, snapshot: VisibleWorldSnapshot) -> CachedSnapshot {
-        let key = SnapshotKey::new(snapshot.player_id, snapshot.tick);
-        let cached = CachedSnapshot::new(snapshot);
-        self.put_snapshot(key, cached.clone());
-        cached
-    }
-}
-
-impl FoundationDbSnapshotStore for InMemoryFoundationDb {
-    fn get_snapshot(&self, key: SnapshotKey) -> Option<CachedSnapshot> {
-        self.snapshots.get(&key).cloned()
-    }
-
-    fn put_snapshot(&mut self, key: SnapshotKey, snapshot: CachedSnapshot) {
-        self.snapshots.insert(key, snapshot);
-    }
 }
 
 #[derive(Resource, Debug, Default)]

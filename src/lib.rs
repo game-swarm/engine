@@ -1,6 +1,7 @@
 pub mod arena;
 pub mod command;
 pub mod components;
+pub mod fdb;
 pub mod hot_cache;
 pub mod mcp;
 pub mod mod_cli;
@@ -18,6 +19,7 @@ pub mod world;
 pub use arena::*;
 pub use command::*;
 pub use components::*;
+pub use fdb::*;
 pub use hot_cache::*;
 pub use mcp::{
     DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer,
