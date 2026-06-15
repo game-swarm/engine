@@ -2,7 +2,9 @@ use bevy::prelude::*;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::components::{Drone, Structure};
+use crate::components::{
+    Attributes, BodyPart, BodyPartRegistry, DamageTypeRegistry, Drone, Structure,
+};
 
 pub const DEFAULT_ATTACK_DAMAGE: u32 = 30;
 pub const DEFAULT_RANGED_ATTACK_DAMAGE: u32 = 25;
@@ -83,6 +85,7 @@ fn scale_fixed(amount: u32, multiplier: u32) -> u32 {
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCombat {
     pub damage: Vec<(u64, u32)>,
+    pub typed_damage: Vec<(u64, String, u32)>,
     pub heal: Vec<(u64, u32)>,
 }
 
@@ -91,9 +94,31 @@ impl PendingCombat {
         self.damage.push((target.to_bits(), amount));
     }
 
+    pub fn queue_typed_damage(
+        &mut self,
+        target: Entity,
+        damage_type: impl Into<String>,
+        amount: u32,
+    ) {
+        self.typed_damage
+            .push((target.to_bits(), damage_type.into(), amount));
+    }
+
     pub fn queue_heal(&mut self, target: Entity, amount: u32) {
         self.heal.push((target.to_bits(), amount));
     }
+}
+
+pub fn body_part_damage(
+    parts: usize,
+    part: BodyPart,
+    registry: &BodyPartRegistry,
+    rules: CombatRules,
+) -> (String, u32) {
+    (
+        registry.damage_type(part),
+        rules.scale_damage(parts as u32 * registry.base_damage(part)),
+    )
 }
 
 pub fn melee_attack_damage(parts: usize, rules: CombatRules) -> u32 {
@@ -110,25 +135,46 @@ pub fn heal_amount(parts: usize) -> u32 {
 
 pub fn combat_system(
     mut combat: ResMut<PendingCombat>,
-    mut drones: Query<&mut Drone>,
-    mut structures: Query<&mut Structure>,
+    body_registry: Res<BodyPartRegistry>,
+    damage_registry: Res<DamageTypeRegistry>,
+    mut drones: Query<(&mut Drone, Option<&Attributes>)>,
+    mut structures: Query<(&mut Structure, Option<&Attributes>), Without<Drone>>,
 ) {
     // --- Damage phase (first) ---
     // Accumulate total damage per target, then apply in deterministic order.
-    let mut damage_by_target: IndexMap<Entity, u32> = IndexMap::new();
+    let mut damage_by_target: IndexMap<Entity, Vec<(String, u32)>> = IndexMap::new();
     for (entity, amount) in combat.damage.drain(..) {
-        *damage_by_target
+        damage_by_target
             .entry(Entity::from_bits(entity))
-            .or_default() += amount;
+            .or_default()
+            .push(("Kinetic".to_string(), amount));
+    }
+    for (entity, damage_type, amount) in combat.typed_damage.drain(..) {
+        damage_by_target
+            .entry(Entity::from_bits(entity))
+            .or_default()
+            .push((damage_type, amount));
     }
     // Sort by Entity bits for determinism.
     damage_by_target.sort_keys();
 
-    for (entity, amount) in &damage_by_target {
-        if let Ok(mut drone) = drones.get_mut(*entity) {
-            drone.hits = drone.hits.saturating_sub(*amount);
-        } else if let Ok(mut structure) = structures.get_mut(*entity) {
-            structure.hits = structure.hits.saturating_sub(*amount);
+    for (entity, damages) in &damage_by_target {
+        if let Ok((mut drone, attrs)) = drones.get_mut(*entity) {
+            let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
+                let body_mult = drone
+                    .body
+                    .iter()
+                    .fold(1.0, |m, p| m * (1.0 - body_registry.resistance(*p, dt)));
+                let attr_mult = damage_registry.attribute_multiplier(dt, attrs);
+                acc.saturating_add(((*amount as f64) * body_mult * attr_mult).floor() as u32)
+            });
+            drone.hits = drone.hits.saturating_sub(total);
+        } else if let Ok((mut structure, attrs)) = structures.get_mut(*entity) {
+            let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
+                let attr_mult = damage_registry.attribute_multiplier(dt, attrs);
+                acc.saturating_add(((*amount as f64) * attr_mult).floor() as u32)
+            });
+            structure.hits = structure.hits.saturating_sub(total);
         }
     }
 
@@ -140,7 +186,7 @@ pub fn combat_system(
     heal_by_target.sort_keys();
 
     for (entity, amount) in &heal_by_target {
-        if let Ok(mut drone) = drones.get_mut(*entity) {
+        if let Ok((mut drone, _)) = drones.get_mut(*entity) {
             drone.hits = (drone.hits + amount).min(drone.hits_max);
         }
     }

@@ -1297,19 +1297,17 @@ fn apply_withdraw(
 
 fn apply_attack(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> CommandResult {
     let (_, drone) = drone_snapshot(world, object_id)?;
-    let damage = drone
-        .body
-        .iter()
-        .filter(|part| **part == BodyPart::Attack)
-        .count() as u32
-        * 30;
-    let target = entity(target_id)?;
-    if let Some(mut target_drone) = world.entity_mut(target).get_mut::<Drone>() {
-        target_drone.hits = target_drone.hits.saturating_sub(damage);
-    } else if let Some(mut structure) = world.entity_mut(target).get_mut::<Structure>() {
-        structure.hits = structure.hits.saturating_sub(damage);
-    }
-    Ok(())
+    let (damage_type, damage) = crate::systems::combat_system::body_part_damage(
+        drone
+            .body
+            .iter()
+            .filter(|part| **part == BodyPart::Attack)
+            .count(),
+        BodyPart::Attack,
+        world.resource::<BodyPartRegistry>(),
+        *world.resource::<crate::systems::CombatRules>(),
+    );
+    apply_resisted_damage(world, target_id, &damage_type, damage)
 }
 
 fn apply_ranged_attack(
@@ -1318,15 +1316,45 @@ fn apply_ranged_attack(
     target_id: ObjectId,
 ) -> CommandResult {
     let (_, drone) = drone_snapshot(world, object_id)?;
-    let damage = crate::systems::ranged_attack_damage(
+    let (damage_type, damage) = crate::systems::combat_system::body_part_damage(
         drone
             .body
             .iter()
             .filter(|part| **part == BodyPart::RangedAttack)
             .count(),
+        BodyPart::RangedAttack,
+        world.resource::<BodyPartRegistry>(),
         *world.resource::<crate::systems::CombatRules>(),
     );
+    apply_resisted_damage(world, target_id, &damage_type, damage)
+}
+
+fn apply_resisted_damage(
+    world: &mut World,
+    target_id: ObjectId,
+    damage_type: &str,
+    damage: u32,
+) -> CommandResult {
     let target = entity(target_id)?;
+    let multiplier = {
+        let body_registry = world.resource::<BodyPartRegistry>();
+        let damage_registry = world.resource::<DamageTypeRegistry>();
+        let entity_ref = world
+            .get_entity(target)
+            .map_err(|_| RejectionReason::ObjectNotFound)?;
+        let attrs = entity_ref.get::<Attributes>();
+        if let Some(drone) = entity_ref.get::<Drone>() {
+            let body_mult = drone.body.iter().fold(1.0, |m, p| {
+                m * (1.0 - body_registry.resistance(*p, damage_type))
+            });
+            body_mult * damage_registry.attribute_multiplier(damage_type, attrs)
+        } else if entity_ref.get::<Structure>().is_some() {
+            damage_registry.attribute_multiplier(damage_type, attrs)
+        } else {
+            return Err(RejectionReason::ObjectNotFound);
+        }
+    };
+    let damage = ((damage as f64) * multiplier).floor() as u32;
     if let Some(mut target_drone) = world.entity_mut(target).get_mut::<Drone>() {
         target_drone.hits = target_drone.hits.saturating_sub(damage);
     } else if let Some(mut structure) = world.entity_mut(target).get_mut::<Structure>() {
@@ -1342,7 +1370,9 @@ fn apply_heal(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> Co
         .iter()
         .filter(|part| **part == BodyPart::Heal)
         .count() as u32
-        * 12;
+        * world
+            .resource::<BodyPartRegistry>()
+            .heal_amount(BodyPart::Heal);
     let target = entity(target_id)?;
     let mut entity_mut = world.entity_mut(target);
     let mut drone = entity_mut

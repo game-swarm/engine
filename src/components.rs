@@ -192,6 +192,196 @@ pub enum BodyPart {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DamageType {
+    Kinetic,
+    Thermal,
+    EMP,
+    Sonic,
+    Corrosive,
+    Psionic,
+}
+impl DamageType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Kinetic => "Kinetic",
+            Self::Thermal => "Thermal",
+            Self::EMP => "EMP",
+            Self::Sonic => "Sonic",
+            Self::Corrosive => "Corrosive",
+            Self::Psionic => "Psionic",
+        }
+    }
+}
+impl fmt::Display for DamageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DamageTypeDef {
+    pub name: String,
+    pub attribute_multipliers: IndexMap<String, f64>,
+}
+impl Default for DamageTypeDef {
+    fn default() -> Self {
+        Self {
+            name: DamageType::Kinetic.to_string(),
+            attribute_multipliers: IndexMap::new(),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BodyPartTypeDef {
+    pub name: BodyPart,
+    pub damage_type: Option<String>,
+    pub base_damage: Option<u32>,
+    pub heal_amount: Option<u32>,
+    pub resistances: IndexMap<String, f64>,
+}
+impl Default for BodyPartTypeDef {
+    fn default() -> Self {
+        Self {
+            name: BodyPart::Move,
+            damage_type: None,
+            base_damage: None,
+            heal_amount: None,
+            resistances: IndexMap::new(),
+        }
+    }
+}
+#[derive(BevyResource, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BodyPartRegistry {
+    pub parts: IndexMap<BodyPart, BodyPartTypeDef>,
+}
+impl Default for BodyPartRegistry {
+    fn default() -> Self {
+        let mut parts = IndexMap::new();
+        for part in [
+            BodyPart::Move,
+            BodyPart::Work,
+            BodyPart::Carry,
+            BodyPart::Attack,
+            BodyPart::RangedAttack,
+            BodyPart::Heal,
+            BodyPart::Claim,
+            BodyPart::Tough,
+        ] {
+            parts.insert(
+                part,
+                BodyPartTypeDef {
+                    name: part,
+                    ..Default::default()
+                },
+            );
+        }
+        parts.get_mut(&BodyPart::Attack).unwrap().damage_type =
+            Some(DamageType::Kinetic.to_string());
+        parts.get_mut(&BodyPart::Attack).unwrap().base_damage = Some(30);
+        parts.get_mut(&BodyPart::RangedAttack).unwrap().damage_type =
+            Some(DamageType::Kinetic.to_string());
+        parts.get_mut(&BodyPart::RangedAttack).unwrap().base_damage = Some(25);
+        parts.get_mut(&BodyPart::Heal).unwrap().heal_amount = Some(12);
+        parts
+            .get_mut(&BodyPart::Tough)
+            .unwrap()
+            .resistances
+            .insert(DamageType::Kinetic.to_string(), 0.5);
+        Self { parts }
+    }
+}
+impl BodyPartRegistry {
+    pub fn from_defs(defs: Vec<BodyPartTypeDef>) -> Self {
+        let mut r = Self::default();
+        for d in defs {
+            r.parts.insert(d.name, d);
+        }
+        r
+    }
+    pub fn damage_type(&self, part: BodyPart) -> String {
+        self.parts
+            .get(&part)
+            .and_then(|d| d.damage_type.clone())
+            .unwrap_or_else(|| DamageType::Kinetic.to_string())
+    }
+    pub fn base_damage(&self, part: BodyPart) -> u32 {
+        self.parts
+            .get(&part)
+            .and_then(|d| d.base_damage)
+            .unwrap_or(0)
+    }
+    pub fn heal_amount(&self, part: BodyPart) -> u32 {
+        self.parts
+            .get(&part)
+            .and_then(|d| d.heal_amount)
+            .unwrap_or(0)
+    }
+    pub fn resistance(&self, part: BodyPart, dt: &str) -> f64 {
+        self.parts
+            .get(&part)
+            .and_then(|d| d.resistances.get(dt).copied())
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+    }
+}
+#[derive(BevyResource, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DamageTypeRegistry {
+    pub damage_types: IndexMap<String, DamageTypeDef>,
+}
+impl Default for DamageTypeRegistry {
+    fn default() -> Self {
+        let mut damage_types = IndexMap::new();
+        for dt in [
+            DamageType::Kinetic,
+            DamageType::Thermal,
+            DamageType::EMP,
+            DamageType::Sonic,
+            DamageType::Corrosive,
+            DamageType::Psionic,
+        ] {
+            damage_types.insert(
+                dt.to_string(),
+                DamageTypeDef {
+                    name: dt.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        damage_types
+            .get_mut(DamageType::Kinetic.as_str())
+            .unwrap()
+            .attribute_multipliers
+            .insert("Shielded".to_string(), 0.7);
+        Self { damage_types }
+    }
+}
+impl DamageTypeRegistry {
+    pub fn from_defs(defs: Vec<DamageTypeDef>) -> Self {
+        let mut r = Self::default();
+        for d in defs {
+            r.damage_types.insert(d.name.clone(), d);
+        }
+        r
+    }
+    pub fn attribute_multiplier(&self, dt: &str, attrs: Option<&Attributes>) -> f64 {
+        let Some(attrs) = attrs else {
+            return 1.0;
+        };
+        let Some(def) = self.damage_types.get(dt) else {
+            return 1.0;
+        };
+        attrs
+            .0
+            .iter()
+            .filter_map(|a| def.attribute_multipliers.get(a))
+            .fold(1.0, |acc, m| acc * m.clamp(0.0, 1.0))
+    }
+}
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Attributes(pub Vec<String>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StructureType {
     Spawn,
     Extension,

@@ -40,6 +40,8 @@ pub struct WorldConfig {
     pub visibility: VisibilityConfig,
     pub resources: WorldResourceConfig,
     pub combat: WorldCombatConfig,
+    pub damage_types: Vec<crate::components::DamageTypeDef>,
+    pub body_part_types: Vec<crate::components::BodyPartTypeDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +154,8 @@ impl Default for WorldConfig {
             visibility: VisibilityConfig::default(),
             resources: WorldResourceConfig::default(),
             combat: WorldCombatConfig::default(),
+            damage_types: Vec::new(),
+            body_part_types: Vec::new(),
         }
     }
 }
@@ -293,6 +297,8 @@ impl WorldConfig {
         app.insert_resource(CombatRules {
             damage_multiplier: self.combat_damage_multiplier_fixed(),
         });
+        app.insert_resource(DamageTypeRegistry::from_defs(self.damage_types.clone()));
+        app.insert_resource(BodyPartRegistry::from_defs(self.body_part_types.clone()));
     }
     fn register_systems(&self, app: &mut App) {
         if self.propagation_system_enabled() {
