@@ -1,11 +1,11 @@
 pub mod arena;
-pub mod ranking;
 pub mod command;
 pub mod components;
 pub mod hot_cache;
 pub mod mcp;
 pub mod mod_cli;
 pub mod onboarding;
+pub mod ranking;
 pub mod realtime;
 pub mod resources;
 pub mod rule_module;
@@ -33,13 +33,15 @@ pub use resources::*;
 pub use rule_module::*;
 pub use tick::*;
 pub use visibility::*;
-pub use world::{SwarmWorld, create_world};
+pub use world::{SwarmWorld, create_world, create_world_with_mode};
 
 #[cfg(test)]
 mod tests {
     use indexmap::IndexMap;
 
-    use crate::{command::*, components::*, create_world, resources::*, systems::*};
+    use crate::{
+        command::*, components::*, create_world, create_world_with_mode, resources::*, systems::*,
+    };
 
     fn drone_count(world: &mut crate::SwarmWorld) -> usize {
         world
@@ -652,6 +654,111 @@ mod tests {
                 "{source:?} capabilities"
             );
         }
+    }
+
+    #[test]
+    fn tutorial_world_uses_tutorial_settings_and_accelerated_single_room() {
+        let default_world = create_world();
+        let tutorial_world = create_world_with_mode(WorldMode::Tutorial);
+
+        let default_settings = default_world.app.world().resource::<WorldSettings>();
+        assert_eq!(default_settings.mode, WorldMode::Default);
+        assert_eq!(default_settings.tick_interval_ms, DEFAULT_TICK_INTERVAL_MS);
+        assert_eq!(default_settings.namespace, "default");
+
+        let tutorial_settings = tutorial_world.app.world().resource::<WorldSettings>();
+        assert_eq!(tutorial_settings.mode, WorldMode::Tutorial);
+        assert_eq!(
+            tutorial_settings.tick_interval_ms,
+            TUTORIAL_TICK_INTERVAL_MS
+        );
+        assert!(tutorial_settings.namespace.starts_with("tutorial_"));
+
+        let tutorial_rooms = &tutorial_world.app.world().resource::<RoomTerrains>().0;
+        assert_eq!(tutorial_rooms.len(), 1);
+        assert!(tutorial_rooms.contains_key(&RoomId(0)));
+
+        let default_source = default_world
+            .app
+            .world()
+            .resource::<ResourceRegistry>()
+            .source("EnergyField")
+            .unwrap();
+        let tutorial_source = tutorial_world
+            .app
+            .world()
+            .resource::<ResourceRegistry>()
+            .source("EnergyField")
+            .unwrap();
+        assert!(tutorial_source.capacity > default_source.capacity);
+        assert!(tutorial_source.regeneration < default_source.regeneration);
+    }
+
+    #[test]
+    fn tutorial_world_namespaces_are_isolated() {
+        let first = create_world_with_mode(WorldMode::Tutorial);
+        let second = create_world_with_mode(WorldMode::Tutorial);
+
+        let first_namespace = first
+            .app
+            .world()
+            .resource::<WorldSettings>()
+            .namespace
+            .clone();
+        let second_namespace = second
+            .app
+            .world()
+            .resource::<WorldSettings>()
+            .namespace
+            .clone();
+
+        assert_ne!(first_namespace, second_namespace);
+        assert_eq!(
+            first
+                .app
+                .world()
+                .resource::<GlobalStorageConfig>()
+                .namespace,
+            first_namespace
+        );
+        assert_eq!(
+            second
+                .app
+                .world()
+                .resource::<GlobalStorageConfig>()
+                .namespace,
+            second_namespace
+        );
+    }
+
+    #[test]
+    fn tutorial_source_is_only_validated_in_tutorial_worlds() {
+        let mut default_world = create_world();
+        let default_entity = default_world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let default_intent = CommandIntent {
+            sequence: 1,
+            action: CommandAction::Move {
+                object_id: object_id(default_entity),
+                direction: Direction::Top,
+            },
+        };
+        let default_raw = source_gate(1, 1, CommandSource::Tutorial, default_intent).unwrap();
+        assert_eq!(
+            validate_command(default_world.app.world_mut(), default_raw),
+            Err(RejectionReason::SourceNotAllowed)
+        );
+
+        let mut tutorial_world = create_world_with_mode(WorldMode::Tutorial);
+        let tutorial_entity = tutorial_world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let tutorial_intent = CommandIntent {
+            sequence: 1,
+            action: CommandAction::Move {
+                object_id: object_id(tutorial_entity),
+                direction: Direction::Top,
+            },
+        };
+        let tutorial_raw = source_gate(1, 1, CommandSource::Tutorial, tutorial_intent).unwrap();
+        assert!(validate_command(tutorial_world.app.world_mut(), tutorial_raw).is_ok());
     }
 
     #[test]

@@ -298,6 +298,11 @@ pub fn validate_command(
     if !source_allows_action(raw.source, &raw.action) {
         return Err(RejectionReason::SourceNotAllowed);
     }
+    if raw.source == CommandSource::Tutorial
+        && world.resource::<WorldSettings>().mode != WorldMode::Tutorial
+    {
+        return Err(RejectionReason::SourceNotAllowed);
+    }
 
     match &raw.action {
         CommandAction::Move {
@@ -382,7 +387,10 @@ pub fn validate_command(
 pub fn source_allows_gameplay(source: CommandSource) -> bool {
     matches!(
         source,
-        CommandSource::Wasm | CommandSource::Admin | CommandSource::TestHarness
+        CommandSource::Wasm
+            | CommandSource::Admin
+            | CommandSource::TestHarness
+            | CommandSource::Tutorial
     )
 }
 

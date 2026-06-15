@@ -51,6 +51,7 @@ pub struct ResourceRegistry {
 #[derive(BevyResource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GlobalStorageConfig {
     pub enabled: bool,
+    pub namespace: String,
     pub capacity: ResourceAmount,
     pub transfer_to_global_ticks: Tick,
     pub transfer_from_global_ticks: Tick,
@@ -115,6 +116,7 @@ impl Default for GlobalStorageConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            namespace: "default".to_string(),
             capacity: 100_000,
             transfer_to_global_ticks: TRANSFER_TO_GLOBAL_TICKS,
             transfer_from_global_ticks: TRANSFER_FROM_GLOBAL_TICKS,

@@ -3,13 +3,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::command::Tick;
-use crate::components::PlayerId;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorldMode {
-    World,
-    Arena,
-}
+use crate::components::{PlayerId, WorldMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum LeagueTier {
@@ -185,7 +179,7 @@ pub struct RankingState {
 impl Default for RankingState {
     fn default() -> Self {
         Self {
-            mode: WorldMode::World,
+            mode: WorldMode::Default,
             season: 1,
             season_config: SeasonConfig::default(),
             players: IndexMap::new(),
@@ -401,9 +395,11 @@ mod tests {
     #[test]
     fn arena_matches_feed_leaderboard_and_ignore_world_mode() {
         let mut rankings = RankingState::default();
-        assert!(rankings
-            .record_match(1, 1, 2, MatchOutcome::PlayerOneWin)
-            .is_none());
+        assert!(
+            rankings
+                .record_match(1, 1, 2, MatchOutcome::PlayerOneWin)
+                .is_none()
+        );
         rankings.mode = WorldMode::Arena;
         rankings
             .record_match(2, 1, 2, MatchOutcome::PlayerOneWin)

@@ -9,6 +9,36 @@ pub const DEFAULT_DRONE_LIFESPAN: u32 = 1500;
 
 pub type PlayerId = u32;
 
+pub const DEFAULT_TICK_INTERVAL_MS: u64 = 3_000;
+pub const TUTORIAL_TICK_INTERVAL_MS: u64 = 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WorldMode {
+    Default,
+    Tutorial,
+    Arena,
+}
+
+#[derive(BevyResource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldSettings {
+    pub mode: WorldMode,
+    pub tick_interval_ms: u64,
+    pub namespace: String,
+}
+
+impl WorldSettings {
+    pub fn new(mode: WorldMode, namespace: String) -> Self {
+        Self {
+            mode,
+            tick_interval_ms: match mode {
+                WorldMode::Tutorial => TUTORIAL_TICK_INTERVAL_MS,
+                WorldMode::Default | WorldMode::Arena => DEFAULT_TICK_INTERVAL_MS,
+            },
+            namespace,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RoomId(pub u32);
 

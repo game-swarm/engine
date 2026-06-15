@@ -1,21 +1,24 @@
 use bevy::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::command::{
-    apply_command, source_gate, validate_command, CommandIntent, CommandResult, CommandSource,
-    RawCommand, Tick,
+    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
+    validate_command,
 };
 use crate::components::*;
 use crate::hot_cache::{InMemoryDragonfly, InMemoryFoundationDb};
-use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState, WorldMode};
+use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::resources::{
     GlobalStorageConfig, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, ResourceRegistry,
 };
 use crate::rule_module::{
-    rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system, run_init_scripts,
-    RhaiRuleModules,
+    RhaiRuleModules, rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system,
+    run_init_scripts,
 };
 use crate::systems::*;
+
+static NEXT_TUTORIAL_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct SwarmWorld {
     pub app: App,
@@ -178,6 +181,10 @@ impl SwarmWorld {
 }
 
 pub fn create_world() -> SwarmWorld {
+    create_world_with_mode(WorldMode::Default)
+}
+
+pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.init_resource::<PendingSpawnQueue>();
@@ -195,6 +202,28 @@ pub fn create_world() -> SwarmWorld {
     app.init_resource::<InMemoryFoundationDb>();
     app.init_resource::<InMemoryDragonfly>();
     app.init_resource::<RankingState>();
+
+    let namespace = match mode {
+        WorldMode::Default => "default".to_string(),
+        WorldMode::Tutorial => format!(
+            "tutorial_{}",
+            NEXT_TUTORIAL_WORLD_ID.fetch_add(1, Ordering::Relaxed)
+        ),
+        WorldMode::Arena => "arena".to_string(),
+    };
+    app.insert_resource(WorldSettings::new(mode, namespace.clone()));
+    app.world_mut().resource_mut::<RankingState>().mode = mode;
+    app.world_mut()
+        .resource_mut::<GlobalStorageConfig>()
+        .namespace = namespace;
+
+    if mode == WorldMode::Tutorial {
+        let mut registry = app.world_mut().resource_mut::<ResourceRegistry>();
+        if let Some(source) = registry.sources.get_mut("EnergyField") {
+            source.capacity *= 10;
+            source.regeneration = (source.regeneration / 10).max(1);
+        }
+    }
     app.add_systems(
         Update,
         (

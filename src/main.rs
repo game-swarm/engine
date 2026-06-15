@@ -10,11 +10,11 @@ use std::{
     time::Duration,
 };
 
-use swarm_engine::{BodyPart, Controller, Drone, Source, Structure, create_world};
+use swarm_engine::{
+    BodyPart, Controller, Drone, Source, Structure, WorldMode, create_world, create_world_with_mode,
+};
 
 const DEFAULT_HEALTH_ADDR: &str = "0.0.0.0:8080";
-const DEFAULT_TICK_INTERVAL_MS: u64 = 3_000;
-
 #[derive(Clone, Debug)]
 struct Endpoint {
     host: String,
@@ -30,6 +30,14 @@ fn main() {
         }
         return;
     }
+
+    let (mode, cli_args) = match parse_mode_arg(cli_args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
 
     match swarm_engine::mod_cli::try_run(cli_args) {
         Ok(true) => return,
@@ -49,7 +57,10 @@ fn main() {
         env::var("SWARM_TICK_INTERVAL_MS")
             .ok()
             .and_then(|value| value.parse().ok())
-            .unwrap_or(DEFAULT_TICK_INTERVAL_MS),
+            .unwrap_or(match mode {
+                WorldMode::Tutorial => swarm_engine::TUTORIAL_TICK_INTERVAL_MS,
+                WorldMode::Default | WorldMode::Arena => swarm_engine::DEFAULT_TICK_INTERVAL_MS,
+            }),
     );
 
     let healthy = Arc::new(AtomicBool::new(false));
@@ -74,7 +85,7 @@ fn main() {
         Err(error) => eprintln!("nats unavailable: {error}"),
     }
 
-    let mut world = create_world();
+    let mut world = create_world_with_mode(mode);
     world.spawn_drone(
         1,
         10,
@@ -115,6 +126,33 @@ fn main() {
         );
         tick += 1;
         thread::sleep(tick_interval);
+    }
+}
+
+fn parse_mode_arg(args: Vec<String>) -> Result<(WorldMode, Vec<String>), String> {
+    let mut mode = WorldMode::Default;
+    let mut remaining = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--mode" {
+            index += 1;
+            mode = parse_world_mode(args.get(index).ok_or("missing value after --mode")?)?;
+        } else if let Some(value) = arg.strip_prefix("--mode=") {
+            mode = parse_world_mode(value)?;
+        } else {
+            remaining.push(arg.clone());
+        }
+        index += 1;
+    }
+    Ok((mode, remaining))
+}
+
+fn parse_world_mode(value: &str) -> Result<WorldMode, String> {
+    match value {
+        "default" => Ok(WorldMode::Default),
+        "tutorial" => Ok(WorldMode::Tutorial),
+        _ => Err(format!("--mode must be default or tutorial, got {value}")),
     }
 }
 
