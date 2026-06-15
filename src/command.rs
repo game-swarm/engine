@@ -26,10 +26,8 @@ pub const MAX_REFUND_PER_TICK: u64 = MAX_FUEL / 10;
 pub const MAX_NEXT_TICK_FUEL_BUDGET: u64 = MAX_FUEL + MAX_REFUND_PER_TICK;
 pub const MAX_RANGED_ATTACK_RANGE: u32 = 3;
 const ENERGY_RESOURCE: &str = "Energy";
-const DISRUPT_ENERGY_COST: u32 = 100;
-const DISRUPT_COOLDOWN_TICKS: u32 = 50;
-const FORTIFY_ENERGY_COST: u32 = 400;
-const FORTIFY_COOLDOWN_TICKS: u32 = 300;
+const OVERLOAD_FUEL_DRAIN: u64 = 500_000;
+const OVERLOAD_FUEL_FLOOR: u64 = MAX_FUEL / 5;
 
 #[derive(Resource, Debug, Clone, Default)]
 struct CustomActionCooldowns(IndexMap<(ObjectId, String), Tick>);
@@ -552,7 +550,7 @@ pub struct CommandActionMetadata {
     pub range: Option<u32>,
     pub cooldown: Option<u32>,
     pub cost: ResourceCost,
-    pub special_effect: Option<CustomActionSpecialEffect>,
+    pub special_effect: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -981,8 +979,8 @@ pub fn available_action_metadata(world: &World) -> Vec<CommandActionMetadata> {
                         "structure".to_string(),
                     ],
                     range: Some(action.range),
-                    cooldown: action.cooldown,
-                    cost: action.cost.clone(),
+                    cooldown: custom_action_cooldown(action),
+                    cost: custom_action_cost(action),
                     special_effect: action.special_effect.clone(),
                 }),
         );
@@ -1628,7 +1626,7 @@ fn validate_custom_action(
     if drone.fatigue > 0 {
         return Err(RejectionReason::Fatigued);
     }
-    validate_special_action_requirements(&drone, &action)?;
+    validate_special_action_requirements(world, &drone, &action)?;
     if custom_action_on_cooldown(world, object_id, action_type, tick) {
         return Err(RejectionReason::Fatigued);
     }
@@ -1639,10 +1637,38 @@ fn validate_custom_action(
         return Ok(());
     };
     let (target_position, target_owner) = attackable_snapshot(world, target_id)?;
-    match action.special_effect {
-        Some(CustomActionSpecialEffect::Fortify) => {
+    let handler = special_effect_handler(world, &action)?;
+    match handler.as_deref() {
+        Some("fortify") => {
             if target_owner.is_some() && target_owner != Some(player_id) {
                 return Err(RejectionReason::NotFriendly);
+            }
+        }
+        Some("drain") => {
+            if target_owner == Some(player_id) {
+                return Err(RejectionReason::FriendlyTarget);
+            }
+            let resource = action.damage_type.as_deref().unwrap_or(ENERGY_RESOURCE);
+            let available = target_resource_amount(world, target_id, resource)?.1;
+            let space = target_resource_space(world, object_id, resource)?.1;
+            if available == 0 {
+                return Err(RejectionReason::InsufficientResource {
+                    resource: resource.to_string(),
+                    required: 1,
+                    available,
+                });
+            }
+            if space == 0 {
+                return Err(RejectionReason::TargetFull);
+            }
+        }
+        Some("fabricate") | Some("convert_to_structure") => {
+            if target_owner == Some(player_id) {
+                return Err(RejectionReason::FriendlyTarget);
+            }
+            let target = entity(target_id)?;
+            if world.entity(target).get::<Drone>().is_none() {
+                return Err(RejectionReason::NotMovable);
             }
         }
         _ => {
@@ -2051,8 +2077,8 @@ fn apply_custom_action(
     deduct_player_resource_cost(world, player_id, &cost, false);
     remember_custom_action_cooldown(world, object_id, action_type, tick, &action);
 
-    match action.special_effect {
-        Some(CustomActionSpecialEffect::HealSelf) => {
+    match special_effect_handler(world, &action)?.as_deref() {
+        Some("heal_self") => {
             let Some(target_id) = target_id else {
                 return Ok(());
             };
@@ -2061,33 +2087,17 @@ fn apply_custom_action(
                 .damage_type
                 .as_deref()
                 .unwrap_or(DamageType::Kinetic.as_str());
-            apply_resisted_damage(world, target_id, damage_type, damage)?;
-            let heal = ((damage as f64) * action.special_param.unwrap_or(0.5)).floor() as u32;
-            let entity = entity(object_id)?;
-            if let Some(mut drone) = world.entity_mut(entity).get_mut::<Drone>() {
-                drone.hits = (drone.hits + heal).min(drone.hits_max);
-            }
+            let dealt = apply_resisted_damage_amount(world, target_id, damage_type, damage)?;
+            let heal = ((dealt as f64) * action.special_param.unwrap_or(0.5)).floor() as u32;
+            heal_drone(world, object_id, heal);
         }
-        Some(CustomActionSpecialEffect::ConvertToStructure) => {
+        Some("convert_to_structure") | Some("fabricate") => {
             let Some(target_id) = target_id else {
                 return Ok(());
             };
-            let target = entity(target_id)?;
-            let position = *world
-                .entity(target)
-                .get::<Position>()
-                .ok_or(RejectionReason::ObjectNotFound)?;
-            world.entity_mut(target).despawn();
-            world.spawn((
-                position,
-                structure_defaults(
-                    structure_type.unwrap_or(StructureType::FACTORY),
-                    Some(player_id),
-                    world,
-                ),
-            ));
+            fabricate_target(world, player_id, target_id, structure_type)?;
         }
-        Some(CustomActionSpecialEffect::Fortify) => {
+        Some("fortify") => {
             let target_id = target_id.unwrap_or(object_id);
             let target = entity(target_id)?;
             let mut entity_mut = world.entity_mut(target);
@@ -2099,45 +2109,108 @@ fn apply_custom_action(
                 entity_mut.insert(Attributes(attrs));
             }
         }
-        Some(CustomActionSpecialEffect::Disrupt) => {
+        Some("disrupt") => {
             let Some(target_id) = target_id else {
                 return Ok(());
             };
             apply_disrupt(world, target_id)?;
         }
-        Some(CustomActionSpecialEffect::ScrambleCommands) | None => {}
+        Some("hack") => {
+            let Some(target_id) = target_id else {
+                return Ok(());
+            };
+            apply_hack(world, target_id)?;
+        }
+        Some("drain") => {
+            let Some(target_id) = target_id else {
+                return Ok(());
+            };
+            let resource = action.damage_type.as_deref().unwrap_or(ENERGY_RESOURCE);
+            apply_drain(world, object_id, target_id, resource)?;
+        }
+        Some("overload") => {
+            let Some(target_id) = target_id else {
+                return Ok(());
+            };
+            apply_overload(world, target_id)?;
+        }
+        Some("debilitate") => {
+            let Some(target_id) = target_id else {
+                return Ok(());
+            };
+            let damage_type = action
+                .damage_type
+                .as_deref()
+                .unwrap_or(DamageType::Corrosive.as_str());
+            apply_debilitate(world, target_id, damage_type)?;
+        }
+        Some("leech") => {
+            let Some(target_id) = target_id else {
+                return Ok(());
+            };
+            let damage = action.base_damage.unwrap_or(15);
+            let damage_type = action
+                .damage_type
+                .as_deref()
+                .unwrap_or(DamageType::Corrosive.as_str());
+            let dealt = apply_resisted_damage_amount(world, target_id, damage_type, damage)?;
+            heal_drone(
+                world,
+                object_id,
+                ((dealt as f64) * action.special_param.unwrap_or(0.5)).floor() as u32,
+            );
+        }
+        Some("scramble_commands") | None => {}
+        Some(other) => {
+            return Err(RejectionReason::UnknownAction {
+                action: other.to_string(),
+            });
+        }
     }
     Ok(())
 }
 
-fn validate_special_action_requirements(drone: &Drone, action: &CustomActionDef) -> CommandResult {
-    match action.special_effect {
-        Some(CustomActionSpecialEffect::Disrupt) => require_body(drone, BodyPart::Attack),
-        Some(CustomActionSpecialEffect::Fortify) => require_body(drone, BodyPart::Tough),
+fn special_effect_handler(
+    world: &World,
+    action: &CustomActionDef,
+) -> Result<Option<String>, RejectionReason> {
+    let Some(effect_name) = action.special_effect.as_deref() else {
+        return Ok(None);
+    };
+    let effect = world
+        .resource::<SpecialEffectRegistry>()
+        .get(effect_name)
+        .ok_or_else(|| RejectionReason::UnknownAction {
+            action: effect_name.to_string(),
+        })?;
+    Ok(Some(effect.handler.clone()))
+}
+
+fn validate_special_action_requirements(
+    world: &World,
+    drone: &Drone,
+    action: &CustomActionDef,
+) -> CommandResult {
+    match special_effect_handler(world, action)?.as_deref() {
+        Some("hack") => require_body(drone, BodyPart::Claim),
+        Some("drain") => {
+            require_body(drone, BodyPart::Carry)?;
+            require_body(drone, BodyPart::Work)
+        }
+        Some("overload") => require_body(drone, BodyPart::RangedAttack),
+        Some("debilitate") => require_body(drone, BodyPart::Work),
+        Some("disrupt") => require_body(drone, BodyPart::Attack),
+        Some("fortify") => require_body(drone, BodyPart::Tough),
         _ => Ok(()),
     }
 }
 
 fn custom_action_cost(action: &CustomActionDef) -> ResourceCost {
-    let mut cost = action.cost.clone();
-    match action.special_effect {
-        Some(CustomActionSpecialEffect::Disrupt) => {
-            cost.insert(ENERGY_RESOURCE.to_string(), DISRUPT_ENERGY_COST);
-        }
-        Some(CustomActionSpecialEffect::Fortify) => {
-            cost.insert(ENERGY_RESOURCE.to_string(), FORTIFY_ENERGY_COST);
-        }
-        _ => {}
-    }
-    cost
+    action.cost.clone()
 }
 
 fn custom_action_cooldown(action: &CustomActionDef) -> Option<u32> {
-    match action.special_effect {
-        Some(CustomActionSpecialEffect::Disrupt) => Some(DISRUPT_COOLDOWN_TICKS),
-        Some(CustomActionSpecialEffect::Fortify) => Some(FORTIFY_COOLDOWN_TICKS),
-        _ => action.cooldown,
-    }
+    action.cooldown
 }
 
 fn custom_action_on_cooldown(
@@ -2230,7 +2303,16 @@ fn sonic_effect_multiplier(world: &World, target: Entity) -> Result<f64, Rejecti
 fn is_negative_status_attr(attr: &str) -> bool {
     matches!(
         attr,
-        "Disrupted" | "Scrambled" | "Drained" | "Overloaded" | "Debilitated" | "Leeching"
+        "Disrupted"
+            | "Scrambled"
+            | "Drained"
+            | "Overloaded"
+            | "Debilitated"
+            | "Leeching"
+            | "Hacking"
+            | "HackSlowed"
+            | "HackRooted"
+            | "HackNeutralized"
     ) || attr.starts_with("Disrupt:")
         || attr.starts_with("Scramble:")
         || attr.starts_with("Drain:")
@@ -2244,6 +2326,200 @@ fn is_interruptible_action_attr(attr: &str) -> bool {
         || attr.starts_with("CurrentAction:")
         || attr.starts_with("Channeling:")
         || attr.starts_with("ContinuousAction:")
+}
+
+fn effect_multiplier(
+    world: &World,
+    target: Entity,
+    damage_type: &str,
+) -> Result<f64, RejectionReason> {
+    let body_registry = world.resource::<BodyPartRegistry>();
+    let damage_registry = world.resource::<DamageTypeRegistry>();
+    let entity_ref = world
+        .get_entity(target)
+        .map_err(|_| RejectionReason::ObjectNotFound)?;
+    let attrs = entity_ref.get::<Attributes>();
+    if let Some(drone) = entity_ref.get::<Drone>() {
+        Ok(crate::systems::combat_system::final_damage_multiplier(
+            Some(&drone.body),
+            attrs,
+            damage_type,
+            body_registry,
+            damage_registry,
+        ))
+    } else if entity_ref.get::<Structure>().is_some() {
+        Ok(crate::systems::combat_system::final_damage_multiplier(
+            None,
+            attrs,
+            damage_type,
+            body_registry,
+            damage_registry,
+        ))
+    } else {
+        Err(RejectionReason::ObjectNotFound)
+    }
+}
+
+fn ensure_attrs(
+    world: &mut World,
+    target_id: ObjectId,
+    mutate: impl FnOnce(&mut Vec<String>),
+) -> CommandResult {
+    let target = entity(target_id)?;
+    let mut entity_mut = world.entity_mut(target);
+    if let Some(mut attrs) = entity_mut.get_mut::<Attributes>() {
+        mutate(&mut attrs.0);
+    } else {
+        let mut attrs = Vec::new();
+        mutate(&mut attrs);
+        entity_mut.insert(Attributes(attrs));
+    }
+    Ok(())
+}
+
+fn push_unique(attrs: &mut Vec<String>, value: impl Into<String>) {
+    let value = value.into();
+    if !attrs.iter().any(|attr| attr == &value) {
+        attrs.push(value);
+    }
+}
+
+fn apply_hack(world: &mut World, target_id: ObjectId) -> CommandResult {
+    let target = entity(target_id)?;
+    if effect_multiplier(world, target, DamageType::Psionic.as_str())? <= 0.0 {
+        return Ok(());
+    }
+    ensure_attrs(world, target_id, |attrs| {
+        attrs.retain(|attr| !attr.starts_with("Hack:"));
+        push_unique(attrs, "Hacking");
+        push_unique(attrs, "HackSlowed");
+        push_unique(attrs, "HackRooted");
+        push_unique(attrs, "HackNeutralized");
+        attrs.push("Hack:slow_ticks=1-2".to_string());
+        attrs.push("Hack:root_ticks=3-4".to_string());
+        attrs.push("Hack:neutral_tick=5".to_string());
+    })?;
+    if let Some(mut drone) = world.entity_mut(target).get_mut::<Drone>() {
+        drone.owner = 0;
+        drone.fatigue = drone.fatigue.max(4);
+    }
+    Ok(())
+}
+
+fn apply_drain(
+    world: &mut World,
+    object_id: ObjectId,
+    target_id: ObjectId,
+    resource: &str,
+) -> CommandResult {
+    let target = entity(target_id)?;
+    if effect_multiplier(world, target, DamageType::EMP.as_str())? <= 0.0 {
+        return Ok(());
+    }
+    let object = entity(object_id)?;
+    let amount = {
+        let target_amount = target_resource_amount(world, target_id, resource)?.1;
+        let self_space = target_resource_space(world, object_id, resource)?.1;
+        let carry_capacity = world
+            .entity(object)
+            .get::<Drone>()
+            .map(|drone| drone.carry_capacity)
+            .unwrap_or_default();
+        target_amount.min(self_space).min(carry_capacity)
+    };
+    if amount == 0 {
+        return Ok(());
+    }
+    take_from_target(world, target, resource, amount)?;
+    if let Some(mut drone) = world.entity_mut(object).get_mut::<Drone>() {
+        *drone.carry.entry(resource.to_string()).or_default() += amount;
+    }
+    ensure_attrs(world, target_id, |attrs| {
+        push_unique(attrs, "Drained");
+        push_unique(attrs, "Draining");
+        attrs.push(format!("Drain:{resource}:{amount}"));
+    })
+}
+
+fn apply_overload(world: &mut World, target_id: ObjectId) -> CommandResult {
+    let target = entity(target_id)?;
+    if effect_multiplier(world, target, DamageType::EMP.as_str())? <= 0.0 {
+        return Ok(());
+    }
+    ensure_attrs(world, target_id, |attrs| {
+        push_unique(attrs, "Overloaded");
+        attrs.push(format!(
+            "Overload:fuel-{OVERLOAD_FUEL_DRAIN}:floor-{OVERLOAD_FUEL_FLOOR}"
+        ));
+    })
+}
+
+fn apply_debilitate(world: &mut World, target_id: ObjectId, damage_type: &str) -> CommandResult {
+    let target = entity(target_id)?;
+    if effect_multiplier(world, target, DamageType::Corrosive.as_str())? <= 0.0 {
+        return Ok(());
+    }
+    ensure_attrs(world, target_id, |attrs| {
+        push_unique(attrs, "Debilitated");
+        attrs.retain(|attr| !attr.starts_with("Debilitate:"));
+        attrs.push(format!(
+            "Debilitate:{damage_type}:resistance_x2:duration=50"
+        ));
+    })
+}
+
+fn fabricate_target(
+    world: &mut World,
+    player_id: PlayerId,
+    target_id: ObjectId,
+    structure_type: Option<StructureType>,
+) -> CommandResult {
+    let target = entity(target_id)?;
+    let position = *world
+        .entity(target)
+        .get::<Position>()
+        .ok_or(RejectionReason::ObjectNotFound)?;
+    if world.entity(target).get::<Drone>().is_none() {
+        return Err(RejectionReason::NotMovable);
+    }
+    world.entity_mut(target).despawn();
+    world.spawn((
+        position,
+        structure_defaults(
+            structure_type.unwrap_or(StructureType::FACTORY),
+            Some(player_id),
+            world,
+        ),
+    ));
+    Ok(())
+}
+
+fn apply_resisted_damage_amount(
+    world: &mut World,
+    target_id: ObjectId,
+    damage_type: &str,
+    damage: u32,
+) -> Result<u32, RejectionReason> {
+    let target = entity(target_id)?;
+    let multiplier = effect_multiplier(world, target, damage_type)?;
+    let damage = ((damage as f64) * multiplier).floor() as u32;
+    if let Some(mut target_drone) = world.entity_mut(target).get_mut::<Drone>() {
+        target_drone.hits = target_drone.hits.saturating_sub(damage);
+    } else if let Some(mut structure) = world.entity_mut(target).get_mut::<Structure>() {
+        structure.hits = structure.hits.saturating_sub(damage);
+    }
+    Ok(damage)
+}
+
+fn heal_drone(world: &mut World, object_id: ObjectId, amount: u32) {
+    if amount == 0 {
+        return;
+    }
+    if let Ok(object) = entity(object_id) {
+        if let Some(mut drone) = world.entity_mut(object).get_mut::<Drone>() {
+            drone.hits = (drone.hits + amount).min(drone.hits_max);
+        }
+    }
 }
 
 fn apply_transfer_to_global(

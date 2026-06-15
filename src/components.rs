@@ -730,13 +730,49 @@ impl StructureTypeRegistry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CustomActionSpecialEffect {
-    HealSelf,
-    ScrambleCommands,
-    ConvertToStructure,
-    Disrupt,
-    Fortify,
+#[serde(default)]
+pub struct SpecialEffectDef {
+    pub name: String,
+    pub description: String,
+    pub handler: String,
+    pub target: String,
+    pub duration: u32,
+    pub resistance: Option<String>,
+}
+
+impl Default for SpecialEffectDef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            handler: String::new(),
+            target: String::new(),
+            duration: 0,
+            resistance: None,
+        }
+    }
+}
+
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecialEffectRegistry {
+    pub effects: IndexMap<String, SpecialEffectDef>,
+}
+
+impl SpecialEffectRegistry {
+    pub fn from_defs(defs: Vec<SpecialEffectDef>) -> Self {
+        let mut effects = IndexMap::new();
+        for mut def in defs {
+            if def.handler.is_empty() {
+                def.handler = def.name.clone();
+            }
+            effects.insert(def.name.clone(), def);
+        }
+        Self { effects }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&SpecialEffectDef> {
+        self.effects.get(name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -747,7 +783,7 @@ pub struct CustomActionDef {
     pub damage_type: Option<String>,
     pub base_damage: Option<u32>,
     pub range: u32,
-    pub special_effect: Option<CustomActionSpecialEffect>,
+    pub special_effect: Option<String>,
     pub special_param: Option<f64>,
     pub cooldown: Option<u32>,
     pub cost: IndexMap<String, u32>,

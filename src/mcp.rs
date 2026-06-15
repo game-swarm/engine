@@ -1479,9 +1479,7 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_validate_module"
         | "swarm_rollback"
         | "swarm_tournament_precommit"
-        | "swarm_tournament_create" => {
-            Some(CommandSource::McpDeploy)
-        }
+        | "swarm_tournament_create" => Some(CommandSource::McpDeploy),
         "swarm_get_snapshot"
         | "swarm_get_terrain"
         | "swarm_get_objects_in_range"
@@ -1597,20 +1595,76 @@ pub fn swarm_get_schema() -> Value {
 
 fn command_action_schemas() -> Vec<Value> {
     vec![
-        command_action_schema("Move", &["object_id", "direction"], json!({"object_id": object_id_schema(), "direction": direction_schema()})),
-        command_action_schema("Harvest", &["object_id", "target_id"], json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}})),
-        command_action_schema("Transfer", &["object_id", "target_id", "resource", "amount"], json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema()})),
-        command_action_schema("Withdraw", &["object_id", "target_id", "resource", "amount"], json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema()})),
-        command_action_schema("Attack", &["object_id", "target_id"], json!({"object_id": object_id_schema(), "target_id": object_id_schema()})),
-        command_action_schema("RangedAttack", &["object_id", "target_id", "range"], json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "range": {"type": "integer", "minimum": 1, "maximum": 50}})),
-        command_action_schema("Heal", &["object_id", "target_id"], json!({"object_id": object_id_schema(), "target_id": object_id_schema()})),
-        command_action_schema("ClaimController", &["object_id", "controller_id"], json!({"object_id": object_id_schema(), "controller_id": object_id_schema()})),
-        command_action_schema("Spawn", &["spawn_id", "body"], json!({"spawn_id": object_id_schema(), "body": {"type": "array", "items": body_part_schema(), "minItems": 1, "maxItems": crate::command::MAX_BODY_PARTS}})),
-        command_action_schema("Build", &["object_id", "x", "y", "structure"], json!({"object_id": object_id_schema(), "x": coord_schema(), "y": coord_schema(), "structure": structure_type_schema()})),
-        command_action_schema("TransferToGlobal", &["resource", "amount"], json!({"resource": {"type": "string"}, "amount": amount_schema()})),
-        command_action_schema("TransferFromGlobal", &["resource", "amount"], json!({"resource": {"type": "string"}, "amount": amount_schema()})),
-        command_action_schema("CreateMarketOrder", &["resource", "amount", "price_resource", "price_amount"], json!({"resource": {"type": "string"}, "amount": amount_schema(), "price_resource": {"type": "string"}, "price_amount": amount_schema()})),
-        command_action_schema("BuyMarketOrder", &["order_id"], json!({"order_id": {"type": "integer", "minimum": 0}})),
+        command_action_schema(
+            "Move",
+            &["object_id", "direction"],
+            json!({"object_id": object_id_schema(), "direction": direction_schema()}),
+        ),
+        command_action_schema(
+            "Harvest",
+            &["object_id", "target_id"],
+            json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}}),
+        ),
+        command_action_schema(
+            "Transfer",
+            &["object_id", "target_id", "resource", "amount"],
+            json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema()}),
+        ),
+        command_action_schema(
+            "Withdraw",
+            &["object_id", "target_id", "resource", "amount"],
+            json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema()}),
+        ),
+        command_action_schema(
+            "Attack",
+            &["object_id", "target_id"],
+            json!({"object_id": object_id_schema(), "target_id": object_id_schema()}),
+        ),
+        command_action_schema(
+            "RangedAttack",
+            &["object_id", "target_id", "range"],
+            json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "range": {"type": "integer", "minimum": 1, "maximum": 50}}),
+        ),
+        command_action_schema(
+            "Heal",
+            &["object_id", "target_id"],
+            json!({"object_id": object_id_schema(), "target_id": object_id_schema()}),
+        ),
+        command_action_schema(
+            "ClaimController",
+            &["object_id", "controller_id"],
+            json!({"object_id": object_id_schema(), "controller_id": object_id_schema()}),
+        ),
+        command_action_schema(
+            "Spawn",
+            &["spawn_id", "body"],
+            json!({"spawn_id": object_id_schema(), "body": {"type": "array", "items": body_part_schema(), "minItems": 1, "maxItems": crate::command::MAX_BODY_PARTS}}),
+        ),
+        command_action_schema(
+            "Build",
+            &["object_id", "x", "y", "structure"],
+            json!({"object_id": object_id_schema(), "x": coord_schema(), "y": coord_schema(), "structure": structure_type_schema()}),
+        ),
+        command_action_schema(
+            "TransferToGlobal",
+            &["resource", "amount"],
+            json!({"resource": {"type": "string"}, "amount": amount_schema()}),
+        ),
+        command_action_schema(
+            "TransferFromGlobal",
+            &["resource", "amount"],
+            json!({"resource": {"type": "string"}, "amount": amount_schema()}),
+        ),
+        command_action_schema(
+            "CreateMarketOrder",
+            &["resource", "amount", "price_resource", "price_amount"],
+            json!({"resource": {"type": "string"}, "amount": amount_schema(), "price_resource": {"type": "string"}, "price_amount": amount_schema()}),
+        ),
+        command_action_schema(
+            "BuyMarketOrder",
+            &["order_id"],
+            json!({"order_id": {"type": "integer", "minimum": 0}}),
+        ),
         json!({"type": "object", "additionalProperties": false, "required": ["type", "object_id"], "properties": {"type": {"type": "string", "not": {"enum": wasm_action_names()}}, "object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema(), "structure": structure_type_schema()}}),
     ]
 }
@@ -1626,12 +1680,24 @@ fn command_action_schema(action_type: &str, required: &[&str], properties: Value
     json!({"type": "object", "additionalProperties": false, "required": required_fields, "properties": map})
 }
 
-fn object_id_schema() -> Value { json!({"type": "integer", "minimum": 0}) }
-fn amount_schema() -> Value { json!({"type": "integer", "minimum": 1, "maximum": 4294967295_u64}) }
-fn coord_schema() -> Value { json!({"type": "integer"}) }
-fn direction_schema() -> Value { json!({"type": "string", "enum": ["Top", "TopRight", "BottomRight", "Bottom", "BottomLeft", "TopLeft"]}) }
-fn body_part_schema() -> Value { json!({"type": "string", "enum": ["Move", "Work", "Carry", "Attack", "RangedAttack", "Heal", "Claim", "Tough"]}) }
-fn structure_type_schema() -> Value { json!({"type": "string", "enum": ["Spawn", "Extension", "Tower", "Road", "Wall", "Rampart", "Storage", "Container", "Controller"]}) }
+fn object_id_schema() -> Value {
+    json!({"type": "integer", "minimum": 0})
+}
+fn amount_schema() -> Value {
+    json!({"type": "integer", "minimum": 1, "maximum": 4294967295_u64})
+}
+fn coord_schema() -> Value {
+    json!({"type": "integer"})
+}
+fn direction_schema() -> Value {
+    json!({"type": "string", "enum": ["Top", "TopRight", "BottomRight", "Bottom", "BottomLeft", "TopLeft"]})
+}
+fn body_part_schema() -> Value {
+    json!({"type": "string", "enum": ["Move", "Work", "Carry", "Attack", "RangedAttack", "Heal", "Claim", "Tough"]})
+}
+fn structure_type_schema() -> Value {
+    json!({"type": "string", "enum": ["Spawn", "Extension", "Tower", "Road", "Wall", "Rampart", "Storage", "Container", "Controller"]})
+}
 
 pub fn swarm_explain_last_tick(world: &mut SwarmWorld, context: McpContext) -> TickExplanation {
     swarm_explain_last_tick_from_traces(world, context, &[])
@@ -1644,10 +1710,9 @@ fn swarm_explain_last_tick_from_traces(
 ) -> TickExplanation {
     let last_tick = context.tick.saturating_sub(1);
     let snapshot = swarm_get_snapshot(world, context.clone());
-    let trace = traces
-        .iter()
-        .rev()
-        .find(|trace| trace.tick == last_tick && (trace.player_id == context.player_id || trace.player_id == 0));
+    let trace = traces.iter().rev().find(|trace| {
+        trace.tick == last_tick && (trace.player_id == context.player_id || trace.player_id == 0)
+    });
     let accepted = trace
         .map(|trace| {
             trace
@@ -1676,7 +1741,11 @@ fn swarm_explain_last_tick_from_traces(
         vec![format!(
             "Loaded tick trace from {} for {}",
             String::from_utf8_lossy(&tick_key(trace.tick, "commands")),
-            if trace.player_id == 0 { "multi-player tick" } else { "player tick" }
+            if trace.player_id == 0 {
+                "multi-player tick"
+            } else {
+                "player tick"
+            }
         )]
     } else {
         vec![
@@ -1687,7 +1756,9 @@ fn swarm_explain_last_tick_from_traces(
     TickExplanation {
         tick: last_tick,
         player_id: context.player_id,
-        state_checksum: trace.map(|trace| trace.state_checksum).unwrap_or_else(|| world.state_checksum()),
+        state_checksum: trace
+            .map(|trace| trace.state_checksum)
+            .unwrap_or_else(|| world.state_checksum()),
         visible_entity_count: snapshot.entities.len(),
         visible_tile_count: snapshot.visible_tiles.len(),
         accepted_commands: accepted.len(),
@@ -1725,15 +1796,15 @@ pub fn swarm_get_objects_in_range(
         room: RoomId(params.room_id),
     };
     if world.get_terrain(origin.room, origin.x, origin.y).is_none() {
-        return Err(McpError::invalid_params("coordinates are outside a known room"));
+        return Err(McpError::invalid_params(
+            "coordinates are outside a known room",
+        ));
     }
     let visible_positions = visible_positions(world.app.world_mut(), context.player_id);
     let visible_ids = visible_entity_ids(world.app.world_mut(), context.player_id, context.tick);
     let mut entities = visible_entities(world.app.world_mut(), &visible_positions, &visible_ids)
         .into_iter()
-        .filter(|entity| {
-            mcp_hex_distance(origin, visible_entity_position(entity)) <= params.range
-        })
+        .filter(|entity| mcp_hex_distance(origin, visible_entity_position(entity)) <= params.range)
         .collect::<Vec<_>>();
     entities.sort_by_key(entity_sort_key);
     Ok(ObjectsInRangeResult {
@@ -1749,7 +1820,17 @@ pub fn swarm_inspect_entity(
     params: InspectEntityParams,
 ) -> Result<FullEntityState, McpError> {
     let entity = Entity::from_bits(params.object_id);
-    let (position, owner, drone, structure, source, resource, terrain, controller, marked_for_death) = {
+    let (
+        position,
+        owner,
+        drone,
+        structure,
+        source,
+        resource,
+        terrain,
+        controller,
+        marked_for_death,
+    ) = {
         let entity_ref = world
             .app
             .world()
@@ -1767,13 +1848,22 @@ pub fn swarm_inspect_entity(
             entity_ref.contains::<MarkedForDeath>(),
         )
     };
-    let visible = position.is_some_and(|position| is_visible_to(world.app.world_mut(), context.player_id, position));
+    let visible = position
+        .is_some_and(|position| is_visible_to(world.app.world_mut(), context.player_id, position));
     let owned = owner.is_some_and(|owner| owner.0 == context.player_id)
-        || drone.as_ref().is_some_and(|drone| drone.owner == context.player_id)
-        || structure.as_ref().is_some_and(|structure| structure.owner == Some(context.player_id))
-        || controller.as_ref().is_some_and(|controller| controller.owner == Some(context.player_id));
+        || drone
+            .as_ref()
+            .is_some_and(|drone| drone.owner == context.player_id)
+        || structure
+            .as_ref()
+            .is_some_and(|structure| structure.owner == Some(context.player_id))
+        || controller
+            .as_ref()
+            .is_some_and(|controller| controller.owner == Some(context.player_id));
     if !visible && !owned {
-        return Err(McpError::invalid_params("entity is not visible or does not exist"));
+        return Err(McpError::invalid_params(
+            "entity is not visible or does not exist",
+        ));
     }
     Ok(FullEntityState {
         id: params.object_id,
@@ -1813,8 +1903,11 @@ pub fn swarm_validate_module(params: ValidateModuleParams) -> ValidateModuleResu
     if wasm_bytes.len() > 8 {
         validate_wasm_sections(&wasm_bytes, &mut issues);
     }
-    let wasm_hash = (!wasm_bytes.is_empty()).then(|| blake3::hash(&wasm_bytes).to_hex().to_string());
-    let estimated_fuel = u64::try_from(wasm_bytes.len()).unwrap_or(u64::MAX).saturating_mul(10);
+    let wasm_hash =
+        (!wasm_bytes.is_empty()).then(|| blake3::hash(&wasm_bytes).to_hex().to_string());
+    let estimated_fuel = u64::try_from(wasm_bytes.len())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(10);
     ValidateModuleResult {
         valid: issues.is_empty(),
         wasm_hash,
@@ -1825,7 +1918,9 @@ pub fn swarm_validate_module(params: ValidateModuleParams) -> ValidateModuleResu
 }
 
 fn validate_wasm_sections(bytes: &[u8], issues: &mut Vec<String>) {
-    if bytes.len() < 8 { return; }
+    if bytes.len() < 8 {
+        return;
+    }
     let mut offset = 8;
     let mut last_known_section = 0_u8;
     while offset < bytes.len() {
@@ -1864,7 +1959,9 @@ fn read_uleb_u32(bytes: &[u8], offset: &mut usize) -> Option<u32> {
         let byte = *bytes.get(*offset)?;
         *offset += 1;
         result |= u32::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 { return Some(result); }
+        if byte & 0x80 == 0 {
+            return Some(result);
+        }
         shift += 7;
     }
     None
@@ -2541,15 +2638,23 @@ fn visible_entity_position(entity: &VisibleEntity) -> Position {
         VisibleEntity::Resource(entity) => &entity.position,
         VisibleEntity::Controller(entity) => &entity.position,
     };
-    Position { x: position.x, y: position.y, room: RoomId(position.room_id) }
+    Position {
+        x: position.x,
+        y: position.y,
+        room: RoomId(position.room_id),
+    }
 }
 
 fn mcp_hex_distance(from: Position, to: Position) -> u32 {
-    if from.room != to.room { return u32::MAX; }
+    if from.room != to.room {
+        return u32::MAX;
+    }
     let dx = from.x - to.x;
     let dy = from.y - to.y;
     let dz = -dx - dy;
-    dx.unsigned_abs().max(dy.unsigned_abs()).max(dz.unsigned_abs())
+    dx.unsigned_abs()
+        .max(dy.unsigned_abs())
+        .max(dz.unsigned_abs())
 }
 
 fn entity_sort_key(entity: &VisibleEntity) -> (u8, ObjectId) {

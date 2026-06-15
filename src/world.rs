@@ -43,6 +43,9 @@ pub struct WorldConfig {
     pub damage_types: Vec<crate::components::DamageTypeDef>,
     pub body_part_types: Vec<crate::components::BodyPartTypeDef>,
     pub structure_types: Vec<crate::components::StructureTypeDef>,
+    #[serde(default = "default_special_effects")]
+    pub special_effects: Vec<crate::components::SpecialEffectDef>,
+    #[serde(default = "default_custom_actions")]
     pub custom_actions: Vec<crate::components::CustomActionDef>,
 }
 
@@ -159,10 +162,220 @@ impl Default for WorldConfig {
             damage_types: Vec::new(),
             body_part_types: Vec::new(),
             structure_types: Vec::new(),
-            custom_actions: Vec::new(),
+            special_effects: default_special_effects(),
+            custom_actions: default_custom_actions(),
         }
     }
 }
+
+fn special_effect_def(
+    name: &str,
+    description: &str,
+    handler: &str,
+    target: &str,
+    duration: u32,
+    resistance: Option<&str>,
+) -> crate::components::SpecialEffectDef {
+    crate::components::SpecialEffectDef {
+        name: name.to_string(),
+        description: description.to_string(),
+        handler: handler.to_string(),
+        target: target.to_string(),
+        duration,
+        resistance: resistance.map(str::to_string),
+    }
+}
+
+fn default_special_effects() -> Vec<crate::components::SpecialEffectDef> {
+    vec![
+        special_effect_def(
+            "hack",
+            "Take control of a target drone after a control lock",
+            "hack",
+            "enemy_drone",
+            5,
+            Some("Psionic"),
+        ),
+        special_effect_def(
+            "drain",
+            "Steal resources from a target structure or storage",
+            "drain",
+            "enemy_structure",
+            0,
+            Some("EMP"),
+        ),
+        special_effect_def(
+            "overload",
+            "Reduce the target player's fuel budget",
+            "overload",
+            "enemy_player",
+            0,
+            Some("EMP"),
+        ),
+        special_effect_def(
+            "debilitate",
+            "Apply vulnerability to a target damage type",
+            "debilitate",
+            "enemy_any",
+            50,
+            Some("Corrosive"),
+        ),
+        special_effect_def(
+            "disrupt",
+            "Interrupt a target's ongoing special action",
+            "disrupt",
+            "enemy_drone",
+            0,
+            Some("Sonic"),
+        ),
+        special_effect_def(
+            "fortify",
+            "Shield and cleanse self or an ally",
+            "fortify",
+            "self_or_ally",
+            100,
+            None,
+        ),
+        special_effect_def(
+            "leech",
+            "Heal the attacker for a portion of dealt damage",
+            "leech",
+            "enemy_any",
+            0,
+            Some("Corrosive"),
+        ),
+        special_effect_def(
+            "fabricate",
+            "Convert an enemy drone into an owned structure",
+            "fabricate",
+            "enemy_drone",
+            0,
+            Some("Psionic"),
+        ),
+        special_effect_def(
+            "heal_self",
+            "Heal the attacker for a configured portion of damage",
+            "heal_self",
+            "enemy_any",
+            0,
+            None,
+        ),
+        special_effect_def(
+            "scramble_commands",
+            "Randomize the target's next command order",
+            "scramble_commands",
+            "enemy_drone",
+            0,
+            None,
+        ),
+        special_effect_def(
+            "convert_to_structure",
+            "Convert a target drone into an owned structure",
+            "convert_to_structure",
+            "enemy_drone",
+            0,
+            Some("Psionic"),
+        ),
+    ]
+}
+
+fn custom_action_def(
+    name: &str,
+    description: &str,
+    special_effect: &str,
+    cooldown: Option<u32>,
+    cost: &[(&str, u32)],
+) -> crate::components::CustomActionDef {
+    let mut action = crate::components::CustomActionDef {
+        name: name.to_string(),
+        description: description.to_string(),
+        special_effect: Some(special_effect.to_string()),
+        cooldown,
+        ..Default::default()
+    };
+    for (resource, amount) in cost {
+        action.cost.insert((*resource).to_string(), *amount);
+    }
+    action
+}
+
+fn default_custom_actions() -> Vec<crate::components::CustomActionDef> {
+    let mut debilitate = custom_action_def(
+        "Debilitate",
+        "Apply vulnerability to a target damage type for 50 ticks",
+        "debilitate",
+        Some(150),
+        &[("Energy", 200)],
+    );
+    debilitate.damage_type = Some("Corrosive".to_string());
+    debilitate.special_param = Some(2.0);
+
+    let mut fortify = custom_action_def(
+        "Fortify",
+        "Shield and cleanse self or an ally",
+        "fortify",
+        Some(300),
+        &[("Energy", 400)],
+    );
+    fortify.special_param = Some(0.5);
+
+    let mut leech = custom_action_def(
+        "Leech",
+        "Corrosive attack that heals the attacker for 50% of dealt damage",
+        "leech",
+        None,
+        &[("Energy", 300)],
+    );
+    leech.damage_type = Some("Corrosive".to_string());
+    leech.base_damage = Some(15);
+    leech.range = 1;
+    leech.special_param = Some(0.5);
+
+    let mut fabricate = custom_action_def(
+        "Fabricate",
+        "Convert an enemy drone into an owned structure",
+        "fabricate",
+        Some(500),
+        &[("Energy", 2000), ("Mineral", 500)],
+    );
+    fabricate.range = 1;
+
+    vec![
+        custom_action_def(
+            "Hack",
+            "Take control of a drone after a control lock",
+            "hack",
+            Some(200),
+            &[("Energy", 1000)],
+        ),
+        custom_action_def(
+            "Drain",
+            "Steal resources from a target structure",
+            "drain",
+            Some(50),
+            &[("Energy", 200)],
+        ),
+        custom_action_def(
+            "Overload",
+            "Reduce the target player's fuel budget",
+            "overload",
+            Some(200),
+            &[("Energy", 300)],
+        ),
+        debilitate,
+        custom_action_def(
+            "Disrupt",
+            "Interrupt a target's ongoing special action",
+            "disrupt",
+            Some(50),
+            &[("Energy", 100)],
+        ),
+        fortify,
+        leech,
+        fabricate,
+    ]
+}
+
 impl Default for WorldSectionConfig {
     fn default() -> Self {
         Self {
@@ -305,6 +518,9 @@ impl WorldConfig {
         app.insert_resource(BodyPartRegistry::from_defs(self.body_part_types.clone()));
         app.insert_resource(StructureTypeRegistry::from_defs(
             self.structure_types.clone(),
+        ));
+        app.insert_resource(SpecialEffectRegistry::from_defs(
+            self.special_effects.clone(),
         ));
         app.insert_resource(CustomActionRegistry::from_defs(self.custom_actions.clone()));
     }
@@ -1038,6 +1254,24 @@ mod shard_tests {
         assert_eq!(config.visibility.spectate_delay, 0);
         assert_eq!(config.visibility.replay_privacy, ReplayPrivacy::Private);
         assert!(!config.propagation_system_enabled());
+        assert_eq!(config.special_effects.len(), 11);
+        assert_eq!(config.custom_actions.len(), 8);
+        assert_eq!(
+            config
+                .special_effects
+                .iter()
+                .find(|effect| effect.name == "hack")
+                .map(|effect| effect.handler.as_str()),
+            Some("hack")
+        );
+        assert_eq!(
+            config
+                .custom_actions
+                .iter()
+                .find(|action| action.name == "Disrupt")
+                .and_then(|action| action.special_effect.as_deref()),
+            Some("disrupt")
+        );
     }
 
     #[test]
@@ -1096,6 +1330,39 @@ damage_multiplier = 1.5
     }
 
     #[test]
+    fn world_config_parses_special_effect_registry() {
+        let config = WorldConfig::from_toml_str(
+            r#"
+[[special_effects]]
+name = "disable_shields"
+description = "Alias fortify handler for parser coverage"
+handler = "fortify"
+target = "self_or_ally"
+duration = 10
+resistance = "EMP"
+
+[[custom_actions]]
+name = "ShieldPulse"
+description = "Custom action referencing a configured effect"
+range = 2
+special_effect = "disable_shields"
+cooldown = 12
+cost = { Energy = 33 }
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.special_effects.len(), 1);
+        assert_eq!(config.special_effects[0].handler, "fortify");
+        assert_eq!(config.special_effects[0].resistance.as_deref(), Some("EMP"));
+        assert_eq!(config.custom_actions.len(), 1);
+        assert_eq!(
+            config.custom_actions[0].special_effect.as_deref(),
+            Some("disable_shields")
+        );
+    }
+
+    #[test]
     fn create_world_with_config_installs_resources() {
         let config = WorldConfig::from_toml_str(
             "[combat]\ndamage_multiplier = 0.5\n[world]\ntick_interval_ms = 2500\n",
@@ -1126,6 +1393,22 @@ damage_multiplier = 1.5
                 .code
                 .update_cooldown,
             5
+        );
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<SpecialEffectRegistry>()
+                .get("hack")
+                .is_some()
+        );
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<CustomActionRegistry>()
+                .get("Hack")
+                .is_some()
         );
     }
 

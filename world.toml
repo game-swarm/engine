@@ -30,3 +30,172 @@ drone_decay_rate = 10000
 pvp_enabled = true
 friendly_fire = false
 damage_multiplier = 1.0
+
+[[special_effects]]
+name = "hack"
+description = "Claim-based drone takeover: slow/root/neutralize over five ticks."
+handler = "hack"
+target = "enemy_drone"
+duration = 5
+resistance = "Psionic"
+required_body_parts = ["Claim"]
+
+[[special_effects]]
+name = "drain"
+description = "Carry+Work resource drain from enemy storage or drones."
+handler = "drain"
+target = "enemy_storage"
+duration = 0
+resistance = "EMP"
+required_body_parts = ["Carry", "Work"]
+
+[[special_effects]]
+name = "overload"
+description = "RangedAttack quota overload: target fuel -500k, floor 20%."
+handler = "overload"
+target = "enemy_any"
+duration = 0
+resistance = "EMP"
+required_body_parts = ["RangedAttack"]
+
+[[special_effects]]
+name = "debilitate"
+description = "Work corrosive debuff: selected damage type resistance x2 for 50 ticks."
+handler = "debilitate"
+target = "enemy_any"
+duration = 50
+resistance = "Corrosive"
+required_body_parts = ["Work"]
+
+[[special_effects]]
+name = "disrupt"
+description = "Interrupt target current continuous action without HP damage."
+handler = "disrupt"
+target = "enemy_drone"
+duration = 0
+resistance = "Sonic"
+required_body_parts = ["Attack"]
+
+[[special_effects]]
+name = "fortify"
+description = "Shield and cleanse self or an ally."
+handler = "fortify"
+target = "self_or_ally"
+duration = 100
+required_body_parts = ["Tough"]
+
+[[special_effects]]
+name = "leech"
+description = "Corrosive life steal attack: 15 damage, heal self for 50% dealt."
+handler = "leech"
+target = "enemy_any"
+duration = 0
+resistance = "Corrosive"
+required_body_parts = []
+
+[[special_effects]]
+name = "fabricate"
+description = "Convert enemy drone into an owned structure."
+handler = "fabricate"
+target = "enemy_drone"
+duration = 0
+resistance = "Psionic"
+required_body_parts = []
+
+[[special_effects]]
+name = "heal_self"
+description = "Heal the attacker for a configured portion of dealt damage."
+handler = "heal_self"
+target = "enemy_any"
+duration = 0
+required_body_parts = []
+
+[[special_effects]]
+name = "scramble_commands"
+description = "Randomize the target's next command order."
+handler = "scramble_commands"
+target = "enemy_drone"
+duration = 0
+required_body_parts = []
+
+[[special_effects]]
+name = "convert_to_structure"
+description = "Convert target drone into an owned structure."
+handler = "convert_to_structure"
+target = "enemy_drone"
+duration = 0
+resistance = "Psionic"
+required_body_parts = []
+
+[[custom_actions]]
+name = "Hack"
+description = "Claim-based drone takeover: slow/root/neutralize over five ticks."
+damage_type = "Psionic"
+range = 1
+special_effect = "hack"
+cooldown = 200
+cost = { Energy = 1000 }
+
+[[custom_actions]]
+name = "Drain"
+description = "Carry+Work resource drain from enemy storage or drones."
+damage_type = "Energy"
+range = 1
+special_effect = "drain"
+cooldown = 50
+cost = { Energy = 200 }
+
+[[custom_actions]]
+name = "Overload"
+description = "RangedAttack quota overload: target fuel -500k, floor 20%."
+damage_type = "EMP"
+range = 3
+special_effect = "overload"
+cooldown = 200
+cost = { Energy = 300 }
+
+[[custom_actions]]
+name = "Debilitate"
+description = "Work corrosive debuff: selected damage type resistance x2 for 50 ticks."
+damage_type = "Corrosive"
+range = 1
+special_effect = "debilitate"
+special_param = 2.0
+cooldown = 150
+cost = { Energy = 200 }
+
+[[custom_actions]]
+name = "Disrupt"
+description = "Interrupt target current continuous action without HP damage."
+damage_type = "Sonic"
+range = 1
+special_effect = "disrupt"
+cooldown = 50
+cost = { Energy = 100 }
+
+[[custom_actions]]
+name = "Fortify"
+description = "Shield and cleanse self or an ally."
+range = 1
+special_effect = "fortify"
+special_param = 0.5
+cooldown = 300
+cost = { Energy = 400 }
+
+[[custom_actions]]
+name = "Leech"
+description = "Corrosive life steal attack: 15 damage, heal self for 50% dealt."
+damage_type = "Corrosive"
+base_damage = 15
+range = 1
+special_effect = "leech"
+special_param = 0.5
+cost = { Energy = 300 }
+
+[[custom_actions]]
+name = "Fabricate"
+description = "Convert enemy drone into an owned structure."
+range = 1
+special_effect = "fabricate"
+cooldown = 500
+cost = { Energy = 2000, Mineral = 500 }
