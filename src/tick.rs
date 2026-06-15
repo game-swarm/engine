@@ -3,6 +3,7 @@ use std::{collections::HashMap, thread, time::Instant};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::clickhouse::ClickHouseWriter;
 use crate::command::{
     CommandIntent, CommandRejection, CommandSource, RawCommand, RefundAccumulator, Tick,
     apply_command, source_gate, validate_command,
@@ -211,17 +212,12 @@ pub trait TickMetricsWriter {
     ) -> Result<(), TickMetricsWriteError>;
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct InMemoryClickHouseTickMetricsWriter {
-    pub rows: Vec<ClickHouseTickMetricsRow>,
-}
-
-impl TickMetricsWriter for InMemoryClickHouseTickMetricsWriter {
+impl TickMetricsWriter for ClickHouseWriter {
     fn write_tick_metrics(
         &mut self,
         row: ClickHouseTickMetricsRow,
     ) -> Result<(), TickMetricsWriteError> {
-        self.rows.push(row);
+        self.enqueue(row);
         Ok(())
     }
 }
@@ -1469,8 +1465,8 @@ mod tests {
     }
 
     #[test]
-    fn clickhouse_tick_metrics_memory_writer_stores_rows_and_renders_insert_values() {
-        let mut writer = InMemoryClickHouseTickMetricsWriter::default();
+    fn clickhouse_tick_metrics_writer_renders_insert_values_and_drops_when_full() {
+        let mut writer = ClickHouseWriter::with_queue_capacity("http://127.0.0.1:9", 0);
         let row = ClickHouseTickMetricsRow {
             tick: 2,
             player_id: 3,
@@ -1487,12 +1483,11 @@ mod tests {
 
         writer.write_tick_metrics(row.clone()).unwrap();
 
-        assert_eq!(writer.rows, vec![row.clone()]);
         assert!(CLICKHOUSE_TICK_METRICS_INSERT.contains("refund_abuse_rate"));
         assert!(CLICKHOUSE_TICK_METRICS_INSERT.contains("command_rejection_rate"));
         assert!(CLICKHOUSE_TICK_METRICS_INSERT.contains("tick_duration_p99"));
         assert_eq!(
-            row.insert_sql_values(),
+            ClickHouseWriter::insert_body(&row),
             "(2, 3, 0.000000, 0.000000, 0.500000, 0.250000, 2801, 3, 1, 2, 10000)"
         );
     }

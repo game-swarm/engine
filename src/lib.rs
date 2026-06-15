@@ -1,4 +1,5 @@
 pub mod arena;
+pub mod clickhouse;
 pub mod command;
 pub mod components;
 pub mod fdb;
@@ -17,6 +18,7 @@ pub mod visibility;
 pub mod world;
 
 pub use arena::*;
+pub use clickhouse::*;
 pub use command::*;
 pub use components::*;
 pub use fdb::*;
@@ -30,6 +32,7 @@ pub use mcp::{
     visible_entities_for_player,
 };
 pub use onboarding::*;
+pub use ranking::*;
 pub use realtime::*;
 pub use resources::*;
 pub use rule_module::*;
