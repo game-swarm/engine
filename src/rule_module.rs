@@ -8,7 +8,10 @@ use bevy::prelude::*;
 use rhai::{Engine, EvalAltResult, Scope};
 use serde_json::Value;
 
-use crate::components::{Drone, Owner, PlayerId, Resource, Structure};
+use crate::components::{
+    Attributes, DamageTypeRegistry, Drone, EntityFlags, Owner, PlayerId, ResistanceRegistry,
+    Resource, Structure,
+};
 
 pub const DEFAULT_RHAI_AST_NODES_PER_TICK: usize = 10_000;
 pub const DEFAULT_RHAI_ACTIONS_PER_TICK: usize = 100;
@@ -34,7 +37,7 @@ impl Default for RhaiExecutionBudget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RuleAction {
     LogInfo(String),
     LogWarn(String),
@@ -51,6 +54,25 @@ pub enum RuleAction {
     EmitEvent {
         event_type: String,
         data: Value,
+    },
+    SetEntityFlag {
+        entity: u64,
+        flag: String,
+        value: bool,
+    },
+    SetAttribute {
+        entity: u64,
+        attribute: String,
+        enabled: bool,
+    },
+    AddDamageType {
+        damage_type: String,
+    },
+    SetResistance {
+        damage_type: String,
+        layer: String,
+        key: String,
+        multiplier: f64,
     },
 }
 
@@ -436,6 +458,90 @@ fn execute_rhai_script(
     engine.register_fn("deduct_resource", rhai_deduct_resource);
     engine.register_fn("award_resource", rhai_award_resource);
     engine.register_fn("emit_event", rhai_emit_event);
+    engine.register_fn("set_entity_flag", rhai_set_entity_flag);
+    engine.register_fn("set_attribute", rhai_set_attribute);
+    engine.register_fn("set_attribute", rhai_set_attribute_enabled);
+    engine.register_fn("add_damage_type", rhai_add_damage_type);
+    engine.register_fn("set_resistance", rhai_set_resistance);
+    {
+        let buffered = Arc::clone(&buffered);
+        engine.register_fn(
+            "set_entity_flag",
+            move |entity: i64, flag: &str, value: bool| {
+                if let Ok(entity) = u64::try_from(entity) {
+                    buffered
+                        .lock()
+                        .expect("rhai action buffer lock should not be poisoned")
+                        .push(RuleAction::SetEntityFlag {
+                            entity,
+                            flag: flag.to_string(),
+                            value,
+                        });
+                }
+            },
+        );
+    }
+    {
+        let buffered = Arc::clone(&buffered);
+        engine.register_fn("set_attribute", move |entity: i64, attribute: &str| {
+            if let Ok(entity) = u64::try_from(entity) {
+                buffered
+                    .lock()
+                    .expect("rhai action buffer lock should not be poisoned")
+                    .push(RuleAction::SetAttribute {
+                        entity,
+                        attribute: attribute.to_string(),
+                        enabled: true,
+                    });
+            }
+        });
+    }
+    {
+        let buffered = Arc::clone(&buffered);
+        engine.register_fn(
+            "set_attribute",
+            move |entity: i64, attribute: &str, enabled: bool| {
+                if let Ok(entity) = u64::try_from(entity) {
+                    buffered
+                        .lock()
+                        .expect("rhai action buffer lock should not be poisoned")
+                        .push(RuleAction::SetAttribute {
+                            entity,
+                            attribute: attribute.to_string(),
+                            enabled,
+                        });
+                }
+            },
+        );
+    }
+    {
+        let buffered = Arc::clone(&buffered);
+        engine.register_fn("add_damage_type", move |damage_type: &str| {
+            buffered
+                .lock()
+                .expect("rhai action buffer lock should not be poisoned")
+                .push(RuleAction::AddDamageType {
+                    damage_type: damage_type.to_string(),
+                });
+        });
+    }
+    {
+        let buffered = Arc::clone(&buffered);
+        engine.register_fn(
+            "set_resistance",
+            move |damage_type: &str, layer: &str, key: &str, multiplier: f64| {
+                buffered
+                    .lock()
+                    .expect("rhai action buffer lock should not be poisoned")
+                    .push(RuleAction::SetResistance {
+                        damage_type: damage_type.to_string(),
+                        layer: layer.to_string(),
+                        key: key.to_string(),
+                        multiplier,
+                    });
+            },
+        );
+    }
 
     let ast = engine.compile(&script)?;
     let mut scope = Scope::new();
@@ -497,6 +603,72 @@ fn rhai_emit_event(actions: &mut RhaiActionBuffer, event_type: &str, data: &str)
         });
 }
 
+fn rhai_set_entity_flag(actions: &mut RhaiActionBuffer, entity: i64, flag: &str, value: bool) {
+    if let Ok(entity) = u64::try_from(entity) {
+        actions
+            .actions
+            .lock()
+            .expect("rhai action buffer lock should not be poisoned")
+            .push(RuleAction::SetEntityFlag {
+                entity,
+                flag: flag.to_string(),
+                value,
+            });
+    }
+}
+
+fn rhai_set_attribute(actions: &mut RhaiActionBuffer, entity: i64, attribute: &str) {
+    rhai_set_attribute_enabled(actions, entity, attribute, true);
+}
+
+fn rhai_set_attribute_enabled(
+    actions: &mut RhaiActionBuffer,
+    entity: i64,
+    attribute: &str,
+    enabled: bool,
+) {
+    if let Ok(entity) = u64::try_from(entity) {
+        actions
+            .actions
+            .lock()
+            .expect("rhai action buffer lock should not be poisoned")
+            .push(RuleAction::SetAttribute {
+                entity,
+                attribute: attribute.to_string(),
+                enabled,
+            });
+    }
+}
+
+fn rhai_add_damage_type(actions: &mut RhaiActionBuffer, damage_type: &str) {
+    actions
+        .actions
+        .lock()
+        .expect("rhai action buffer lock should not be poisoned")
+        .push(RuleAction::AddDamageType {
+            damage_type: damage_type.to_string(),
+        });
+}
+
+fn rhai_set_resistance(
+    actions: &mut RhaiActionBuffer,
+    damage_type: &str,
+    layer: &str,
+    key: &str,
+    multiplier: f64,
+) {
+    actions
+        .actions
+        .lock()
+        .expect("rhai action buffer lock should not be poisoned")
+        .push(RuleAction::SetResistance {
+            damage_type: damage_type.to_string(),
+            layer: layer.to_string(),
+            key: key.to_string(),
+            multiplier,
+        });
+}
+
 fn apply_rule_actions(world: &mut World, actions: &[RuleAction], report: &mut RhaiHookReport) {
     for action in actions {
         match action {
@@ -530,7 +702,92 @@ fn apply_rule_actions(world: &mut World, actions: &[RuleAction], report: &mut Rh
             RuleAction::LogInfo(_) | RuleAction::LogWarn(_) => {
                 report.actions_applied += 1;
             }
+            RuleAction::SetEntityFlag {
+                entity,
+                flag,
+                value,
+            } => {
+                if set_entity_flag(world, *entity, flag, *value) {
+                    report.actions_applied += 1;
+                } else {
+                    report.actions_skipped += 1;
+                }
+            }
+            RuleAction::SetAttribute {
+                entity,
+                attribute,
+                enabled,
+            } => {
+                if set_entity_attribute(world, *entity, attribute, *enabled) {
+                    report.actions_applied += 1;
+                } else {
+                    report.actions_skipped += 1;
+                }
+            }
+            RuleAction::AddDamageType { damage_type } => {
+                world
+                    .resource_mut::<DamageTypeRegistry>()
+                    .damage_types
+                    .entry(damage_type.clone())
+                    .or_insert_with(|| crate::components::DamageTypeDef {
+                        name: damage_type.clone(),
+                        ..Default::default()
+                    });
+                world
+                    .resource_mut::<ResistanceRegistry>()
+                    .add_damage_type(damage_type);
+                report.actions_applied += 1;
+            }
+            RuleAction::SetResistance {
+                damage_type,
+                layer,
+                key,
+                multiplier,
+            } => {
+                world
+                    .resource_mut::<ResistanceRegistry>()
+                    .set_resistance(damage_type, layer, key, *multiplier);
+                report.actions_applied += 1;
+            }
         }
+    }
+}
+
+fn set_entity_flag(world: &mut World, entity: u64, flag: &str, value: bool) -> bool {
+    let entity = Entity::from_bits(entity);
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        return false;
+    };
+    if let Some(mut flags) = entity_mut.get_mut::<EntityFlags>() {
+        flags.0.insert(flag.to_string(), value);
+    } else {
+        let mut flags = EntityFlags::default();
+        flags.0.insert(flag.to_string(), value);
+        entity_mut.insert(flags);
+    }
+    true
+}
+
+fn set_entity_attribute(world: &mut World, entity: u64, attribute: &str, enabled: bool) -> bool {
+    let entity = Entity::from_bits(entity);
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        return false;
+    };
+    if let Some(mut attrs) = entity_mut.get_mut::<Attributes>() {
+        set_attribute_value(&mut attrs.0, attribute, enabled);
+    } else if enabled {
+        entity_mut.insert(Attributes(vec![attribute.to_string()]));
+    }
+    true
+}
+
+fn set_attribute_value(attrs: &mut Vec<String>, attribute: &str, enabled: bool) {
+    if enabled {
+        if !attrs.iter().any(|existing| existing == attribute) {
+            attrs.push(attribute.to_string());
+        }
+    } else {
+        attrs.retain(|existing| existing != attribute);
     }
 }
 

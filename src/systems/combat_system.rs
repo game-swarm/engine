@@ -3,7 +3,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{
-    Attributes, BodyPart, BodyPartRegistry, DamageTypeRegistry, Drone, Structure,
+    Attributes, BodyPart, BodyPartRegistry, DamageTypeRegistry, Drone, EntityFlags,
+    ResistanceRegistry, Structure,
 };
 
 pub const DEFAULT_ATTACK_DAMAGE: u32 = 30;
@@ -136,14 +137,23 @@ pub fn heal_amount(parts: usize) -> u32 {
 pub fn final_damage_multiplier(
     body: Option<&[BodyPart]>,
     attrs: Option<&Attributes>,
+    flags: Option<&EntityFlags>,
     damage_type: &str,
-    body_registry: &BodyPartRegistry,
-    damage_registry: &DamageTypeRegistry,
+    _body_registry: &BodyPartRegistry,
+    _damage_registry: &DamageTypeRegistry,
+    resistance_registry: &ResistanceRegistry,
 ) -> f64 {
-    let body_mult = body.unwrap_or(&[]).iter().fold(1.0, |m, p| {
-        m * (1.0 - body_registry.resistance(*p, damage_type))
-    });
-    body_mult * damage_registry.attribute_multiplier(damage_type, attrs) * fortify_multiplier(attrs)
+    if flags
+        .and_then(|flags| flags.0.get(&format!("immune_{damage_type}")))
+        .copied()
+        .unwrap_or(false)
+    {
+        return 0.0;
+    }
+    let component_mult = resistance_registry.component_multiplier(damage_type, body);
+    let attribute_mult = resistance_registry.attribute_multiplier(damage_type, attrs)
+        * fortify_multiplier(attrs);
+    component_mult * attribute_mult
 }
 
 fn fortify_multiplier(attrs: Option<&Attributes>) -> f64 {
@@ -166,8 +176,9 @@ pub fn combat_system(
     mut combat: ResMut<PendingCombat>,
     body_registry: Res<BodyPartRegistry>,
     damage_registry: Res<DamageTypeRegistry>,
-    mut drones: Query<(&mut Drone, Option<&Attributes>)>,
-    mut structures: Query<(&mut Structure, Option<&Attributes>), Without<Drone>>,
+    resistance_registry: Res<ResistanceRegistry>,
+    mut drones: Query<(&mut Drone, Option<&Attributes>, Option<&EntityFlags>)>,
+    mut structures: Query<(&mut Structure, Option<&Attributes>, Option<&EntityFlags>), Without<Drone>>,
 ) {
     // --- Damage phase (first) ---
     // Accumulate total damage per target, then apply in deterministic order.
@@ -188,22 +199,31 @@ pub fn combat_system(
     damage_by_target.sort_keys();
 
     for (entity, damages) in &damage_by_target {
-        if let Ok((mut drone, attrs)) = drones.get_mut(*entity) {
+        if let Ok((mut drone, attrs, flags)) = drones.get_mut(*entity) {
             let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
                 let multiplier = final_damage_multiplier(
                     Some(&drone.body),
                     attrs,
+                    flags,
                     dt,
                     &body_registry,
                     &damage_registry,
+                    &resistance_registry,
                 );
                 acc.saturating_add(((*amount as f64) * multiplier).floor() as u32)
             });
             drone.hits = drone.hits.saturating_sub(total);
-        } else if let Ok((mut structure, attrs)) = structures.get_mut(*entity) {
+        } else if let Ok((mut structure, attrs, flags)) = structures.get_mut(*entity) {
             let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
-                let multiplier =
-                    final_damage_multiplier(None, attrs, dt, &body_registry, &damage_registry);
+                let multiplier = final_damage_multiplier(
+                    None,
+                    attrs,
+                    flags,
+                    dt,
+                    &body_registry,
+                    &damage_registry,
+                    &resistance_registry,
+                );
                 acc.saturating_add(((*amount as f64) * multiplier).floor() as u32)
             });
             structure.hits = structure.hits.saturating_sub(total);

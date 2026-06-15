@@ -1903,25 +1903,31 @@ fn apply_resisted_damage(
     let multiplier = {
         let body_registry = world.resource::<BodyPartRegistry>();
         let damage_registry = world.resource::<DamageTypeRegistry>();
+        let resistance_registry = world.resource::<ResistanceRegistry>();
         let entity_ref = world
             .get_entity(target)
             .map_err(|_| RejectionReason::ObjectNotFound)?;
         let attrs = entity_ref.get::<Attributes>();
+        let flags = entity_ref.get::<EntityFlags>();
         if let Some(drone) = entity_ref.get::<Drone>() {
             crate::systems::combat_system::final_damage_multiplier(
                 Some(&drone.body),
                 attrs,
+                flags,
                 damage_type,
                 body_registry,
                 damage_registry,
+                resistance_registry,
             )
         } else if entity_ref.get::<Structure>().is_some() {
             crate::systems::combat_system::final_damage_multiplier(
                 None,
                 attrs,
+                flags,
                 damage_type,
                 body_registry,
                 damage_registry,
+                resistance_registry,
             )
         } else {
             return Err(RejectionReason::ObjectNotFound);
@@ -2275,25 +2281,31 @@ fn apply_disrupt(world: &mut World, target_id: ObjectId) -> CommandResult {
 fn sonic_effect_multiplier(world: &World, target: Entity) -> Result<f64, RejectionReason> {
     let body_registry = world.resource::<BodyPartRegistry>();
     let damage_registry = world.resource::<DamageTypeRegistry>();
+    let resistance_registry = world.resource::<ResistanceRegistry>();
     let entity_ref = world
         .get_entity(target)
         .map_err(|_| RejectionReason::ObjectNotFound)?;
     let attrs = entity_ref.get::<Attributes>();
+    let flags = entity_ref.get::<EntityFlags>();
     if let Some(drone) = entity_ref.get::<Drone>() {
         Ok(crate::systems::combat_system::final_damage_multiplier(
             Some(&drone.body),
             attrs,
+            flags,
             DamageType::Sonic.as_str(),
             body_registry,
             damage_registry,
+            resistance_registry,
         ))
     } else if entity_ref.get::<Structure>().is_some() {
         Ok(crate::systems::combat_system::final_damage_multiplier(
             None,
             attrs,
+            flags,
             DamageType::Sonic.as_str(),
             body_registry,
             damage_registry,
+            resistance_registry,
         ))
     } else {
         Err(RejectionReason::ObjectNotFound)
@@ -2335,25 +2347,31 @@ fn effect_multiplier(
 ) -> Result<f64, RejectionReason> {
     let body_registry = world.resource::<BodyPartRegistry>();
     let damage_registry = world.resource::<DamageTypeRegistry>();
+    let resistance_registry = world.resource::<ResistanceRegistry>();
     let entity_ref = world
         .get_entity(target)
         .map_err(|_| RejectionReason::ObjectNotFound)?;
     let attrs = entity_ref.get::<Attributes>();
+    let flags = entity_ref.get::<EntityFlags>();
     if let Some(drone) = entity_ref.get::<Drone>() {
         Ok(crate::systems::combat_system::final_damage_multiplier(
             Some(&drone.body),
             attrs,
+            flags,
             damage_type,
             body_registry,
             damage_registry,
+            resistance_registry,
         ))
     } else if entity_ref.get::<Structure>().is_some() {
         Ok(crate::systems::combat_system::final_damage_multiplier(
             None,
             attrs,
+            flags,
             damage_type,
             body_registry,
             damage_registry,
+            resistance_registry,
         ))
     } else {
         Err(RejectionReason::ObjectNotFound)

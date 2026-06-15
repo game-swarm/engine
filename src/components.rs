@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use bevy::prelude::{Component, Resource as BevyResource};
@@ -191,6 +191,21 @@ pub enum BodyPart {
     Tough,
 }
 
+impl fmt::Display for BodyPart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Move => "Move",
+            Self::Work => "Work",
+            Self::Carry => "Carry",
+            Self::Attack => "Attack",
+            Self::RangedAttack => "RangedAttack",
+            Self::Heal => "Heal",
+            Self::Claim => "Claim",
+            Self::Tough => "Tough",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DamageType {
     Kinetic,
@@ -380,6 +395,114 @@ impl DamageTypeRegistry {
 }
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Attributes(pub Vec<String>);
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct EntityFlags(pub HashMap<String, bool>);
+
+#[derive(BevyResource, Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResistanceRegistry {
+    pub damage_types: IndexMap<String, ResistanceDamageTypeDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResistanceDamageTypeDef {
+    pub component_multipliers: IndexMap<String, f64>,
+    pub attribute_multipliers: IndexMap<String, f64>,
+}
+
+impl ResistanceRegistry {
+    pub fn from_registries(
+        body_registry: &BodyPartRegistry,
+        damage_registry: &DamageTypeRegistry,
+    ) -> Self {
+        let mut registry = Self::default();
+        for damage_type in damage_registry.damage_types.keys() {
+            registry.add_damage_type(damage_type);
+        }
+        for (damage_type, def) in &damage_registry.damage_types {
+            registry.add_damage_type(damage_type);
+            for (attribute, multiplier) in &def.attribute_multipliers {
+                registry.set_attribute_multiplier(damage_type, attribute, *multiplier);
+            }
+        }
+        for (part, def) in &body_registry.parts {
+            for (damage_type, resistance) in &def.resistances {
+                registry.set_component_multiplier(
+                    damage_type,
+                    &part.to_string(),
+                    1.0 - resistance.clamp(0.0, 1.0),
+                );
+            }
+        }
+        registry
+    }
+
+    pub fn add_damage_type(&mut self, damage_type: impl Into<String>) {
+        self.damage_types
+            .entry(damage_type.into())
+            .or_insert_with(ResistanceDamageTypeDef::default);
+    }
+
+    pub fn set_resistance(&mut self, damage_type: &str, layer: &str, key: &str, multiplier: f64) {
+        match layer {
+            "component" | "components" | "body" | "body_part" => {
+                self.set_component_multiplier(damage_type, key, multiplier);
+            }
+            "attribute" | "attributes" => {
+                self.set_attribute_multiplier(damage_type, key, multiplier);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_component_multiplier(&mut self, damage_type: &str, component: &str, multiplier: f64) {
+        self.add_damage_type(damage_type);
+        if let Some(def) = self.damage_types.get_mut(damage_type) {
+            def.component_multipliers
+                .insert(component.to_string(), clamp_multiplier(multiplier));
+        }
+    }
+
+    pub fn set_attribute_multiplier(&mut self, damage_type: &str, attribute: &str, multiplier: f64) {
+        self.add_damage_type(damage_type);
+        if let Some(def) = self.damage_types.get_mut(damage_type) {
+            def.attribute_multipliers
+                .insert(attribute.to_string(), clamp_multiplier(multiplier));
+        }
+    }
+
+    pub fn component_multiplier(&self, damage_type: &str, body: Option<&[BodyPart]>) -> f64 {
+        let Some(def) = self.damage_types.get(damage_type) else {
+            return 1.0;
+        };
+        body.unwrap_or(&[])
+            .iter()
+            .filter_map(|part| def.component_multipliers.get(&part.to_string()))
+            .fold(1.0, |acc, multiplier| acc * multiplier.clamp(0.0, 1.0))
+    }
+
+    pub fn attribute_multiplier(&self, damage_type: &str, attrs: Option<&Attributes>) -> f64 {
+        let Some(attrs) = attrs else {
+            return 1.0;
+        };
+        let Some(def) = self.damage_types.get(damage_type) else {
+            return 1.0;
+        };
+        attrs
+            .0
+            .iter()
+            .filter_map(|attribute| def.attribute_multipliers.get(attribute))
+            .fold(1.0, |acc, multiplier| acc * multiplier.clamp(0.0, 1.0))
+    }
+}
+
+fn clamp_multiplier(multiplier: f64) -> f64 {
+    if multiplier.is_finite() {
+        multiplier.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StructureType(pub &'static str);
@@ -988,6 +1111,9 @@ pub struct Controller {
     pub safe_mode: u32,
     pub safe_mode_available: u32,
     pub safe_mode_cooldown: u32,
+    pub repair_capacity: u32,
+    pub repair_range: u32,
+    pub repair_per_drone: u32,
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -516,8 +516,14 @@ impl WorldConfig {
         app.insert_resource(CombatRules {
             damage_multiplier: self.combat_damage_multiplier_fixed(),
         });
-        app.insert_resource(DamageTypeRegistry::from_defs(self.damage_types.clone()));
-        app.insert_resource(BodyPartRegistry::from_defs(self.body_part_types.clone()));
+        let damage_registry = DamageTypeRegistry::from_defs(self.damage_types.clone());
+        let body_registry = BodyPartRegistry::from_defs(self.body_part_types.clone());
+        app.insert_resource(ResistanceRegistry::from_registries(
+            &body_registry,
+            &damage_registry,
+        ));
+        app.insert_resource(damage_registry);
+        app.insert_resource(body_registry);
         app.insert_resource(StructureTypeRegistry::from_defs(
             self.structure_types.clone(),
         ));
@@ -540,6 +546,7 @@ impl WorldConfig {
                 seed_rotation_system,
                 global_storage_system,
                 controller_system,
+                controller_repair_system,
                 combat_system,
                 decay_system,
                 rhai_rule_module_tick_end_system,
