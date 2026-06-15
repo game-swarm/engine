@@ -19,9 +19,11 @@ pub use components::*;
 pub use hot_cache::*;
 pub use mcp::{
     DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer,
-    StoredModule, VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
-    VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot, WorldRuleMod, WorldRules,
-    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player,
+    StoredModule, TournamentLockedModule, TournamentPrecommitParams, TournamentPrecommitResult,
+    TournamentStatusResult, VisibleController, VisibleDrone, VisibleEntity, VisiblePosition,
+    VisibleResource, VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot,
+    WorldRuleMod, WorldRules, swarm_get_snapshot, swarm_get_world_rules,
+    visible_entities_for_player,
 };
 pub use onboarding::*;
 pub use realtime::*;

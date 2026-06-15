@@ -326,6 +326,38 @@ pub struct StoredModule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TournamentPrecommitParams {
+    pub module_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentLockedModule {
+    pub player_id: PlayerId,
+    pub module_id: String,
+    pub wasm_hash: String,
+    pub version_tag: String,
+    pub locked_at_tick: Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentPrecommitResult {
+    pub status: String,
+    pub locked_module: TournamentLockedModule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentStatusResult {
+    pub tick: Tick,
+    pub player_id: PlayerId,
+    pub mode: String,
+    pub deploy_locked: bool,
+    pub locked_module: Option<TournamentLockedModule>,
+    pub preparation_tools: Vec<ToolInfo>,
+    pub direct_gameplay_tools_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
@@ -415,6 +447,7 @@ pub struct ResourceReadParams {
 #[derive(Debug, Default)]
 pub struct McpServer {
     modules: Vec<StoredModule>,
+    tournament_locks: BTreeMap<PlayerId, TournamentLockedModule>,
     issuer: CertificateIssuer,
     sessions: BTreeMap<String, WebAuthSession>,
     revoked_certificates: BTreeSet<String>,
@@ -425,6 +458,7 @@ impl McpServer {
     pub fn new() -> Self {
         Self {
             modules: Vec::new(),
+            tournament_locks: BTreeMap::new(),
             issuer: CertificateIssuer::new(),
             sessions: BTreeMap::new(),
             revoked_certificates: BTreeSet::new(),
@@ -435,6 +469,7 @@ impl McpServer {
     pub fn with_issuer_for_tests(issuer: SigningKey, now_seconds: u64) -> Self {
         Self {
             modules: Vec::new(),
+            tournament_locks: BTreeMap::new(),
             issuer: CertificateIssuer {
                 signing_key: issuer,
             },
@@ -528,6 +563,16 @@ impl McpServer {
                 let params: RevokeAuthParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
                 serde_json::to_value(self.swarm_auth_revoke(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_tournament_precommit" => {
+                let params: TournamentPrecommitParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_tournament_precommit(context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_tournament_status" => {
+                serde_json::to_value(self.swarm_tournament_status(context))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_oauth2_login" => {
@@ -734,6 +779,12 @@ impl McpServer {
             return Err(McpError::invalid_params("room_id does not exist"));
         }
 
+        if self.tournament_locks.contains_key(&context.player_id) {
+            return Err(McpError::invalid_params(
+                "player has locked a tournament precommit; deploy is disabled until the match ends",
+            ));
+        }
+
         let wasm_bytes = decode_base64(&params.wasm_bytes)?;
         if wasm_bytes.is_empty() {
             return Err(McpError::invalid_params("wasm_bytes is empty"));
@@ -778,6 +829,59 @@ impl McpServer {
             status: "pending_next_tick".to_string(),
             deployed_at,
         })
+    }
+
+    pub fn swarm_tournament_precommit(
+        &mut self,
+        context: McpContext,
+        params: TournamentPrecommitParams,
+    ) -> Result<TournamentPrecommitResult, McpError> {
+        if self.tournament_locks.contains_key(&context.player_id) {
+            return Err(McpError::invalid_params(
+                "player already has a locked tournament precommit",
+            ));
+        }
+        let module = self
+            .modules
+            .iter()
+            .find(|module| {
+                module.player_id == context.player_id && module.module_id == params.module_id
+            })
+            .ok_or_else(|| McpError::invalid_params("module_id is not deployed by this player"))?;
+        let locked_module = TournamentLockedModule {
+            player_id: context.player_id,
+            module_id: module.module_id.clone(),
+            wasm_hash: module.wasm_hash.clone(),
+            version_tag: module.version_tag.clone(),
+            locked_at_tick: context.tick,
+        };
+        self.tournament_locks
+            .insert(context.player_id, locked_module.clone());
+        Ok(TournamentPrecommitResult {
+            status: "locked_for_tournament".to_string(),
+            locked_module,
+        })
+    }
+
+    pub fn swarm_tournament_status(&self, context: McpContext) -> TournamentStatusResult {
+        let locked_module = self.tournament_locks.get(&context.player_id).cloned();
+        TournamentStatusResult {
+            tick: context.tick,
+            player_id: context.player_id,
+            mode: if locked_module.is_some() {
+                "precommit_locked".to_string()
+            } else {
+                "preparation".to_string()
+            },
+            deploy_locked: locked_module.is_some(),
+            locked_module,
+            preparation_tools: tournament_tool_infos(),
+            direct_gameplay_tools_enabled: false,
+        }
+    }
+
+    pub fn tournament_locks(&self) -> &BTreeMap<PlayerId, TournamentLockedModule> {
+        &self.tournament_locks
     }
 
     pub fn modules(&self) -> &[StoredModule] {
@@ -893,7 +997,38 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             name: "swarm_deploy".to_string(),
             description: "Deploy a WASM module for a player".to_string(),
         },
+        ToolInfo {
+            name: "swarm_tournament_precommit".to_string(),
+            description:
+                "Lock a previously deployed WASM module for an AI tournament before match start"
+                    .to_string(),
+        },
+        ToolInfo {
+            name: "swarm_tournament_status".to_string(),
+            description: "Inspect AI tournament preparation and locked-code status".to_string(),
+        },
     ]
+}
+
+fn tournament_tool_infos() -> Vec<ToolInfo> {
+    mcp_tool_infos()
+        .into_iter()
+        .filter(|tool| {
+            matches!(
+                tool.name.as_str(),
+                "swarm_get_snapshot"
+                    | "swarm_get_world_rules"
+                    | "swarm_get_available_actions"
+                    | "swarm_explain_last_tick"
+                    | "swarm_profile"
+                    | "swarm_dry_run_commands"
+                    | "swarm_get_docs"
+                    | "swarm_deploy"
+                    | "swarm_tournament_precommit"
+                    | "swarm_tournament_status"
+            )
+        })
+        .collect()
 }
 
 fn wasm_action_names() -> Vec<String> {
@@ -1025,6 +1160,7 @@ pub fn swarm_get_docs(params: DocsParams) -> DocsResult {
         )],
         "api" => api_reference_sections(),
         "basic-agent" => basic_agent_tutorial_sections(),
+        "tournament" => tournament_docs_sections(),
         _ => vec![
             docs_section(
                 "Swarm docs",
@@ -1043,6 +1179,9 @@ fn normalize_docs_topic(topic: &str) -> String {
         | "tutorials/basic-agent"
         | "tutorial/basic-agent"
         | "basic-agent" => "basic-agent".to_string(),
+        "swarm://docs/tournament/ai.md" | "tournament" | "ai-tournament" => {
+            "tournament".to_string()
+        }
         "swarm://docs/api/reference.md" | "api/reference" | "api" => "api".to_string(),
         "swarm://docs/security/mcp-contract.md" | "security/mcp-contract" | "mcp" => {
             "mcp".to_string()
@@ -1090,6 +1229,7 @@ fn docs_resource_uris() -> Vec<&'static str> {
         "swarm://docs/api/commands/Spawn.md",
         "swarm://docs/api/commands/Build.md",
         "swarm://docs/security/mcp-contract.md",
+        "swarm://docs/tournament/ai.md",
     ]
 }
 
@@ -1098,6 +1238,7 @@ fn docs_resource_name(uri: &str) -> &'static str {
         "swarm://docs/tutorials/basic-agent" => "Basic AI agent tutorial",
         "swarm://docs/api/reference.md" => "Game API reference",
         "swarm://docs/security/mcp-contract.md" => "MCP security contract",
+        "swarm://docs/tournament/ai.md" => "AI tournament precommit guide",
         "swarm://docs/tutorial/quickstart.md" => "Quickstart",
         "swarm://docs/README.md" => "Documentation index",
         "swarm://docs/api/commands/Move.md" => "Move command",
@@ -1119,6 +1260,9 @@ fn docs_resource_description(uri: &str) -> &'static str {
         }
         "swarm://docs/security/mcp-contract.md" => {
             "Safety boundary: MCP read/debug/deploy tools only; no direct gameplay actions."
+        }
+        "swarm://docs/tournament/ai.md" => {
+            "AI tournament preparation flow: deploy WASM during prep, precommit to lock module_id + BLAKE3 hash before match start."
         }
         _ => "Markdown documentation for Swarm AI agents.",
     }
@@ -1142,6 +1286,11 @@ fn docs_markdown_for_uri(uri: &str) -> Option<String> {
         "swarm://docs/security/mcp-contract.md" => {
             Some(docs_sections_markdown(&swarm_get_docs(DocsParams {
                 topic: "mcp".to_string(),
+            })))
+        }
+        "swarm://docs/tournament/ai.md" => {
+            Some(docs_sections_markdown(&swarm_get_docs(DocsParams {
+                topic: "tournament".to_string(),
             })))
         }
         "swarm://docs/api/commands/Move.md" => Some(command_doc(
@@ -1190,6 +1339,23 @@ fn command_doc(name: &str, params: &str, validator: &str, note: &str) -> String 
     format!(
         "# {name}\n\n{params}\n\n{validator}\n\nSecurity note: {note}\n\nCommandIntent shape: {{\"sequence\":1,\"action\":{{\"type\":\"{name}\"}}}}"
     )
+}
+
+fn tournament_docs_sections() -> Vec<DocsSection> {
+    vec![
+        docs_section(
+            "AI tournament model",
+            "AI tournaments use WASM pre-submission. During preparation, agents may inspect the world, dry-run CommandIntent JSON, compile/sign WASM, and call swarm_deploy. Before match start they must call swarm_tournament_precommit with a module_id; the server locks that module_id plus its BLAKE3 wasm_hash and version_tag.",
+        ),
+        docs_section(
+            "Locked-code rule",
+            "After precommit, swarm_deploy rejects further uploads for that player until the tournament match ends. The match executor uses the locked module snapshot, making the contest a deterministic pre-submitted WASM match rather than an in-match code-editing loop.",
+        ),
+        docs_section(
+            "AI MCP interface",
+            "Tournament MCP tools are read/debug/deploy/precommit/status only: swarm_get_snapshot, swarm_get_world_rules, swarm_get_available_actions, swarm_explain_last_tick, swarm_profile, swarm_dry_run_commands, swarm_get_docs, swarm_deploy, swarm_tournament_precommit, and swarm_tournament_status. No swarm_move, swarm_attack, swarm_build, or other direct gameplay MCP tools exist.",
+        ),
+    ]
 }
 
 fn api_reference_sections() -> Vec<DocsSection> {
@@ -2281,5 +2447,93 @@ mod tests {
             )
             .expect_err("revoked cert rejected");
         assert_eq!(error.message, "certificate is revoked");
+    }
+    #[test]
+    fn tournament_precommit_locks_deployed_module_and_blocks_redeploy() {
+        let world = create_world();
+        let issuer = test_signing_key(21);
+        let client_key = test_signing_key(22);
+        let mut server = McpServer::with_issuer_for_tests(issuer, 40_000);
+        let login = login_with_key(&mut server, &client_key);
+        let context = McpContext {
+            player_id: login.player_id,
+            tick: 7,
+        };
+        let deploy = server
+            .swarm_deploy(
+                &world,
+                context.clone(),
+                signed_deploy_params(login.certificate.clone(), &client_key),
+            )
+            .expect("initial deploy should succeed");
+        let locked = server
+            .swarm_tournament_precommit(
+                context.clone(),
+                TournamentPrecommitParams {
+                    module_id: deploy.module_id.clone(),
+                },
+            )
+            .expect("precommit should lock deployed module");
+        assert_eq!(locked.status, "locked_for_tournament");
+        assert_eq!(locked.locked_module.module_id, deploy.module_id);
+        assert_eq!(locked.locked_module.locked_at_tick, 7);
+        assert_eq!(
+            locked.locked_module.wasm_hash,
+            blake3::hash(b" asm   ").to_hex().to_string()
+        );
+        assert_eq!(server.tournament_locks().len(), 1);
+        let error = server
+            .swarm_deploy(
+                &world,
+                McpContext {
+                    player_id: login.player_id,
+                    tick: 8,
+                },
+                signed_deploy_params(login.certificate, &client_key),
+            )
+            .expect_err("precommitted tournament player cannot redeploy");
+        assert!(error.message.contains("tournament precommit"));
+    }
+
+    #[test]
+    fn tournament_mcp_status_and_docs_expose_ai_interface_without_gameplay_tools() {
+        let mut world = create_world();
+        let mut server = McpServer::new();
+        let context = McpContext {
+            player_id: 1,
+            tick: 3,
+        };
+        let status = server.swarm_tournament_status(context.clone());
+        assert_eq!(status.mode, "preparation");
+        assert!(!status.deploy_locked);
+        assert!(!status.direct_gameplay_tools_enabled);
+        let tool_names = status
+            .preparation_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(tool_names.contains(&"swarm_deploy"));
+        assert!(tool_names.contains(&"swarm_tournament_precommit"));
+        assert!(tool_names.contains(&"swarm_tournament_status"));
+        assert!(!tool_names.iter().any(|name| matches!(
+            *name,
+            "swarm_move" | "swarm_attack" | "swarm_build" | "swarm_spawn"
+        )));
+        let read = server.handle_json_rpc(
+            &mut world,
+            context,
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!("tournament-docs"),
+                method: "resources/read".to_string(),
+                params: json!({ "uri": "swarm://docs/tournament/ai.md" }),
+            },
+        );
+        assert!(read.error.is_none(), "{:?}", read.error);
+        let result = read.result.unwrap();
+        let text = result["contents"][0]["text"].as_str().unwrap();
+        assert!(text.contains("WASM pre-submission"));
+        assert!(text.contains("swarm_tournament_precommit"));
+        assert!(text.contains("No swarm_move"));
     }
 }
