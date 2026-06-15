@@ -6,6 +6,9 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::arena::{
+    ArenaReplay, ReplayPrivacy, TournamentBracket, TournamentElimination, TournamentMatchSchedule,
+};
 use crate::command::{
     CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand, RejectionReason, Tick,
     object_id, validate_command,
@@ -420,6 +423,55 @@ pub struct TournamentPrecommitResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TournamentCreateParams {
+    pub tournament_id: String,
+    pub elimination: TournamentElimination,
+    pub fixed_ticks: Tick,
+    pub players: Vec<PlayerId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentCreateResult {
+    pub tournament_id: String,
+    pub status: String,
+    pub elimination: TournamentElimination,
+    pub fixed_ticks: Tick,
+    pub players: Vec<PlayerId>,
+    pub scheduled: Vec<TournamentMatchSchedule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchResultParams {
+    pub tournament_id: String,
+    pub match_id: u64,
+    pub winner: PlayerId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchResultResult {
+    pub tournament_id: String,
+    pub match_id: u64,
+    pub winner: PlayerId,
+    pub loser: PlayerId,
+    pub champion: Option<PlayerId>,
+    pub scheduled: Vec<TournamentMatchSchedule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentBracketStatus {
+    pub tournament_id: String,
+    pub elimination: TournamentElimination,
+    pub fixed_ticks: Tick,
+    pub players: Vec<PlayerId>,
+    pub scheduled: Vec<TournamentMatchSchedule>,
+    pub completed_matches: usize,
+    pub champion: Option<PlayerId>,
+    pub losses: BTreeMap<PlayerId, u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TournamentStatusResult {
     pub tick: Tick,
     pub player_id: PlayerId,
@@ -428,6 +480,7 @@ pub struct TournamentStatusResult {
     pub locked_module: Option<TournamentLockedModule>,
     pub preparation_tools: Vec<ToolInfo>,
     pub direct_gameplay_tools_enabled: bool,
+    pub tournaments: Vec<TournamentBracketStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -521,6 +574,7 @@ pub struct ResourceReadParams {
 pub struct McpServer {
     modules: Vec<StoredModule>,
     tournament_locks: BTreeMap<PlayerId, TournamentLockedModule>,
+    tournaments: BTreeMap<String, TournamentBracket>,
     issuer: CertificateIssuer,
     sessions: BTreeMap<String, WebAuthSession>,
     revoked_certificates: BTreeSet<String>,
@@ -533,6 +587,7 @@ impl McpServer {
         Self {
             modules: Vec::new(),
             tournament_locks: BTreeMap::new(),
+            tournaments: BTreeMap::new(),
             issuer: CertificateIssuer::new(),
             sessions: BTreeMap::new(),
             revoked_certificates: BTreeSet::new(),
@@ -545,6 +600,7 @@ impl McpServer {
         Self {
             modules: Vec::new(),
             tournament_locks: BTreeMap::new(),
+            tournaments: BTreeMap::new(),
             issuer: CertificateIssuer {
                 signing_key: issuer,
             },
@@ -651,8 +707,20 @@ impl McpServer {
                 serde_json::to_value(self.swarm_tournament_precommit(context, params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
+            "swarm_tournament_create" => {
+                let params: TournamentCreateParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_tournament_create(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_tournament_status" => {
                 serde_json::to_value(self.swarm_tournament_status(context))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_match_result" => {
+                let params: MatchResultParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_match_result(params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_oauth2_login" => {
@@ -957,11 +1025,98 @@ impl McpServer {
             locked_module,
             preparation_tools: tournament_tool_infos(),
             direct_gameplay_tools_enabled: false,
+            tournaments: self
+                .tournaments
+                .iter()
+                .map(|(id, bracket)| tournament_bracket_status(id, bracket))
+                .collect(),
         }
+    }
+
+    pub fn swarm_tournament_create(
+        &mut self,
+        params: TournamentCreateParams,
+    ) -> Result<TournamentCreateResult, McpError> {
+        if params.tournament_id.trim().is_empty() {
+            return Err(McpError::invalid_params("tournament_id is required"));
+        }
+        if self.tournaments.contains_key(&params.tournament_id) {
+            return Err(McpError::invalid_params("tournament_id already exists"));
+        }
+
+        let mut players = Vec::with_capacity(params.players.len());
+        for player_id in &params.players {
+            let locked = self
+                .tournament_locks
+                .get(player_id)
+                .ok_or_else(|| McpError::invalid_params("all players must precommit a module"))?;
+            players.push(crate::arena::ArenaPlayerCode::new(
+                locked.player_id,
+                locked.module_id.clone(),
+                locked.wasm_hash.clone(),
+            ));
+        }
+
+        let mut bracket = TournamentBracket::seed(params.elimination, players, params.fixed_ticks)
+            .map_err(arena_error_to_mcp)?;
+        let scheduled = bracket.schedule_next_round().map_err(arena_error_to_mcp)?;
+        let player_ids = bracket
+            .seeds
+            .iter()
+            .map(|seed| seed.code.player_id)
+            .collect::<Vec<_>>();
+        self.tournaments
+            .insert(params.tournament_id.clone(), bracket);
+
+        Ok(TournamentCreateResult {
+            tournament_id: params.tournament_id,
+            status: "scheduled".to_string(),
+            elimination: params.elimination,
+            fixed_ticks: params.fixed_ticks,
+            players: player_ids,
+            scheduled,
+        })
+    }
+
+    pub fn swarm_match_result(
+        &mut self,
+        params: MatchResultParams,
+    ) -> Result<MatchResultResult, McpError> {
+        let bracket = self
+            .tournaments
+            .get_mut(&params.tournament_id)
+            .ok_or_else(|| McpError::invalid_params("unknown tournament_id"))?;
+        let position = bracket
+            .scheduled
+            .iter()
+            .position(|schedule| schedule.match_id == params.match_id)
+            .ok_or_else(|| McpError::invalid_params("match_id is not scheduled"))?;
+        let schedule = bracket.scheduled.remove(position);
+        let match_id = schedule.match_id;
+        let record = bracket
+            .record_match_result(schedule, params.winner, empty_tournament_replay())
+            .map_err(arena_error_to_mcp)?;
+        let loser = record.loser;
+        if bracket.champion.is_none() && bracket.scheduled.is_empty() {
+            let _ = bracket.schedule_next_round();
+        }
+
+        Ok(MatchResultResult {
+            tournament_id: params.tournament_id,
+            match_id,
+            winner: params.winner,
+            loser,
+            champion: bracket.champion,
+            scheduled: bracket.scheduled.clone(),
+        })
     }
 
     pub fn tournament_locks(&self) -> &BTreeMap<PlayerId, TournamentLockedModule> {
         &self.tournament_locks
+    }
+
+    pub fn tournaments(&self) -> &BTreeMap<String, TournamentBracket> {
+        &self.tournaments
     }
 
     pub fn modules(&self) -> &[StoredModule] {
@@ -1087,12 +1242,22 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             name: "swarm_tournament_status".to_string(),
             description: "Inspect AI tournament preparation and locked-code status".to_string(),
         },
+        ToolInfo {
+            name: "swarm_tournament_create".to_string(),
+            description: "Create and schedule a single- or double-elimination AI tournament from precommitted modules".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_match_result".to_string(),
+            description: "Record a scheduled tournament match winner and advance the bracket".to_string(),
+        },
     ]
 }
 
 fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
     match tool {
-        "swarm_deploy" | "swarm_tournament_precommit" => Some(CommandSource::McpDeploy),
+        "swarm_deploy" | "swarm_tournament_precommit" | "swarm_tournament_create" => {
+            Some(CommandSource::McpDeploy)
+        }
         "swarm_get_snapshot"
         | "swarm_get_world_rules"
         | "swarm_get_available_actions"
@@ -1106,6 +1271,7 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_token_refresh"
         | "swarm_auth_revoke"
         | "swarm_tournament_status"
+        | "swarm_match_result"
         | "swarm_oauth2_login" => Some(CommandSource::McpQuery),
         _ => None,
     }
@@ -1127,9 +1293,40 @@ fn tournament_tool_infos() -> Vec<ToolInfo> {
                     | "swarm_deploy"
                     | "swarm_tournament_precommit"
                     | "swarm_tournament_status"
+                    | "swarm_tournament_create"
+                    | "swarm_match_result"
             )
         })
         .collect()
+}
+
+fn tournament_bracket_status(id: &str, bracket: &TournamentBracket) -> TournamentBracketStatus {
+    TournamentBracketStatus {
+        tournament_id: id.to_string(),
+        elimination: bracket.elimination,
+        fixed_ticks: bracket.fixed_ticks,
+        players: bracket
+            .seeds
+            .iter()
+            .map(|seed| seed.code.player_id)
+            .collect(),
+        scheduled: bracket.scheduled.clone(),
+        completed_matches: bracket.completed.len(),
+        champion: bracket.champion,
+        losses: bracket.losses.iter().map(|(k, v)| (*k, *v)).collect(),
+    }
+}
+
+fn empty_tournament_replay() -> ArenaReplay {
+    ArenaReplay {
+        privacy: ReplayPrivacy::Public,
+        public: true,
+        traces: Vec::new(),
+    }
+}
+
+fn arena_error_to_mcp(error: crate::arena::ArenaError) -> McpError {
+    McpError::invalid_params(format!("arena tournament error: {error:?}"))
 }
 
 fn wasm_action_names() -> Vec<String> {
@@ -1454,7 +1651,7 @@ fn tournament_docs_sections() -> Vec<DocsSection> {
         ),
         docs_section(
             "AI MCP interface",
-            "Tournament MCP tools are read/debug/deploy/precommit/status only: swarm_get_snapshot, swarm_get_world_rules, swarm_get_available_actions, swarm_explain_last_tick, swarm_profile, swarm_dry_run_commands, swarm_get_docs, swarm_deploy, swarm_tournament_precommit, and swarm_tournament_status. No swarm_move, swarm_attack, swarm_build, or other direct gameplay MCP tools exist.",
+            "Tournament MCP tools are read/debug/deploy/precommit/create/status/result only: swarm_get_snapshot, swarm_get_world_rules, swarm_get_available_actions, swarm_explain_last_tick, swarm_profile, swarm_dry_run_commands, swarm_get_docs, swarm_deploy, swarm_tournament_precommit, swarm_tournament_create, swarm_tournament_status, and swarm_match_result. No swarm_move, swarm_attack, swarm_build, or other direct gameplay MCP tools exist.",
         ),
     ]
 }
@@ -2714,7 +2911,7 @@ mod tests {
         assert_eq!(locked.locked_module.locked_at_tick, 7);
         assert_eq!(
             locked.locked_module.wasm_hash,
-            blake3::hash(b" asm   ").to_hex().to_string()
+            blake3::hash(b"\0asm\x01\0\0\0").to_hex().to_string()
         );
         assert_eq!(server.tournament_locks().len(), 1);
         let error = server
@@ -2742,6 +2939,7 @@ mod tests {
         assert_eq!(status.mode, "preparation");
         assert!(!status.deploy_locked);
         assert!(!status.direct_gameplay_tools_enabled);
+        assert!(status.tournaments.is_empty());
         let tool_names = status
             .preparation_tools
             .iter()
@@ -2749,7 +2947,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(tool_names.contains(&"swarm_deploy"));
         assert!(tool_names.contains(&"swarm_tournament_precommit"));
+        assert!(tool_names.contains(&"swarm_tournament_create"));
         assert!(tool_names.contains(&"swarm_tournament_status"));
+        assert!(tool_names.contains(&"swarm_match_result"));
         assert!(!tool_names.iter().any(|name| matches!(
             *name,
             "swarm_move" | "swarm_attack" | "swarm_build" | "swarm_spawn"
@@ -2769,6 +2969,76 @@ mod tests {
         let text = result["contents"][0]["text"].as_str().unwrap();
         assert!(text.contains("WASM pre-submission"));
         assert!(text.contains("swarm_tournament_precommit"));
+        assert!(text.contains("swarm_tournament_create"));
+        assert!(text.contains("swarm_match_result"));
         assert!(text.contains("No swarm_move"));
+    }
+
+    #[test]
+    fn tournament_create_and_match_result_advance_bracket() {
+        let mut server = McpServer::new();
+        for player_id in 1..=4 {
+            server.tournament_locks.insert(
+                player_id,
+                TournamentLockedModule {
+                    player_id,
+                    module_id: format!("module-{player_id}"),
+                    wasm_hash: format!("hash-{player_id}"),
+                    version_tag: "v1".to_string(),
+                    locked_at_tick: 10,
+                },
+            );
+        }
+
+        let created = server
+            .swarm_tournament_create(TournamentCreateParams {
+                tournament_id: "cup".to_string(),
+                elimination: TournamentElimination::Single,
+                fixed_ticks: 3,
+                players: vec![1, 2, 3, 4],
+            })
+            .expect("precommitted players create a tournament");
+        assert_eq!(created.status, "scheduled");
+        assert_eq!(created.scheduled.len(), 2);
+        assert_eq!(created.scheduled[0].player_one, 1);
+        assert_eq!(created.scheduled[0].player_two, 2);
+
+        let first = server
+            .swarm_match_result(MatchResultParams {
+                tournament_id: "cup".to_string(),
+                match_id: 1,
+                winner: 1,
+            })
+            .expect("first result records");
+        assert_eq!(first.loser, 2);
+        assert_eq!(first.champion, None);
+        assert_eq!(first.scheduled.len(), 1);
+
+        server
+            .swarm_match_result(MatchResultParams {
+                tournament_id: "cup".to_string(),
+                match_id: 2,
+                winner: 3,
+            })
+            .expect("second result records and schedules final");
+        let status = server.swarm_tournament_status(McpContext {
+            player_id: 1,
+            tick: 20,
+        });
+        assert_eq!(status.tournaments.len(), 1);
+        assert_eq!(status.tournaments[0].scheduled.len(), 1);
+        assert_eq!(status.tournaments[0].scheduled[0].player_one, 1);
+        assert_eq!(status.tournaments[0].scheduled[0].player_two, 3);
+
+        let final_result = server
+            .swarm_match_result(MatchResultParams {
+                tournament_id: "cup".to_string(),
+                match_id: status.tournaments[0].scheduled[0].match_id,
+                winner: 1,
+            })
+            .expect("final result records champion");
+        assert_eq!(final_result.champion, Some(1));
+        assert!(final_result.scheduled.is_empty());
+        assert_eq!(server.tournaments()["cup"].completed.len(), 3);
     }
 }

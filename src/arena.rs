@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::command::Tick;
 use crate::components::WorldMode;
 use crate::components::{BodyPart, Owner, PlayerId, Position, RoomId};
+use crate::ranking::MatchOutcome;
 use crate::resources::GlobalStorageConfig;
 use crate::tick::{InMemoryTickBroadcaster, InMemoryTickCommitter, PlayerExecutor, TickTrace};
 use crate::world::{SwarmWorld, create_world_with_mode};
@@ -105,11 +106,283 @@ pub struct ArenaReplay {
     pub traces: Vec<TickTrace>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TournamentElimination {
+    Single,
+    Double,
+}
+
+impl TournamentElimination {
+    fn max_losses(self) -> u8 {
+        match self {
+            Self::Single => 1,
+            Self::Double => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentSeed {
+    pub seed: u32,
+    pub code: ArenaPlayerCode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentMatchSchedule {
+    pub match_id: u64,
+    pub round: u32,
+    pub player_one: PlayerId,
+    pub player_two: PlayerId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TournamentMatchRecord {
+    pub schedule: TournamentMatchSchedule,
+    pub winner: PlayerId,
+    pub loser: PlayerId,
+    pub outcome: MatchOutcome,
+    pub replay: ArenaReplay,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TournamentBracket {
+    pub elimination: TournamentElimination,
+    pub fixed_ticks: Tick,
+    pub seeds: Vec<TournamentSeed>,
+    pub scheduled: Vec<TournamentMatchSchedule>,
+    pub completed: Vec<TournamentMatchRecord>,
+    pub losses: HashMap<PlayerId, u8>,
+    pub champion: Option<PlayerId>,
+    round: u32,
+    next_match_id: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArenaError {
     EmptyPlayers,
     InvalidFixedTicks,
     MissingExecutor(PlayerId),
+    DuplicatePlayer(PlayerId),
+    UnknownTournamentPlayer(PlayerId),
+    TournamentComplete,
+    NoScheduledMatch,
+}
+
+impl TournamentBracket {
+    pub fn seed(
+        elimination: TournamentElimination,
+        mut players: Vec<ArenaPlayerCode>,
+        fixed_ticks: Tick,
+    ) -> Result<Self, ArenaError> {
+        if players.is_empty() {
+            return Err(ArenaError::EmptyPlayers);
+        }
+        if fixed_ticks == 0 {
+            return Err(ArenaError::InvalidFixedTicks);
+        }
+
+        players.sort_by_key(|code| code.player_id);
+        let mut losses = HashMap::new();
+        let mut seeds = Vec::with_capacity(players.len());
+        for (index, code) in players.into_iter().enumerate() {
+            if losses.insert(code.player_id, 0).is_some() {
+                return Err(ArenaError::DuplicatePlayer(code.player_id));
+            }
+            seeds.push(TournamentSeed {
+                seed: index as u32 + 1,
+                code,
+            });
+        }
+
+        let champion = if seeds.len() == 1 {
+            Some(seeds[0].code.player_id)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            elimination,
+            fixed_ticks,
+            seeds,
+            scheduled: Vec::new(),
+            completed: Vec::new(),
+            losses,
+            champion,
+            round: 0,
+            next_match_id: 1,
+        })
+    }
+
+    pub fn active_players(&self) -> Vec<PlayerId> {
+        let max_losses = self.elimination.max_losses();
+        self.seeds
+            .iter()
+            .filter_map(|seed| {
+                let player_id = seed.code.player_id;
+                (self.losses.get(&player_id).copied().unwrap_or(max_losses) < max_losses)
+                    .then_some(player_id)
+            })
+            .collect()
+    }
+
+    pub fn schedule_next_round(&mut self) -> Result<Vec<TournamentMatchSchedule>, ArenaError> {
+        if self.champion.is_some() {
+            return Err(ArenaError::TournamentComplete);
+        }
+        if !self.scheduled.is_empty() {
+            return Ok(self.scheduled.clone());
+        }
+
+        let active = self.active_players();
+        if active.len() <= 1 {
+            self.champion = active.first().copied();
+            return Ok(Vec::new());
+        }
+
+        self.round += 1;
+        let mut schedules = Vec::new();
+        for pair in active.chunks(2) {
+            if let [player_one, player_two] = pair {
+                schedules.push(TournamentMatchSchedule {
+                    match_id: self.next_match_id,
+                    round: self.round,
+                    player_one: *player_one,
+                    player_two: *player_two,
+                });
+                self.next_match_id += 1;
+            }
+        }
+        self.scheduled = schedules.clone();
+        Ok(schedules)
+    }
+
+    pub fn record_match_result(
+        &mut self,
+        schedule: TournamentMatchSchedule,
+        winner: PlayerId,
+        replay: ArenaReplay,
+    ) -> Result<&TournamentMatchRecord, ArenaError> {
+        if winner != schedule.player_one && winner != schedule.player_two {
+            return Err(ArenaError::UnknownTournamentPlayer(winner));
+        }
+        if !self.losses.contains_key(&schedule.player_one) {
+            return Err(ArenaError::UnknownTournamentPlayer(schedule.player_one));
+        }
+        if !self.losses.contains_key(&schedule.player_two) {
+            return Err(ArenaError::UnknownTournamentPlayer(schedule.player_two));
+        }
+
+        let loser = if winner == schedule.player_one {
+            schedule.player_two
+        } else {
+            schedule.player_one
+        };
+        *self.losses.entry(loser).or_default() += 1;
+        let outcome = if winner == schedule.player_one {
+            MatchOutcome::PlayerOneWin
+        } else {
+            MatchOutcome::PlayerTwoWin
+        };
+        self.completed.push(TournamentMatchRecord {
+            schedule,
+            winner,
+            loser,
+            outcome,
+            replay,
+        });
+
+        let active = self.active_players();
+        if active.len() == 1 && self.scheduled.is_empty() {
+            self.champion = Some(active[0]);
+        }
+
+        Ok(self.completed.last().expect("record was just pushed"))
+    }
+
+    pub fn execute_next_match<F>(
+        &mut self,
+        mut executor_factory: F,
+    ) -> Result<&TournamentMatchRecord, ArenaError>
+    where
+        F: FnMut(PlayerId, &ArenaPlayerCode) -> Box<dyn PlayerExecutor>,
+    {
+        if self.champion.is_some() {
+            return Err(ArenaError::TournamentComplete);
+        }
+        if self.scheduled.is_empty() {
+            self.schedule_next_round()?;
+        }
+        if self.scheduled.is_empty() {
+            return Err(ArenaError::NoScheduledMatch);
+        }
+
+        let schedule = self.scheduled.remove(0);
+        let left = self
+            .code_for(schedule.player_one)
+            .ok_or(ArenaError::UnknownTournamentPlayer(schedule.player_one))?
+            .clone();
+        let right = self
+            .code_for(schedule.player_two)
+            .ok_or(ArenaError::UnknownTournamentPlayer(schedule.player_two))?
+            .clone();
+        let mut config = ArenaConfig::one_v_one(left.clone(), right.clone());
+        config.fixed_ticks = self.fixed_ticks;
+        let arena = ArenaMatch::new(config)?;
+        let mut executors: HashMap<PlayerId, Box<dyn PlayerExecutor>> = HashMap::new();
+        executors.insert(left.player_id, executor_factory(left.player_id, &left));
+        executors.insert(right.player_id, executor_factory(right.player_id, &right));
+        let replay = arena.run(executors)?;
+        let winner = tournament_winner_from_replay(&schedule, &replay);
+        self.record_match_result(schedule, winner, replay)
+    }
+
+    pub fn execute_all<F>(
+        &mut self,
+        mut executor_factory: F,
+    ) -> Result<Option<PlayerId>, ArenaError>
+    where
+        F: FnMut(PlayerId, &ArenaPlayerCode) -> Box<dyn PlayerExecutor>,
+    {
+        while self.champion.is_none() {
+            if self.scheduled.is_empty() {
+                self.schedule_next_round()?;
+                if self.champion.is_some() {
+                    break;
+                }
+            }
+            while !self.scheduled.is_empty() {
+                self.execute_next_match(&mut executor_factory)?;
+            }
+        }
+        Ok(self.champion)
+    }
+
+    fn code_for(&self, player_id: PlayerId) -> Option<&ArenaPlayerCode> {
+        self.seeds
+            .iter()
+            .find(|seed| seed.code.player_id == player_id)
+            .map(|seed| &seed.code)
+    }
+}
+
+fn tournament_winner_from_replay(
+    schedule: &TournamentMatchSchedule,
+    replay: &ArenaReplay,
+) -> PlayerId {
+    let (p1_commands, p2_commands) = replay.traces.iter().fold((0_u64, 0_u64), |mut acc, trace| {
+        if trace.player_id == schedule.player_one {
+            acc.0 = acc.0.saturating_add(trace.metrics.accepted_commands);
+        } else if trace.player_id == schedule.player_two {
+            acc.1 = acc.1.saturating_add(trace.metrics.accepted_commands);
+        }
+        acc
+    });
+
+    if p2_commands > p1_commands {
+        schedule.player_two
+    } else {
+        schedule.player_one
+    }
 }
 
 pub struct ArenaMatch {
@@ -301,5 +574,50 @@ mod tests {
         executors.insert(1, Box::<IdleExecutor>::default());
 
         assert_eq!(arena.run(executors), Err(ArenaError::MissingExecutor(2)));
+    }
+
+    #[test]
+    fn eight_player_single_elimination_bracket_completes() {
+        let players = (1..=8).map(code).collect::<Vec<_>>();
+        let mut bracket =
+            TournamentBracket::seed(TournamentElimination::Single, players, 2).unwrap();
+
+        let first_round = bracket.schedule_next_round().unwrap();
+        assert_eq!(first_round.len(), 4);
+        assert_eq!(first_round[0].player_one, 1);
+        assert_eq!(first_round[0].player_two, 2);
+
+        let champion = bracket
+            .execute_all(|_, _| Box::<IdleExecutor>::default())
+            .unwrap();
+        assert_eq!(champion, Some(1));
+        assert_eq!(bracket.completed.len(), 7);
+        assert!(bracket.scheduled.is_empty());
+        assert_eq!(bracket.losses.get(&2), Some(&1));
+        assert_eq!(bracket.losses.get(&8), Some(&1));
+        assert_eq!(bracket.completed[0].replay.traces.len(), 2);
+    }
+
+    #[test]
+    fn double_elimination_requires_second_loss() {
+        let players = (1..=4).map(code).collect::<Vec<_>>();
+        let mut bracket =
+            TournamentBracket::seed(TournamentElimination::Double, players, 1).unwrap();
+
+        let champion = bracket
+            .execute_all(|_, _| Box::<IdleExecutor>::default())
+            .unwrap();
+
+        assert_eq!(champion, Some(1));
+        assert_eq!(bracket.losses.get(&1), Some(&0));
+        assert!(
+            bracket
+                .losses
+                .values()
+                .filter(|losses| **losses >= 2)
+                .count()
+                >= 3
+        );
+        assert!(bracket.completed.len() >= 5);
     }
 }
