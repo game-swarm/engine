@@ -455,7 +455,12 @@ impl ResistanceRegistry {
         }
     }
 
-    pub fn set_component_multiplier(&mut self, damage_type: &str, component: &str, multiplier: f64) {
+    pub fn set_component_multiplier(
+        &mut self,
+        damage_type: &str,
+        component: &str,
+        multiplier: f64,
+    ) {
         self.add_damage_type(damage_type);
         if let Some(def) = self.damage_types.get_mut(damage_type) {
             def.component_multipliers
@@ -463,7 +468,12 @@ impl ResistanceRegistry {
         }
     }
 
-    pub fn set_attribute_multiplier(&mut self, damage_type: &str, attribute: &str, multiplier: f64) {
+    pub fn set_attribute_multiplier(
+        &mut self,
+        damage_type: &str,
+        attribute: &str,
+        multiplier: f64,
+    ) {
         self.add_damage_type(damage_type);
         if let Some(def) = self.damage_types.get_mut(damage_type) {
             def.attribute_multipliers

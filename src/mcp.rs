@@ -677,6 +677,46 @@ pub struct DryRunCommandsResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SimulateParams {
+    pub snapshot: VisibleWorldSnapshot,
+    #[serde(alias = "future_ticks")]
+    pub ticks: Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulateResult {
+    pub player_id: PlayerId,
+    pub room_id: u32,
+    pub from_tick: Tick,
+    pub to_tick: Tick,
+    pub ticks: Tick,
+    pub predicted_snapshot: VisibleWorldSnapshot,
+    pub diff: SimulatedStateDiff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulatedStateDiff {
+    pub tick_before: Tick,
+    pub tick_after: Tick,
+    pub local_storage_before: BTreeMap<String, u32>,
+    pub local_storage_after: BTreeMap<String, u32>,
+    pub global_storage_before: BTreeMap<String, u32>,
+    pub global_storage_after: BTreeMap<String, u32>,
+    pub pending_global_transfers_before: Vec<VisiblePendingGlobalTransfer>,
+    pub pending_global_transfers_after: Vec<VisiblePendingGlobalTransfer>,
+    pub entity_changes: Vec<SimulatedEntityChange>,
+    pub state_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulatedEntityChange {
+    pub id: ObjectId,
+    pub before: Option<VisibleEntity>,
+    pub after: Option<VisibleEntity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DocsParams {
     #[serde(default = "default_docs_topic")]
     pub topic: String,
@@ -821,6 +861,12 @@ impl McpServer {
                 let params: DryRunCommandsParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
                 serde_json::to_value(swarm_dry_run_commands(world, context, params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_simulate" => {
+                let params: SimulateParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_simulate(params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_get_docs" => {
@@ -1509,6 +1555,10 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Dry-run commands without mutating the world".to_string(),
         },
         ToolInfo {
+            name: "swarm_simulate".to_string(),
+            description: "Predict future ticks from a visible world snapshot without mutating live state".to_string(),
+        },
+        ToolInfo {
             name: "swarm_get_docs".to_string(),
             description: "Get Swarm documentation and reference material".to_string(),
         },
@@ -1571,6 +1621,7 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_tournament_status"
         | "swarm_match_result"
         | "swarm_oauth2_login" => Some(CommandSource::McpQuery),
+        "swarm_simulate" => Some(CommandSource::Simulate),
         _ => None,
     }
 }
@@ -1591,6 +1642,7 @@ fn tournament_tool_infos() -> Vec<ToolInfo> {
                     | "swarm_inspect_entity"
                     | "swarm_profile"
                     | "swarm_dry_run_commands"
+                    | "swarm_simulate"
                     | "swarm_get_docs"
                     | "swarm_deploy"
                     | "swarm_validate_module"
@@ -2106,6 +2158,139 @@ pub fn swarm_dry_run_commands(
         state_checksum_after,
         mutated_world: state_checksum_before != state_checksum_after,
     }
+}
+
+pub fn swarm_simulate(params: SimulateParams) -> Result<SimulateResult, McpError> {
+    const MAX_SIMULATE_TICKS: Tick = 10_000;
+    if params.ticks > MAX_SIMULATE_TICKS {
+        return Err(McpError::invalid_params(format!(
+            "ticks must be <= {MAX_SIMULATE_TICKS}"
+        )));
+    }
+
+    let before = params.snapshot;
+    let mut after = before.clone();
+    after.tick = before.tick.saturating_add(params.ticks);
+
+    simulate_visible_snapshot(&mut after, params.ticks);
+
+    let diff = SimulatedStateDiff {
+        tick_before: before.tick,
+        tick_after: after.tick,
+        local_storage_before: before.local_storage.clone(),
+        local_storage_after: after.local_storage.clone(),
+        global_storage_before: before.global_storage.clone(),
+        global_storage_after: after.global_storage.clone(),
+        pending_global_transfers_before: before.pending_global_transfers.clone(),
+        pending_global_transfers_after: after.pending_global_transfers.clone(),
+        entity_changes: visible_entity_diff(&before.entities, &after.entities),
+        state_changed: before != after,
+    };
+
+    Ok(SimulateResult {
+        player_id: after.player_id,
+        room_id: after.room_id,
+        from_tick: before.tick,
+        to_tick: after.tick,
+        ticks: params.ticks,
+        predicted_snapshot: after,
+        diff,
+    })
+}
+
+fn simulate_visible_snapshot(snapshot: &mut VisibleWorldSnapshot, ticks: Tick) {
+    if ticks == 0 {
+        return;
+    }
+
+    for entity in &mut snapshot.entities {
+        simulate_visible_entity(entity, ticks);
+    }
+
+    let mut remaining_transfers = Vec::new();
+    for mut transfer in std::mem::take(&mut snapshot.pending_global_transfers) {
+        transfer.remaining_ticks = transfer.remaining_ticks.saturating_sub(ticks);
+        if transfer.remaining_ticks == 0 {
+            match transfer.direction.as_str() {
+                "ToGlobal" => add_simulated_resource(
+                    &mut snapshot.global_storage,
+                    transfer.resource,
+                    transfer.deliver_amount,
+                ),
+                "FromGlobal" => add_simulated_resource(
+                    &mut snapshot.local_storage,
+                    transfer.resource,
+                    transfer.deliver_amount,
+                ),
+                _ => remaining_transfers.push(transfer),
+            }
+        } else {
+            remaining_transfers.push(transfer);
+        }
+    }
+    snapshot.pending_global_transfers = remaining_transfers;
+}
+
+fn simulate_visible_entity(entity: &mut VisibleEntity, ticks: Tick) {
+    let ticks = u32::try_from(ticks).unwrap_or(u32::MAX);
+    match entity {
+        VisibleEntity::Drone(drone) => {
+            drone.fatigue = drone.fatigue.saturating_sub(ticks);
+        }
+        VisibleEntity::Structure(structure) => {
+            structure.cooldown = structure.cooldown.saturating_sub(ticks);
+        }
+        VisibleEntity::Source(source) => {
+            source.ticks_to_regeneration = source.ticks_to_regeneration.saturating_sub(ticks);
+        }
+        VisibleEntity::Resource(_) => {}
+        VisibleEntity::Controller(controller) => {
+            controller.safe_mode = controller.safe_mode.saturating_sub(ticks);
+        }
+    }
+}
+
+fn add_simulated_resource(storage: &mut BTreeMap<String, u32>, resource: String, amount: u32) {
+    let current = storage.entry(resource).or_default();
+    *current = current.saturating_add(amount);
+}
+
+fn visible_entity_diff(
+    before: &[VisibleEntity],
+    after: &[VisibleEntity],
+) -> Vec<SimulatedEntityChange> {
+    fn entity_id(entity: &VisibleEntity) -> ObjectId {
+        match entity {
+            VisibleEntity::Drone(drone) => drone.id,
+            VisibleEntity::Structure(structure) => structure.id,
+            VisibleEntity::Source(source) => source.id,
+            VisibleEntity::Resource(resource) => resource.id,
+            VisibleEntity::Controller(controller) => controller.id,
+        }
+    }
+
+    let before_by_id = before
+        .iter()
+        .cloned()
+        .map(|entity| (entity_id(&entity), entity))
+        .collect::<BTreeMap<_, _>>();
+    let after_by_id = after
+        .iter()
+        .cloned()
+        .map(|entity| (entity_id(&entity), entity))
+        .collect::<BTreeMap<_, _>>();
+    before_by_id
+        .keys()
+        .chain(after_by_id.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|id| {
+            let before = before_by_id.get(&id).cloned();
+            let after = after_by_id.get(&id).cloned();
+            (before != after).then_some(SimulatedEntityChange { id, before, after })
+        })
+        .collect()
 }
 
 pub fn swarm_get_docs(params: DocsParams) -> DocsResult {
@@ -2895,30 +3080,6 @@ fn base64_value(byte: u8) -> Result<u8, McpError> {
     }
 }
 
-// ── G11: swarm_simulate ──────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SimulateParams {
-    pub ticks: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SimulateResult {
-    pub message: String,
-    pub simulated_ticks: u32,
-}
-
-pub fn swarm_simulate(
-    _world: &SwarmWorld,
-    _context: McpContext,
-    params: SimulateParams,
-) -> SimulateResult {
-    SimulateResult {
-        message: format!("Offline simulation for {} ticks registered", params.ticks),
-        simulated_ticks: params.ticks,
-    }
-}
-
 // ── G12: swarm_inspect_room ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2935,38 +3096,50 @@ pub struct RoomInspectResult {
 }
 
 pub fn swarm_inspect_room(
-    world: &SwarmWorld,
+    world: &mut SwarmWorld,
     context: McpContext,
     params: InspectRoomParams,
 ) -> Result<RoomInspectResult, McpError> {
-    let world_inner = world.app.world();
+    let visible = crate::visibility::visible_positions(world.app.world_mut(), context.player_id);
+    let world_inner = world.app.world_mut();
     let mut drone_count = 0u32;
     let mut structure_count = 0u32;
     let mut controller_owner = None;
 
     let room = crate::components::RoomId(params.room_id);
-    let visible = crate::visibility::visible_positions(world_inner, context.player_id);
 
     // Count drones in room that are visible
-    let drones = world_inner.query::<(Entity, &crate::components::Drone, &crate::components::Position)>();
+    let mut drones = world_inner.query::<(
+        Entity,
+        &crate::components::Drone,
+        &crate::components::Position,
+    )>();
     for (_e, _d, pos) in drones.iter(world_inner) {
-        if pos.room == room && visible.contains(&(pos.x, pos.y)) {
+        if pos.room == room && visible.contains(&(pos.room, pos.x, pos.y)) {
             drone_count += 1;
         }
     }
 
     // Count structures in room
-    let structures = world_inner.query::<(Entity, &crate::components::Structure, &crate::components::Position)>();
-    for (_e, s, pos) in structures.iter(world_inner) {
-        if pos.room == room && visible.contains(&(pos.x, pos.y)) {
+    let mut structures = world_inner.query::<(
+        Entity,
+        &crate::components::Structure,
+        &crate::components::Position,
+    )>();
+    for (_e, _s, pos) in structures.iter(world_inner) {
+        if pos.room == room && visible.contains(&(pos.room, pos.x, pos.y)) {
             structure_count += 1;
         }
     }
 
     // Find controller
-    let controllers = world_inner.query::<(Entity, &crate::components::Controller, &crate::components::Position)>();
+    let mut controllers = world_inner.query::<(
+        Entity,
+        &crate::components::Controller,
+        &crate::components::Position,
+    )>();
     for (_e, c, pos) in controllers.iter(world_inner) {
-        if pos.room == room && visible.contains(&(pos.x, pos.y)) {
+        if pos.room == room && visible.contains(&(pos.room, pos.x, pos.y)) {
             controller_owner = c.owner;
             break;
         }
@@ -3023,7 +3196,8 @@ pub fn swarm_get_replay(
         from_tick: params.from_tick,
         to_tick: params.to_tick,
         tick_count: (params.to_tick.saturating_sub(params.from_tick)) as u32,
-        message: "Replay data retrieval registered — requires keyframe+delta storage integration".to_string(),
+        message: "Replay data retrieval registered — requires keyframe+delta storage integration"
+            .to_string(),
     })
 }
 
@@ -3095,6 +3269,172 @@ mod tests {
             version_tag: "v1".to_string(),
             room_id: 0,
         }
+    }
+
+    fn sample_simulation_snapshot() -> VisibleWorldSnapshot {
+        VisibleWorldSnapshot {
+            tick: 5,
+            player_id: 1,
+            room_id: 0,
+            visibility_radius: VISIBILITY_RADIUS,
+            visible_tiles: Vec::new(),
+            entities: vec![
+                VisibleEntity::Drone(VisibleDrone {
+                    id: 42,
+                    owner: 1,
+                    position: VisiblePosition {
+                        x: 10,
+                        y: 10,
+                        room_id: 0,
+                    },
+                    body: vec![BodyPart::Move],
+                    carry: BTreeMap::new(),
+                    carry_capacity: 50,
+                    fatigue: 3,
+                    hits: 100,
+                    hits_max: 100,
+                    spawning: false,
+                }),
+                VisibleEntity::Structure(VisibleStructure {
+                    id: 43,
+                    structure_type: StructureType::Spawn,
+                    owner: Some(1),
+                    position: VisiblePosition {
+                        x: 11,
+                        y: 10,
+                        room_id: 0,
+                    },
+                    hits: 5_000,
+                    hits_max: 5_000,
+                    energy: Some(100),
+                    energy_capacity: Some(300),
+                    cooldown: 4,
+                }),
+                VisibleEntity::Source(VisibleSource {
+                    id: 44,
+                    position: VisiblePosition {
+                        x: 12,
+                        y: 10,
+                        room_id: 0,
+                    },
+                    produces: BTreeMap::from([("Energy".to_string(), 100)]),
+                    capacity: 500,
+                    ticks_to_regeneration: 5,
+                }),
+            ],
+            local_storage: BTreeMap::from([("Energy".to_string(), 100)]),
+            global_storage: BTreeMap::new(),
+            pending_global_transfers: vec![VisiblePendingGlobalTransfer {
+                player_id: 1,
+                direction: "ToGlobal".to_string(),
+                resource: "Energy".to_string(),
+                amount: 50,
+                deliver_amount: 49,
+                remaining_ticks: 3,
+            }],
+            market_orders: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn simulate_is_registered_as_simulate_source_tool() {
+        assert_eq!(
+            mcp_tool_source("swarm_simulate"),
+            Some(CommandSource::Simulate)
+        );
+        assert!(
+            mcp_tool_infos()
+                .iter()
+                .any(|tool| tool.name == "swarm_simulate")
+        );
+    }
+
+    #[test]
+    fn simulate_advances_snapshot_tick_and_returns_diff() {
+        let result = swarm_simulate(SimulateParams {
+            snapshot: sample_simulation_snapshot(),
+            ticks: 2,
+        })
+        .unwrap();
+
+        assert_eq!(result.from_tick, 5);
+        assert_eq!(result.to_tick, 7);
+        assert_eq!(result.predicted_snapshot.tick, 7);
+        assert_eq!(
+            result.predicted_snapshot.pending_global_transfers[0].remaining_ticks,
+            1
+        );
+        assert_eq!(result.diff.tick_before, 5);
+        assert_eq!(result.diff.tick_after, 7);
+        assert!(result.diff.state_changed);
+        assert_eq!(result.diff.entity_changes.len(), 3);
+        assert!(matches!(
+            &result.predicted_snapshot.entities[0],
+            VisibleEntity::Drone(VisibleDrone { fatigue: 1, .. })
+        ));
+        assert!(matches!(
+            &result.predicted_snapshot.entities[1],
+            VisibleEntity::Structure(VisibleStructure { cooldown: 2, .. })
+        ));
+        assert!(matches!(
+            &result.predicted_snapshot.entities[2],
+            VisibleEntity::Source(VisibleSource {
+                ticks_to_regeneration: 3,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn simulate_delivers_completed_transfer_into_predicted_storage_diff() {
+        let result = swarm_simulate(SimulateParams {
+            snapshot: sample_simulation_snapshot(),
+            ticks: 3,
+        })
+        .unwrap();
+
+        assert!(
+            result
+                .predicted_snapshot
+                .pending_global_transfers
+                .is_empty()
+        );
+        assert_eq!(
+            result.predicted_snapshot.global_storage.get("Energy"),
+            Some(&49)
+        );
+        assert_eq!(result.diff.pending_global_transfers_after, Vec::new());
+        assert_ne!(
+            result.diff.global_storage_before,
+            result.diff.global_storage_after
+        );
+    }
+
+    #[test]
+    fn simulate_call_tool_does_not_mutate_live_world() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let before = world.state_checksum();
+        let mut server = McpServer::new();
+        let value = server
+            .call_tool(
+                &mut world,
+                McpContext {
+                    player_id: 1,
+                    tick: 5,
+                },
+                "swarm_simulate",
+                serde_json::to_value(SimulateParams {
+                    snapshot: sample_simulation_snapshot(),
+                    ticks: 1,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let result: SimulateResult = serde_json::from_value(value).unwrap();
+
+        assert_eq!(result.to_tick, 6);
+        assert_eq!(world.state_checksum(), before);
     }
 
     #[test]

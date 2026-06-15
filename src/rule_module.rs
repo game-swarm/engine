@@ -744,9 +744,12 @@ fn apply_rule_actions(world: &mut World, actions: &[RuleAction], report: &mut Rh
                 key,
                 multiplier,
             } => {
-                world
-                    .resource_mut::<ResistanceRegistry>()
-                    .set_resistance(damage_type, layer, key, *multiplier);
+                world.resource_mut::<ResistanceRegistry>().set_resistance(
+                    damage_type,
+                    layer,
+                    key,
+                    *multiplier,
+                );
                 report.actions_applied += 1;
             }
         }

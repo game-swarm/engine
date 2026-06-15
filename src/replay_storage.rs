@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::command::Tick;
-use crate::components::PlayerId;
 use crate::world::WorldConfig;
 
 pub const DEFAULT_KEYFRAME_INTERVAL: Tick = 100;
@@ -109,6 +108,31 @@ pub enum EntityChange {
     Removed {
         entity_id: u64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldDelta {
+    pub from_tick: Tick,
+    pub to_tick: Tick,
+    pub entity_changes: Vec<EntityChange>,
+    pub commands: Vec<crate::command::RawCommand>,
+}
+
+impl WorldDelta {
+    pub fn between(
+        _before: &crate::tick::WorldSnapshot,
+        _after: &crate::tick::WorldSnapshot,
+        from_tick: Tick,
+        to_tick: Tick,
+        commands: Vec<crate::command::RawCommand>,
+    ) -> Self {
+        Self {
+            from_tick,
+            to_tick,
+            entity_changes: Vec::new(),
+            commands,
+        }
+    }
 }
 
 // ── Replay Error ──────────────────────────────────────────────────────

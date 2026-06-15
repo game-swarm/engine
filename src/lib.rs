@@ -488,6 +488,9 @@ mod tests {
                 safe_mode: 0,
                 safe_mode_available: 1,
                 safe_mode_cooldown: 0,
+                repair_capacity: 0,
+                repair_range: 0,
+                repair_per_drone: 0,
             },
         ));
         assert_ne!(controller_checksum, second.state_checksum());

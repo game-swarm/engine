@@ -151,8 +151,8 @@ pub fn final_damage_multiplier(
         return 0.0;
     }
     let component_mult = resistance_registry.component_multiplier(damage_type, body);
-    let attribute_mult = resistance_registry.attribute_multiplier(damage_type, attrs)
-        * fortify_multiplier(attrs);
+    let attribute_mult =
+        resistance_registry.attribute_multiplier(damage_type, attrs) * fortify_multiplier(attrs);
     component_mult * attribute_mult
 }
 
@@ -178,7 +178,10 @@ pub fn combat_system(
     damage_registry: Res<DamageTypeRegistry>,
     resistance_registry: Res<ResistanceRegistry>,
     mut drones: Query<(&mut Drone, Option<&Attributes>, Option<&EntityFlags>)>,
-    mut structures: Query<(&mut Structure, Option<&Attributes>, Option<&EntityFlags>), Without<Drone>>,
+    mut structures: Query<
+        (&mut Structure, Option<&Attributes>, Option<&EntityFlags>),
+        Without<Drone>,
+    >,
 ) {
     // --- Damage phase (first) ---
     // Accumulate total damage per target, then apply in deterministic order.
@@ -238,7 +241,7 @@ pub fn combat_system(
     heal_by_target.sort_keys();
 
     for (entity, amount) in &heal_by_target {
-        if let Ok((mut drone, _)) = drones.get_mut(*entity) {
+        if let Ok((mut drone, _, _)) = drones.get_mut(*entity) {
             drone.hits = (drone.hits + amount).min(drone.hits_max);
         }
     }

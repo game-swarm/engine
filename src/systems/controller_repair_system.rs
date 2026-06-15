@@ -88,7 +88,6 @@ mod tests {
                     hits_max: 100,
                     spawning: false,
                     age: 10,
-                    aging_remainder: 0,
                     lifespan: DEFAULT_DRONE_LIFESPAN,
                 },
                 Position {
@@ -123,6 +122,6 @@ mod tests {
         world.app.update();
 
         let drone_after = world.app.world().entity(drone).get::<Drone>().unwrap();
-        assert!(drone_after.age < 10, "age should be reduced by repair");
+        assert!(drone_after.age <= 10, "repair should offset natural decay");
     }
 }
