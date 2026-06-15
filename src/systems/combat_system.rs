@@ -133,6 +133,35 @@ pub fn heal_amount(parts: usize) -> u32 {
     parts as u32 * DEFAULT_HEAL_AMOUNT
 }
 
+pub fn final_damage_multiplier(
+    body: Option<&[BodyPart]>,
+    attrs: Option<&Attributes>,
+    damage_type: &str,
+    body_registry: &BodyPartRegistry,
+    damage_registry: &DamageTypeRegistry,
+) -> f64 {
+    let body_mult = body.unwrap_or(&[]).iter().fold(1.0, |m, p| {
+        m * (1.0 - body_registry.resistance(*p, damage_type))
+    });
+    body_mult * damage_registry.attribute_multiplier(damage_type, attrs) * fortify_multiplier(attrs)
+}
+
+fn fortify_multiplier(attrs: Option<&Attributes>) -> f64 {
+    attrs
+        .map(|attrs| {
+            if attrs
+                .0
+                .iter()
+                .any(|attr| attr == "Fortified" || attr.starts_with("Fortified:"))
+            {
+                0.5
+            } else {
+                1.0
+            }
+        })
+        .unwrap_or(1.0)
+}
+
 pub fn combat_system(
     mut combat: ResMut<PendingCombat>,
     body_registry: Res<BodyPartRegistry>,
@@ -161,18 +190,21 @@ pub fn combat_system(
     for (entity, damages) in &damage_by_target {
         if let Ok((mut drone, attrs)) = drones.get_mut(*entity) {
             let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
-                let body_mult = drone
-                    .body
-                    .iter()
-                    .fold(1.0, |m, p| m * (1.0 - body_registry.resistance(*p, dt)));
-                let attr_mult = damage_registry.attribute_multiplier(dt, attrs);
-                acc.saturating_add(((*amount as f64) * body_mult * attr_mult).floor() as u32)
+                let multiplier = final_damage_multiplier(
+                    Some(&drone.body),
+                    attrs,
+                    dt,
+                    &body_registry,
+                    &damage_registry,
+                );
+                acc.saturating_add(((*amount as f64) * multiplier).floor() as u32)
             });
             drone.hits = drone.hits.saturating_sub(total);
         } else if let Ok((mut structure, attrs)) = structures.get_mut(*entity) {
             let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
-                let attr_mult = damage_registry.attribute_multiplier(dt, attrs);
-                acc.saturating_add(((*amount as f64) * attr_mult).floor() as u32)
+                let multiplier =
+                    final_damage_multiplier(None, attrs, dt, &body_registry, &damage_registry);
+                acc.saturating_add(((*amount as f64) * multiplier).floor() as u32)
             });
             structure.hits = structure.hits.saturating_sub(total);
         }

@@ -26,6 +26,13 @@ pub const MAX_REFUND_PER_TICK: u64 = MAX_FUEL / 10;
 pub const MAX_NEXT_TICK_FUEL_BUDGET: u64 = MAX_FUEL + MAX_REFUND_PER_TICK;
 pub const MAX_RANGED_ATTACK_RANGE: u32 = 3;
 const ENERGY_RESOURCE: &str = "Energy";
+const DISRUPT_ENERGY_COST: u32 = 100;
+const DISRUPT_COOLDOWN_TICKS: u32 = 50;
+const FORTIFY_ENERGY_COST: u32 = 400;
+const FORTIFY_COOLDOWN_TICKS: u32 = 300;
+
+#[derive(Resource, Debug, Clone, Default)]
+struct CustomActionCooldowns(IndexMap<(ObjectId, String), Tick>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommandSource {
@@ -725,7 +732,14 @@ pub fn validate_command(
             object_id,
             target_id,
             ..
-        } => validate_custom_action(world, raw.player_id, action_type, *object_id, *target_id),
+        } => validate_custom_action(
+            world,
+            raw.player_id,
+            raw.tick,
+            action_type,
+            *object_id,
+            *target_id,
+        ),
     };
 
     if matches!(result, Err(RejectionReason::InsufficientResource { .. })) {
@@ -1262,6 +1276,7 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         } => apply_custom_action(
             world,
             command.raw.player_id,
+            command.raw.tick,
             &action_type,
             object_id,
             target_id,
@@ -1593,6 +1608,7 @@ fn validate_transfer_to_global(
 fn validate_custom_action(
     world: &mut World,
     player_id: PlayerId,
+    tick: Tick,
     action_type: &str,
     object_id: ObjectId,
     target_id: Option<ObjectId>,
@@ -1612,7 +1628,12 @@ fn validate_custom_action(
     if drone.fatigue > 0 {
         return Err(RejectionReason::Fatigued);
     }
-    ensure_player_resource_cost(world, player_id, &action.cost, false)?;
+    validate_special_action_requirements(&drone, &action)?;
+    if custom_action_on_cooldown(world, object_id, action_type, tick) {
+        return Err(RejectionReason::Fatigued);
+    }
+    let cost = custom_action_cost(&action);
+    ensure_player_resource_cost(world, player_id, &cost, false)?;
 
     let Some(target_id) = target_id else {
         return Ok(());
@@ -1620,7 +1641,7 @@ fn validate_custom_action(
     let (target_position, target_owner) = attackable_snapshot(world, target_id)?;
     match action.special_effect {
         Some(CustomActionSpecialEffect::Fortify) => {
-            if target_owner != Some(player_id) {
+            if target_owner.is_some() && target_owner != Some(player_id) {
                 return Err(RejectionReason::NotFriendly);
             }
         }
@@ -1861,12 +1882,21 @@ fn apply_resisted_damage(
             .map_err(|_| RejectionReason::ObjectNotFound)?;
         let attrs = entity_ref.get::<Attributes>();
         if let Some(drone) = entity_ref.get::<Drone>() {
-            let body_mult = drone.body.iter().fold(1.0, |m, p| {
-                m * (1.0 - body_registry.resistance(*p, damage_type))
-            });
-            body_mult * damage_registry.attribute_multiplier(damage_type, attrs)
+            crate::systems::combat_system::final_damage_multiplier(
+                Some(&drone.body),
+                attrs,
+                damage_type,
+                body_registry,
+                damage_registry,
+            )
         } else if entity_ref.get::<Structure>().is_some() {
-            damage_registry.attribute_multiplier(damage_type, attrs)
+            crate::systems::combat_system::final_damage_multiplier(
+                None,
+                attrs,
+                damage_type,
+                body_registry,
+                damage_registry,
+            )
         } else {
             return Err(RejectionReason::ObjectNotFound);
         }
@@ -2004,6 +2034,7 @@ fn apply_build(
 fn apply_custom_action(
     world: &mut World,
     player_id: PlayerId,
+    tick: Tick,
     action_type: &str,
     object_id: ObjectId,
     target_id: Option<ObjectId>,
@@ -2016,7 +2047,9 @@ fn apply_custom_action(
         .ok_or_else(|| RejectionReason::UnknownAction {
             action: action_type.to_string(),
         })?;
-    deduct_player_resource_cost(world, player_id, &action.cost, false);
+    let cost = custom_action_cost(&action);
+    deduct_player_resource_cost(world, player_id, &cost, false);
+    remember_custom_action_cooldown(world, object_id, action_type, tick, &action);
 
     match action.special_effect {
         Some(CustomActionSpecialEffect::HealSelf) => {
@@ -2059,18 +2092,158 @@ fn apply_custom_action(
             let target = entity(target_id)?;
             let mut entity_mut = world.entity_mut(target);
             if let Some(mut attrs) = entity_mut.get_mut::<Attributes>() {
-                if !attrs.0.iter().any(|attr| attr == "Shielded") {
-                    attrs.0.push("Shielded".to_string());
-                }
+                apply_fortify_attrs(&mut attrs.0);
             } else {
-                entity_mut.insert(Attributes(vec!["Shielded".to_string()]));
+                let mut attrs = Vec::new();
+                apply_fortify_attrs(&mut attrs);
+                entity_mut.insert(Attributes(attrs));
             }
         }
-        Some(CustomActionSpecialEffect::ScrambleCommands)
-        | Some(CustomActionSpecialEffect::Disrupt)
-        | None => {}
+        Some(CustomActionSpecialEffect::Disrupt) => {
+            let Some(target_id) = target_id else {
+                return Ok(());
+            };
+            apply_disrupt(world, target_id)?;
+        }
+        Some(CustomActionSpecialEffect::ScrambleCommands) | None => {}
     }
     Ok(())
+}
+
+fn validate_special_action_requirements(drone: &Drone, action: &CustomActionDef) -> CommandResult {
+    match action.special_effect {
+        Some(CustomActionSpecialEffect::Disrupt) => require_body(drone, BodyPart::Attack),
+        Some(CustomActionSpecialEffect::Fortify) => require_body(drone, BodyPart::Tough),
+        _ => Ok(()),
+    }
+}
+
+fn custom_action_cost(action: &CustomActionDef) -> ResourceCost {
+    let mut cost = action.cost.clone();
+    match action.special_effect {
+        Some(CustomActionSpecialEffect::Disrupt) => {
+            cost.insert(ENERGY_RESOURCE.to_string(), DISRUPT_ENERGY_COST);
+        }
+        Some(CustomActionSpecialEffect::Fortify) => {
+            cost.insert(ENERGY_RESOURCE.to_string(), FORTIFY_ENERGY_COST);
+        }
+        _ => {}
+    }
+    cost
+}
+
+fn custom_action_cooldown(action: &CustomActionDef) -> Option<u32> {
+    match action.special_effect {
+        Some(CustomActionSpecialEffect::Disrupt) => Some(DISRUPT_COOLDOWN_TICKS),
+        Some(CustomActionSpecialEffect::Fortify) => Some(FORTIFY_COOLDOWN_TICKS),
+        _ => action.cooldown,
+    }
+}
+
+fn custom_action_on_cooldown(
+    world: &World,
+    object_id: ObjectId,
+    action_type: &str,
+    tick: Tick,
+) -> bool {
+    world
+        .get_resource::<CustomActionCooldowns>()
+        .and_then(|cooldowns| {
+            cooldowns
+                .0
+                .get(&(object_id, action_type.to_string()))
+                .copied()
+        })
+        .is_some_and(|ready_tick| tick < ready_tick)
+}
+
+fn remember_custom_action_cooldown(
+    world: &mut World,
+    object_id: ObjectId,
+    action_type: &str,
+    tick: Tick,
+    action: &CustomActionDef,
+) {
+    let Some(cooldown) = custom_action_cooldown(action) else {
+        return;
+    };
+    if world.get_resource::<CustomActionCooldowns>().is_none() {
+        world.insert_resource(CustomActionCooldowns::default());
+    }
+    world.resource_mut::<CustomActionCooldowns>().0.insert(
+        (object_id, action_type.to_string()),
+        tick + cooldown as Tick,
+    );
+}
+
+fn apply_fortify_attrs(attrs: &mut Vec<String>) {
+    attrs.retain(|attr| !is_negative_status_attr(attr));
+    if !attrs.iter().any(|attr| attr == "Fortified") {
+        attrs.push("Fortified".to_string());
+    }
+}
+
+fn apply_disrupt(world: &mut World, target_id: ObjectId) -> CommandResult {
+    let target = entity(target_id)?;
+    let multiplier = sonic_effect_multiplier(world, target)?;
+    if multiplier <= 0.0 {
+        return Ok(());
+    }
+    let mut entity_mut = world.entity_mut(target);
+    if let Some(mut attrs) = entity_mut.get_mut::<Attributes>() {
+        attrs.0.retain(|attr| !is_interruptible_action_attr(attr));
+    }
+    if let Some(mut drone) = entity_mut.get_mut::<Drone>() {
+        drone.fatigue = drone.fatigue.max(1);
+    }
+    Ok(())
+}
+
+fn sonic_effect_multiplier(world: &World, target: Entity) -> Result<f64, RejectionReason> {
+    let body_registry = world.resource::<BodyPartRegistry>();
+    let damage_registry = world.resource::<DamageTypeRegistry>();
+    let entity_ref = world
+        .get_entity(target)
+        .map_err(|_| RejectionReason::ObjectNotFound)?;
+    let attrs = entity_ref.get::<Attributes>();
+    if let Some(drone) = entity_ref.get::<Drone>() {
+        Ok(crate::systems::combat_system::final_damage_multiplier(
+            Some(&drone.body),
+            attrs,
+            DamageType::Sonic.as_str(),
+            body_registry,
+            damage_registry,
+        ))
+    } else if entity_ref.get::<Structure>().is_some() {
+        Ok(crate::systems::combat_system::final_damage_multiplier(
+            None,
+            attrs,
+            DamageType::Sonic.as_str(),
+            body_registry,
+            damage_registry,
+        ))
+    } else {
+        Err(RejectionReason::ObjectNotFound)
+    }
+}
+
+fn is_negative_status_attr(attr: &str) -> bool {
+    matches!(
+        attr,
+        "Disrupted" | "Scrambled" | "Drained" | "Overloaded" | "Debilitated" | "Leeching"
+    ) || attr.starts_with("Disrupt:")
+        || attr.starts_with("Scramble:")
+        || attr.starts_with("Drain:")
+        || attr.starts_with("Overload:")
+        || attr.starts_with("Debilitate:")
+        || attr.starts_with("Leech:")
+}
+
+fn is_interruptible_action_attr(attr: &str) -> bool {
+    matches!(attr, "Draining" | "Hacking" | "Channeling")
+        || attr.starts_with("CurrentAction:")
+        || attr.starts_with("Channeling:")
+        || attr.starts_with("ContinuousAction:")
 }
 
 fn apply_transfer_to_global(
