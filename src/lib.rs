@@ -1,4 +1,5 @@
 pub mod arena;
+pub mod ranking;
 pub mod command;
 pub mod components;
 pub mod hot_cache;
