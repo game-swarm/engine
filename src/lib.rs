@@ -40,7 +40,8 @@ mod tests {
     use indexmap::IndexMap;
 
     use crate::{
-        command::*, components::*, create_world, create_world_with_mode, resources::*, systems::*,
+        command::*, components::*, create_world, create_world_with_mode, onboarding::*,
+        resources::*, systems::*,
     };
 
     fn drone_count(world: &mut crate::SwarmWorld) -> usize {
@@ -675,6 +676,13 @@ mod tests {
         assert_eq!(default_settings.mode, WorldMode::Default);
         assert_eq!(default_settings.tick_interval_ms, DEFAULT_TICK_INTERVAL_MS);
         assert_eq!(default_settings.namespace, "default");
+        assert!(
+            !default_world
+                .app
+                .world()
+                .resource::<OnboardingConfig>()
+                .enabled
+        );
 
         let tutorial_settings = tutorial_world.app.world().resource::<WorldSettings>();
         assert_eq!(tutorial_settings.mode, WorldMode::Tutorial);
@@ -683,6 +691,13 @@ mod tests {
             TUTORIAL_TICK_INTERVAL_MS
         );
         assert!(tutorial_settings.namespace.starts_with("tutorial_"));
+        assert!(
+            tutorial_world
+                .app
+                .world()
+                .resource::<OnboardingConfig>()
+                .enabled
+        );
 
         let tutorial_rooms = &tutorial_world.app.world().resource::<RoomTerrains>().0;
         assert_eq!(tutorial_rooms.len(), 1);
@@ -769,6 +784,101 @@ mod tests {
         };
         let tutorial_raw = source_gate(1, 1, CommandSource::Tutorial, tutorial_intent).unwrap();
         assert!(validate_command(tutorial_world.app.world_mut(), tutorial_raw).is_ok());
+    }
+
+    #[test]
+    fn tutorial_onboarding_records_successful_gameplay_events() {
+        let mut world = create_world_with_mode(WorldMode::Tutorial);
+        let drone = world.spawn_drone(1, 24, 25, vec![BodyPart::Work, BodyPart::Carry]);
+        let source_id = first_source_id(&mut world);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::Harvest {
+                object_id: object_id(drone),
+                target_id: source_id,
+                resource: None,
+            },
+        )
+        .unwrap();
+        submit(
+            &mut world,
+            1,
+            2,
+            CommandAction::Build {
+                object_id: object_id(drone),
+                x: 23,
+                y: 25,
+                structure: StructureType::Extension,
+            },
+        )
+        .unwrap();
+        world.run_tick();
+
+        let progress = world.app.world().resource::<OnboardingProgress>();
+        assert!(progress.is_unlocked(OnboardingAchievementId::FirstSpawn));
+        assert!(progress.is_unlocked(OnboardingAchievementId::FirstHarvestOrCollection));
+        assert!(progress.is_unlocked(OnboardingAchievementId::FirstBuild));
+        assert_eq!(progress.completed_count(), 3);
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<bevy::prelude::Events<OnboardingSwarmEvent>>()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn tutorial_onboarding_records_insufficient_resource_rejection() {
+        let mut world = create_world_with_mode(WorldMode::Tutorial);
+        let spawn = spawn_structure(&mut world, Some(1), 10, 10, 0, 300, 0);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::SpawnDrone {
+                    spawn_id: object_id(spawn),
+                    body: vec![BodyPart::Move],
+                },
+            ),
+            Err(RejectionReason::InsufficientResource {
+                resource: "Energy".to_string(),
+                required: 50,
+                available: 0,
+            })
+        );
+        world.run_tick();
+
+        let progress = world.app.world().resource::<OnboardingProgress>();
+        assert!(progress.is_unlocked(OnboardingAchievementId::ResourceBottleneckExplanation));
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<bevy::prelude::Events<OnboardingSwarmEvent>>()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn onboarding_records_replay_and_arena_completion() {
+        let mut world = create_world_with_mode(WorldMode::Tutorial);
+
+        world.record_replay_completed();
+        world.record_arena_completed();
+        world.run_tick();
+
+        let progress = world.app.world().resource::<OnboardingProgress>();
+        assert!(progress.is_unlocked(OnboardingAchievementId::Replay));
+        assert!(progress.is_unlocked(OnboardingAchievementId::Arena));
+        assert_eq!(progress.completed_count(), 2);
     }
 
     #[test]

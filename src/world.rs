@@ -7,6 +7,10 @@ use crate::command::{
 };
 use crate::components::*;
 use crate::hot_cache::{InMemoryDragonfly, InMemoryFoundationDb};
+use crate::onboarding::{
+    OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
+    send_onboarding_event,
+};
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::resources::{
     GlobalStorageConfig, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage,
@@ -66,6 +70,7 @@ impl SwarmWorld {
             .id();
         let mut counts = self.app.world_mut().resource_mut::<RoomDroneCounts>();
         *counts.0.entry((position.room, owner)).or_default() += 1;
+        send_onboarding_event(self.app.world_mut(), OnboardingEvent::DroneSpawned);
         entity
     }
 
@@ -169,10 +174,23 @@ impl SwarmWorld {
         player_two: PlayerId,
         outcome: MatchOutcome,
     ) -> Option<(LeaderboardEntry, LeaderboardEntry)> {
-        self.app
+        let result = self
+            .app
             .world_mut()
             .resource_mut::<RankingState>()
-            .record_match(tick, player_one, player_two, outcome)
+            .record_match(tick, player_one, player_two, outcome);
+        if result.is_some() {
+            send_onboarding_event(self.app.world_mut(), OnboardingEvent::ArenaCompleted);
+        }
+        result
+    }
+
+    pub fn record_replay_completed(&mut self) {
+        send_onboarding_event(self.app.world_mut(), OnboardingEvent::ReplayCompleted);
+    }
+
+    pub fn record_arena_completed(&mut self) {
+        send_onboarding_event(self.app.world_mut(), OnboardingEvent::ArenaCompleted);
     }
 
     pub fn leaderboard(&self) -> Vec<LeaderboardEntry> {
@@ -202,6 +220,10 @@ pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
     app.init_resource::<InMemoryFoundationDb>();
     app.init_resource::<InMemoryDragonfly>();
     app.init_resource::<RankingState>();
+    app.insert_resource(OnboardingConfig::for_mode(mode));
+    app.init_resource::<OnboardingProgress>();
+    app.add_event::<OnboardingEvent>();
+    app.add_event::<OnboardingSwarmEvent>();
 
     let namespace = match mode {
         WorldMode::Default => "default".to_string(),
@@ -236,6 +258,7 @@ pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
             decay_system,
             rhai_rule_module_tick_end_system,
             death_cleanup_system,
+            onboarding_system,
         )
             .chain(),
     );

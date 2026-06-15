@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::components::*;
+use crate::onboarding::{OnboardingEvent, send_onboarding_event};
 use crate::resources::{
     GlobalStorageConfig, GlobalTransferDirection, MarketConfig, MarketOrder, MarketOrders,
     PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
@@ -304,7 +305,7 @@ pub fn validate_command(
         return Err(RejectionReason::SourceNotAllowed);
     }
 
-    match &raw.action {
+    let result = match &raw.action {
         CommandAction::Move {
             object_id,
             direction,
@@ -379,7 +380,15 @@ pub fn validate_command(
         CommandAction::BuyMarketOrder { order_id } => {
             validate_buy_market_order(world, raw.player_id, *order_id)
         }
-    }?;
+    };
+
+    if matches!(result, Err(RejectionReason::InsufficientResource { .. })) {
+        send_onboarding_event(
+            world,
+            OnboardingEvent::ResourceBottleneckExplanationAvailable,
+        );
+    }
+    result?;
 
     Ok(ValidatedCommand { raw })
 }
@@ -1165,6 +1174,7 @@ fn apply_harvest(
         .carry
         .entry(resource)
         .or_default() += amount;
+    send_onboarding_event(world, OnboardingEvent::ResourceHarvested);
     Ok(())
 }
 
@@ -1178,7 +1188,9 @@ fn apply_transfer(
     let object = entity(object_id)?;
     let target = entity(target_id)?;
     take_from_drone(world, object, resource, amount);
-    add_to_target(world, target, resource, amount)
+    add_to_target(world, target, resource, amount)?;
+    send_onboarding_event(world, OnboardingEvent::ResourceCollected);
+    Ok(())
 }
 
 fn apply_withdraw(
@@ -1286,6 +1298,7 @@ fn apply_build(
         position,
         structure_defaults(structure_type, Some(player_id)),
     ));
+    send_onboarding_event(world, OnboardingEvent::StructureBuilt);
     Ok(())
 }
 

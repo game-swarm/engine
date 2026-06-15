@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
+use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::components::WorldMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OnboardingAchievementId {
@@ -20,7 +23,7 @@ pub struct OnboardingAchievement {
     pub description: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Event, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnboardingEvent {
     ResourceHarvested,
     ResourceCollected,
@@ -28,13 +31,35 @@ pub enum OnboardingEvent {
     StructureBuilt,
     ResourceBottleneckExplanationAvailable,
     ResourceBottleneckExplanationViewed,
-    ReplayAvailable,
-    ReplayViewed,
-    ArenaAvailable,
-    ArenaTried,
+    ReplayCompleted,
+    ArenaCompleted,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct OnboardingSwarmEvent {
+    pub achievement: OnboardingAchievement,
+}
+
+#[derive(Resource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnboardingConfig {
+    pub enabled: bool,
+}
+
+impl Default for OnboardingConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+impl OnboardingConfig {
+    pub fn for_mode(mode: WorldMode) -> Self {
+        Self {
+            enabled: mode == WorldMode::Tutorial,
+        }
+    }
+}
+
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnboardingProgress {
     unlocked: BTreeSet<OnboardingAchievementId>,
 }
@@ -104,8 +129,8 @@ impl OnboardingEvent {
             | Self::ResourceBottleneckExplanationViewed => {
                 OnboardingAchievementId::ResourceBottleneckExplanation
             }
-            Self::ReplayAvailable | Self::ReplayViewed => OnboardingAchievementId::Replay,
-            Self::ArenaAvailable | Self::ArenaTried => OnboardingAchievementId::Arena,
+            Self::ReplayCompleted => OnboardingAchievementId::Replay,
+            Self::ArenaCompleted => OnboardingAchievementId::Arena,
         }
     }
 }
@@ -153,6 +178,35 @@ impl OnboardingProgress {
 
 pub fn onboarding_achievements() -> &'static [OnboardingAchievement; 6] {
     &ONBOARDING_ACHIEVEMENTS
+}
+
+pub fn onboarding_system(
+    config: Res<OnboardingConfig>,
+    mut progress: ResMut<OnboardingProgress>,
+    mut events: EventReader<OnboardingEvent>,
+    mut swarm_events: EventWriter<OnboardingSwarmEvent>,
+) {
+    if !config.enabled {
+        events.clear();
+        return;
+    }
+
+    for event in events.read() {
+        if let Some(achievement) = progress.record(*event) {
+            swarm_events.send(OnboardingSwarmEvent { achievement });
+        }
+    }
+}
+
+pub fn send_onboarding_event(world: &mut World, event: OnboardingEvent) {
+    if !world
+        .get_resource::<OnboardingConfig>()
+        .is_some_and(|config| config.enabled)
+    {
+        return;
+    }
+
+    world.send_event(event);
 }
 
 #[cfg(test)]
@@ -215,13 +269,13 @@ mod tests {
         let mut progress = OnboardingProgress::new();
 
         progress.record(OnboardingEvent::ResourceBottleneckExplanationAvailable);
-        progress.record(OnboardingEvent::ReplayViewed);
-        progress.record(OnboardingEvent::ArenaAvailable);
+        progress.record(OnboardingEvent::ReplayCompleted);
+        progress.record(OnboardingEvent::ArenaCompleted);
 
         assert!(progress.is_unlocked(OnboardingAchievementId::ResourceBottleneckExplanation));
         assert!(progress.is_unlocked(OnboardingAchievementId::Replay));
         assert!(progress.is_unlocked(OnboardingAchievementId::Arena));
-        assert_eq!(progress.record(OnboardingEvent::ArenaTried), None);
+        assert_eq!(progress.record(OnboardingEvent::ArenaCompleted), None);
     }
 
     #[test]
@@ -232,7 +286,7 @@ mod tests {
             OnboardingEvent::DroneSpawned,
             OnboardingEvent::StructureBuilt,
             OnboardingEvent::ResourceBottleneckExplanationViewed,
-            OnboardingEvent::ReplayAvailable,
+            OnboardingEvent::ReplayCompleted,
         ] {
             progress.record(event);
         }
@@ -243,7 +297,7 @@ mod tests {
             vec![OnboardingAchievementId::Arena.achievement()]
         );
 
-        progress.record(OnboardingEvent::ArenaTried);
+        progress.record(OnboardingEvent::ArenaCompleted);
 
         assert!(progress.is_complete());
         assert_eq!(progress.missing(), Vec::new());

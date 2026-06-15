@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{BodyPart, Drone, Owner, PlayerId, Position, RoomId, RoomTerrains};
+use crate::onboarding::OnboardingEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingSpawn {
@@ -23,6 +24,7 @@ pub fn spawn_system(
     mut queue: ResMut<PendingSpawnQueue>,
     mut room_counts: ResMut<RoomDroneCounts>,
     terrains: Res<RoomTerrains>,
+    mut onboarding_events: EventWriter<OnboardingEvent>,
 ) {
     let pending = std::mem::take(&mut queue.0);
     for spawn in pending {
@@ -39,5 +41,6 @@ pub fn spawn_system(
             .0
             .entry((spawn.position.room, spawn.owner))
             .or_default() += 1;
+        onboarding_events.send(OnboardingEvent::DroneSpawned);
     }
 }

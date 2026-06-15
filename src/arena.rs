@@ -4,10 +4,11 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::command::Tick;
+use crate::components::WorldMode;
 use crate::components::{BodyPart, Owner, PlayerId, Position, RoomId};
 use crate::resources::GlobalStorageConfig;
 use crate::tick::{InMemoryTickBroadcaster, InMemoryTickCommitter, PlayerExecutor, TickTrace};
-use crate::world::{SwarmWorld, create_world};
+use crate::world::{SwarmWorld, create_world_with_mode};
 
 pub const ARENA_FIXED_TICKS: Tick = 5_000;
 
@@ -125,7 +126,7 @@ impl ArenaMatch {
             return Err(ArenaError::InvalidFixedTicks);
         }
 
-        let mut world = create_world();
+        let mut world = create_world_with_mode(WorldMode::Arena);
         apply_arena_rules(&mut world, &config);
         seed_symmetric_initial_state(&mut world, &config);
 
@@ -164,10 +165,14 @@ impl ArenaMatch {
             scheduler.tick();
         }
 
+        let records = scheduler.committer.records;
+        let mut world = scheduler.world;
+        world.record_arena_completed();
+
         Ok(ArenaReplay {
             privacy: replay_privacy,
             public: replay_privacy == ReplayPrivacy::Public,
-            traces: scheduler.committer.records,
+            traces: records,
         })
     }
 }
