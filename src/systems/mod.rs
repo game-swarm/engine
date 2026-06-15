@@ -6,7 +6,10 @@ pub mod global_storage_system;
 pub mod regeneration_system;
 pub mod spawn_system;
 
-pub use combat_system::{PendingCombat, combat_system};
+pub use combat_system::{
+    CombatRules, PendingCombat, combat_system, heal_amount, melee_attack_damage,
+    ranged_attack_damage,
+};
 pub use death_cleanup_system::death_cleanup_system;
 pub use death_mark_system::death_mark_system;
 pub use decay_system::decay_system;

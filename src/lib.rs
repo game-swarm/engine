@@ -1427,9 +1427,9 @@ mod tests {
     }
 
     #[test]
-    fn attack_and_heal_update_hits() {
+    fn attack_ranged_attack_and_heal_update_hits_on_tick() {
         let mut world = create_world();
-        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack, BodyPart::Attack]);
         let target = world.spawn_drone(2, 11, 10, vec![BodyPart::Move]);
 
         assert_eq!(
@@ -1452,22 +1452,9 @@ mod tests {
                 .get::<Drone>()
                 .unwrap()
                 .hits,
-            70
+            100
         );
-
-        let healer = world.spawn_drone(2, 12, 10, vec![BodyPart::Heal]);
-        assert_eq!(
-            submit(
-                &mut world,
-                2,
-                2,
-                CommandAction::Heal {
-                    object_id: object_id(healer),
-                    target_id: object_id(target)
-                }
-            ),
-            Ok(())
-        );
+        world.run_tick();
         assert_eq!(
             world
                 .app
@@ -1476,7 +1463,91 @@ mod tests {
                 .get::<Drone>()
                 .unwrap()
                 .hits,
-            82
+            40
+        );
+
+        let ranged = world.spawn_drone(1, 14, 10, vec![BodyPart::RangedAttack]);
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                2,
+                CommandAction::RangedAttack {
+                    object_id: object_id(ranged),
+                    target_id: object_id(target)
+                }
+            ),
+            Ok(())
+        );
+        world.run_tick();
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(target)
+                .get::<Drone>()
+                .unwrap()
+                .hits,
+            15
+        );
+
+        let healer = world.spawn_drone(2, 12, 10, vec![BodyPart::Heal, BodyPart::Heal]);
+        assert_eq!(
+            submit(
+                &mut world,
+                2,
+                3,
+                CommandAction::Heal {
+                    object_id: object_id(healer),
+                    target_id: object_id(target)
+                }
+            ),
+            Ok(())
+        );
+        world.run_tick();
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(target)
+                .get::<Drone>()
+                .unwrap()
+                .hits,
+            39
+        );
+    }
+
+    #[test]
+    fn damage_multiplier_world_rule_scales_attack_damage() {
+        let mut world = create_world();
+        world.app.world_mut().insert_resource(CombatRules {
+            damage_multiplier: 15_000,
+        });
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
+        let target = world.spawn_drone(2, 11, 10, vec![BodyPart::Move]);
+
+        assert_eq!(
+            submit(
+                &mut world,
+                1,
+                1,
+                CommandAction::Attack {
+                    object_id: object_id(attacker),
+                    target_id: object_id(target)
+                }
+            ),
+            Ok(())
+        );
+        world.run_tick();
+        assert_eq!(
+            world
+                .app
+                .world()
+                .entity(target)
+                .get::<Drone>()
+                .unwrap()
+                .hits,
+            55
         );
     }
 
