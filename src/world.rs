@@ -1,16 +1,17 @@
 use bevy::prelude::*;
 
 use crate::command::{
-    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
-    validate_command,
+    apply_command, source_gate, validate_command, CommandIntent, CommandResult, CommandSource,
+    RawCommand, Tick,
 };
 use crate::components::*;
 use crate::hot_cache::{InMemoryDragonfly, InMemoryFoundationDb};
+use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState, WorldMode};
 use crate::resources::{
     GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
     ResourceRegistry,
 };
-use crate::rule_module::{RhaiRuleModules, rhai_rule_module_tick_end_system, run_init_scripts};
+use crate::rule_module::{rhai_rule_module_tick_end_system, run_init_scripts, RhaiRuleModules};
 use crate::systems::*;
 
 pub struct SwarmWorld {
@@ -142,6 +143,35 @@ impl SwarmWorld {
     pub fn state_checksum(&mut self) -> u64 {
         state_checksum(self.app.world_mut())
     }
+
+    pub fn set_world_mode(&mut self, mode: WorldMode) {
+        self.app.world_mut().resource_mut::<RankingState>().mode = mode;
+    }
+
+    pub fn rankings(&self) -> &RankingState {
+        self.app.world().resource::<RankingState>()
+    }
+
+    pub fn rankings_mut(&mut self) -> Mut<'_, RankingState> {
+        self.app.world_mut().resource_mut::<RankingState>()
+    }
+
+    pub fn record_arena_match(
+        &mut self,
+        tick: Tick,
+        player_one: PlayerId,
+        player_two: PlayerId,
+        outcome: MatchOutcome,
+    ) -> Option<(LeaderboardEntry, LeaderboardEntry)> {
+        self.app
+            .world_mut()
+            .resource_mut::<RankingState>()
+            .record_match(tick, player_one, player_two, outcome)
+    }
+
+    pub fn leaderboard(&self) -> Vec<LeaderboardEntry> {
+        self.app.world().resource::<RankingState>().leaderboard()
+    }
 }
 
 pub fn create_world() -> SwarmWorld {
@@ -159,6 +189,7 @@ pub fn create_world() -> SwarmWorld {
     app.init_resource::<RhaiRuleModules>();
     app.init_resource::<InMemoryFoundationDb>();
     app.init_resource::<InMemoryDragonfly>();
+    app.init_resource::<RankingState>();
     app.add_systems(
         Update,
         (

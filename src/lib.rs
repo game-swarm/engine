@@ -4,6 +4,7 @@ pub mod hot_cache;
 pub mod mcp;
 pub mod mod_cli;
 pub mod onboarding;
+pub mod ranking;
 pub mod realtime;
 pub mod resources;
 pub mod rule_module;
@@ -16,18 +17,19 @@ pub use command::*;
 pub use components::*;
 pub use hot_cache::*;
 pub use mcp::{
-    DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer,
-    StoredModule, VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
+    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player, DeployParams,
+    DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer, StoredModule,
+    VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
     VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot, WorldRuleMod, WorldRules,
-    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player,
 };
 pub use onboarding::*;
+pub use ranking::*;
 pub use realtime::*;
 pub use resources::*;
 pub use rule_module::*;
 pub use tick::*;
 pub use visibility::*;
-pub use world::{SwarmWorld, create_world};
+pub use world::{create_world, SwarmWorld};
 
 #[cfg(test)]
 mod tests {
@@ -1309,14 +1311,12 @@ mod tests {
                 .and_then(|storage| storage.get("Energy")),
             Some(&990)
         );
-        assert!(
-            world
-                .app
-                .world()
-                .resource::<PendingGlobalTransfers>()
-                .0
-                .is_empty()
-        );
+        assert!(world
+            .app
+            .world()
+            .resource::<PendingGlobalTransfers>()
+            .0
+            .is_empty());
     }
 
     #[test]
