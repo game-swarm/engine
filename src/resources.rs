@@ -13,6 +13,7 @@ pub const TRANSFER_TO_GLOBAL_TICKS: Tick = 10;
 pub const TRANSFER_FROM_GLOBAL_TICKS: Tick = 5;
 pub const TRANSFER_TO_GLOBAL_FEE_PER_10_000: u32 = 100;
 pub const TRANSFER_FROM_GLOBAL_FEE_PER_10_000: u32 = 500;
+pub const GLOBAL_STORAGE_INTERCEPT_RANGE: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceDef {
@@ -52,6 +53,8 @@ pub struct ResourceRegistry {
 pub struct GlobalStorageConfig {
     pub enabled: bool,
     pub namespace: String,
+    pub intercept_enabled: bool,
+    pub intercept_range: u32,
     pub capacity: ResourceAmount,
     pub transfer_to_global_ticks: Tick,
     pub transfer_from_global_ticks: Tick,
@@ -104,6 +107,8 @@ pub struct PendingGlobalTransfer {
     pub amount: ResourceAmount,
     pub deliver_amount: ResourceAmount,
     pub remaining_ticks: Tick,
+    pub start: crate::components::Position,
+    pub end: crate::components::Position,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +122,8 @@ impl Default for GlobalStorageConfig {
         Self {
             enabled: true,
             namespace: "default".to_string(),
+            intercept_enabled: true,
+            intercept_range: GLOBAL_STORAGE_INTERCEPT_RANGE,
             capacity: 100_000,
             transfer_to_global_ticks: TRANSFER_TO_GLOBAL_TICKS,
             transfer_from_global_ticks: TRANSFER_FROM_GLOBAL_TICKS,

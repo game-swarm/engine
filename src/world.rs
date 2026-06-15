@@ -582,6 +582,12 @@ pub fn state_checksum(world: &mut World) -> u64 {
             transfer.amount,
             transfer.deliver_amount,
             transfer.remaining_ticks,
+            transfer.start.room,
+            transfer.start.x,
+            transfer.start.y,
+            transfer.end.room,
+            transfer.end.x,
+            transfer.end.y,
         )
     });
     for transfer in transfers {
@@ -591,6 +597,8 @@ pub fn state_checksum(world: &mut World) -> u64 {
         hasher.update(&transfer.amount.to_le_bytes());
         hasher.update(&transfer.deliver_amount.to_le_bytes());
         hasher.update(&transfer.remaining_ticks.to_le_bytes());
+        hash_position(&mut hasher, transfer.start);
+        hash_position(&mut hasher, transfer.end);
     }
 
     tag(&mut hasher, "market_orders");
@@ -616,6 +624,12 @@ pub fn state_checksum(world: &mut World) -> u64 {
             .try_into()
             .expect("BLAKE3 digest has 32 bytes"),
     )
+}
+
+fn hash_position(hasher: &mut blake3::Hasher, position: Position) {
+    hasher.update(&position.room.0.to_le_bytes());
+    hasher.update(&position.x.to_le_bytes());
+    hasher.update(&position.y.to_le_bytes());
 }
 
 fn hash_player_storage(

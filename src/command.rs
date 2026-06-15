@@ -1318,6 +1318,8 @@ fn apply_transfer_to_global(
                 config.transfer_to_global_fee_per_10_000,
             )),
             remaining_ticks: config.transfer_to_global_ticks,
+            start: player_storage_position(player_id),
+            end: global_storage_position(player_id),
         });
     Ok(())
 }
@@ -1351,8 +1353,30 @@ fn apply_transfer_from_global(
                 config.transfer_from_global_fee_per_10_000,
             )),
             remaining_ticks: config.transfer_from_global_ticks,
+            start: global_storage_position(player_id),
+            end: player_storage_position(player_id),
         });
     Ok(())
+}
+
+fn player_storage_position(player_id: PlayerId) -> Position {
+    Position {
+        x: player_lane_x(player_id),
+        y: 0,
+        room: RoomId(0),
+    }
+}
+
+fn global_storage_position(player_id: PlayerId) -> Position {
+    Position {
+        x: player_lane_x(player_id),
+        y: 49,
+        room: RoomId(0),
+    }
+}
+
+fn player_lane_x(player_id: PlayerId) -> i32 {
+    (player_id % 50) as i32
 }
 
 fn apply_create_market_order(

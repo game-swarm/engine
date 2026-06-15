@@ -152,6 +152,16 @@ mod tests {
         )
     }
 
+    fn create_tutorial_world() -> crate::SwarmWorld {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<GlobalStorageConfig>()
+            .intercept_enabled = false;
+        world
+    }
+
     #[test]
     fn room_id_parses_formats_and_checks_adjacency() {
         let room = RoomId::from_room_name("A12N34W").unwrap();
@@ -1323,6 +1333,154 @@ mod tests {
                 .get(&1)
                 .and_then(|storage| storage.get("Energy")),
             Some(&950)
+        );
+    }
+
+    #[test]
+    fn global_transfer_is_intercepted_by_enemy_on_path() {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerLocalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
+        world.spawn_drone(2, 1, 25, vec![BodyPart::Move]);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::TransferToGlobal {
+                resource: "Energy".to_string(),
+                amount: 1_000,
+            },
+        )
+        .unwrap();
+
+        world.run_tick();
+
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<PendingGlobalTransfers>()
+                .0
+                .is_empty()
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<PlayerGlobalStorage>()
+                .0
+                .get(&1)
+                .and_then(|storage| storage.get("Energy")),
+            None
+        );
+    }
+
+    #[test]
+    fn global_transfer_interception_respects_range_boundary() {
+        let mut inside = create_world();
+        inside
+            .app
+            .world_mut()
+            .resource_mut::<GlobalStorageConfig>()
+            .intercept_range = 3;
+        inside
+            .app
+            .world_mut()
+            .resource_mut::<PlayerLocalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
+        inside.spawn_drone(2, 4, 25, vec![BodyPart::Move]);
+
+        submit(
+            &mut inside,
+            1,
+            1,
+            CommandAction::TransferToGlobal {
+                resource: "Energy".to_string(),
+                amount: 1_000,
+            },
+        )
+        .unwrap();
+        inside.run_tick();
+        assert!(
+            inside
+                .app
+                .world()
+                .resource::<PendingGlobalTransfers>()
+                .0
+                .is_empty()
+        );
+
+        let mut outside = create_world();
+        outside
+            .app
+            .world_mut()
+            .resource_mut::<GlobalStorageConfig>()
+            .intercept_range = 3;
+        outside
+            .app
+            .world_mut()
+            .resource_mut::<PlayerLocalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
+        outside.spawn_drone(2, 5, 25, vec![BodyPart::Move]);
+
+        submit(
+            &mut outside,
+            1,
+            1,
+            CommandAction::TransferToGlobal {
+                resource: "Energy".to_string(),
+                amount: 1_000,
+            },
+        )
+        .unwrap();
+        outside.run_tick();
+        assert_eq!(
+            outside.app.world().resource::<PendingGlobalTransfers>().0[0].remaining_ticks,
+            9
+        );
+    }
+
+    #[test]
+    fn tutorial_world_disables_global_transfer_interception() {
+        let mut world = create_tutorial_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerLocalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
+        world.spawn_drone(2, 1, 25, vec![BodyPart::Move]);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::TransferToGlobal {
+                resource: "Energy".to_string(),
+                amount: 1_000,
+            },
+        )
+        .unwrap();
+        world.run_tick();
+
+        assert_eq!(
+            world.app.world().resource::<PendingGlobalTransfers>().0[0].remaining_ticks,
+            9
         );
     }
 

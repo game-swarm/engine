@@ -188,6 +188,7 @@ fn apply_arena_rules(world: &mut SwarmWorld, config: &ArenaConfig) {
 
     let mut storage = world.app.world_mut().resource_mut::<GlobalStorageConfig>();
     storage.enabled = true;
+    storage.intercept_enabled = true;
     storage.transfer_to_global_fee_per_10_000 = 0;
     storage.transfer_from_global_fee_per_10_000 = 0;
     storage.tax_tiers.clear();
