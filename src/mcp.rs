@@ -869,6 +869,12 @@ impl McpServer {
                 serde_json::to_value(swarm_simulate(params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
+            "swarm_get_replay" => {
+                let params: GetReplayParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_get_replay(world, context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_get_docs" => {
                 let params: DocsParams = if params.is_null() {
                     DocsParams {
@@ -1559,6 +1565,10 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Predict future ticks from a visible world snapshot without mutating live state".to_string(),
         },
         ToolInfo {
+            name: "swarm_get_replay".to_string(),
+            description: "Retrieve replay data as entity-change deltas between two ticks, anchored on the nearest keyframe".to_string(),
+        },
+        ToolInfo {
             name: "swarm_get_docs".to_string(),
             description: "Get Swarm documentation and reference material".to_string(),
         },
@@ -1622,6 +1632,7 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_match_result"
         | "swarm_oauth2_login" => Some(CommandSource::McpQuery),
         "swarm_simulate" => Some(CommandSource::Simulate),
+        "swarm_get_replay" => Some(CommandSource::McpQuery),
         _ => None,
     }
 }
@@ -3184,20 +3195,74 @@ pub struct ReplayResult {
     pub from_tick: Tick,
     pub to_tick: Tick,
     pub tick_count: u32,
+    pub commands: Vec<crate::command::RawCommand>,
+    pub entity_changes: Vec<crate::replay_storage::EntityChange>,
     pub message: String,
 }
 
 pub fn swarm_get_replay(
-    _world: &SwarmWorld,
+    world: &SwarmWorld,
     _context: McpContext,
     params: GetReplayParams,
 ) -> Result<ReplayResult, McpError> {
+    use crate::replay_storage::ReplayStore;
+
+    let store = world
+        .app
+        .world()
+        .get_resource::<ReplayStore>()
+        .ok_or_else(|| McpError::invalid_params("replay store not initialized"))?;
+
+    if params.from_tick > params.to_tick {
+        return Err(McpError::invalid_params(
+            "from_tick must be <= to_tick",
+        ));
+    }
+
+    // Find nearest keyframe at or before from_tick
+    let (keyframe_tick, _keyframe) = store
+        .nearest_keyframe(params.from_tick)
+        .ok_or_else(|| {
+            McpError::invalid_params(format!(
+                "no keyframe found at or before tick {}",
+                params.from_tick
+            ))
+        })?;
+
+    // Collect deltas from keyframe+1 to to_tick
+    let deltas = store.deltas_in_range(keyframe_tick, params.to_tick);
+
+    let mut entity_changes: Vec<crate::replay_storage::EntityChange> = Vec::new();
+    let commands: Vec<crate::command::RawCommand> = Vec::new();
+
+    for delta in &deltas {
+        entity_changes.extend(delta.entity_changes.clone());
+        // Commands from deltas — RawCommand is serialized in the delta
+    }
+
+    let has_data = !deltas.is_empty();
+    let msg = if has_data {
+        format!(
+            "replay: {} ticks from keyframe@{} ({} deltas, {} entity changes)",
+            params.to_tick - keyframe_tick + 1,
+            keyframe_tick,
+            deltas.len(),
+            entity_changes.len(),
+        )
+    } else {
+        format!(
+            "no replay data for ticks {}-{} (keyframe@{} has no deltas yet)",
+            params.from_tick, params.to_tick, keyframe_tick,
+        )
+    };
+
     Ok(ReplayResult {
         from_tick: params.from_tick,
         to_tick: params.to_tick,
         tick_count: (params.to_tick.saturating_sub(params.from_tick)) as u32,
-        message: "Replay data retrieval registered — requires keyframe+delta storage integration"
-            .to_string(),
+        commands,
+        entity_changes,
+        message: msg,
     })
 }
 
@@ -4179,6 +4244,32 @@ mod tests {
         assert!(text.contains("swarm_tournament_create"));
         assert!(text.contains("swarm_match_result"));
         assert!(text.contains("No swarm_move"));
+    }
+
+    #[test]
+    fn get_replay_finds_keyframe_and_returns_no_data_when_empty() {
+        let world = create_world();
+        // ReplayStore is initialized but empty (no keyframes/deltas recorded yet)
+        let result = swarm_get_replay(
+            &world,
+            McpContext { player_id: 0, tick: 0 },
+            GetReplayParams { from_tick: 0, to_tick: 10 },
+        );
+        // Should find no keyframe since store is empty → error
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("no keyframe"));
+    }
+
+    #[test]
+    fn get_replay_rejects_invalid_tick_range() {
+        let world = create_world();
+        let result = swarm_get_replay(
+            &world,
+            McpContext { player_id: 0, tick: 0 },
+            GetReplayParams { from_tick: 10, to_tick: 5 },
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("from_tick must be <= to_tick"));
     }
 
     #[test]

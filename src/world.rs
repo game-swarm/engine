@@ -14,6 +14,7 @@ use crate::onboarding::{
     send_onboarding_event,
 };
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
+use crate::replay_storage::ReplayStore;
 use crate::resources::{
     GlobalStorageConfig, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, ResourceRegistry,
@@ -535,6 +536,7 @@ impl WorldConfig {
             per_player: Default::default(),
             hard_cap: 1,
         });
+        app.insert_resource(ReplayStore::default());
     }
     fn register_systems(&self, app: &mut App) {
         if self.propagation_system_enabled() {

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use bevy::prelude::Resource as BevyResource;
+
 use crate::command::Tick;
 use crate::world::WorldConfig;
 
@@ -153,5 +155,31 @@ impl std::fmt::Display for ReplayError {
             Self::StorageUnavailable => write!(f, "replay storage unavailable"),
             Self::ConfigMismatch => write!(f, "world config mismatch in replay"),
         }
+    }
+}
+
+// ── Replay Store (in-memory keyframes + deltas) ──────────────────────
+
+/// In-memory store for keyframes and tick deltas.
+/// Populated by the replay recording system during tick execution.
+#[derive(BevyResource, Debug, Clone, Default)]
+pub struct ReplayStore {
+    pub keyframes: std::collections::BTreeMap<Tick, KeyframeData>,
+    pub deltas: std::collections::BTreeMap<Tick, TickDelta>,
+    pub config: ReplayStorageConfig,
+}
+
+impl ReplayStore {
+    /// Find the nearest keyframe at or before `tick`.
+    pub fn nearest_keyframe(&self, tick: Tick) -> Option<(Tick, &KeyframeData)> {
+        self.keyframes.range(..=tick).next_back().map(|(t, k)| (*t, k))
+    }
+
+    /// Collect all deltas in (from_tick, to_tick] range inclusive.
+    pub fn deltas_in_range(&self, from_tick: Tick, to_tick: Tick) -> Vec<&TickDelta> {
+        self.deltas
+            .range((from_tick + 1)..=to_tick)
+            .map(|(_, delta)| delta)
+            .collect()
     }
 }
