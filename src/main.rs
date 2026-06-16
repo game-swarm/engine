@@ -11,7 +11,8 @@ use std::{
 };
 
 use swarm_engine::{
-    BodyPart, Controller, Drone, Source, Structure, WorldMode, create_world, create_world_with_mode,
+    BodyPart, WorldMode, create_world_with_mode,
+    sim::{create_local_simulation_world, summarize_local_simulation},
 };
 
 const DEFAULT_HEALTH_ADDR: &str = "0.0.0.0:8080";
@@ -217,13 +218,7 @@ fn run_sim(args: &[String]) -> Result<(), String> {
         "mode=local-sim caveat=training-only-not-authoritative-no-fdb-no-nats ticks={ticks} speed={speed}"
     );
     let started_at = std::time::Instant::now();
-    let mut world = create_world();
-    world.spawn_drone(
-        1,
-        10,
-        10,
-        vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
-    );
+    let mut world = create_local_simulation_world();
     let mut checksum = world.state_checksum();
     for tick in 1..=ticks {
         world.run_tick();
@@ -233,13 +228,15 @@ fn run_sim(args: &[String]) -> Result<(), String> {
         }
     }
     let elapsed_ms = started_at.elapsed().as_millis();
-    let ecs = world.app.world_mut();
-    let drones = ecs.query::<&Drone>().iter(ecs).count();
-    let sources = ecs.query::<&Source>().iter(ecs).count();
-    let structures = ecs.query::<&Structure>().iter(ecs).count();
-    let controllers = ecs.query::<&Controller>().iter(ecs).count();
+    let summary = summarize_local_simulation(&mut world, ticks, elapsed_ms);
     println!(
-        "summary mode=local-sim caveat=training-only ticks={ticks} speed={speed} final_state_checksum={checksum} elapsed_ms={elapsed_ms} drones={drones} sources={sources} structures={structures} controllers={controllers}"
+        "summary mode=local-sim caveat=training-only ticks={ticks} speed={speed} final_state_checksum={checksum} elapsed_ms={elapsed_ms} drones={drones} sources={sources} structures={structures} controllers={controllers}",
+        checksum = summary.final_state_checksum,
+        elapsed_ms = summary.elapsed_ms,
+        drones = summary.drones,
+        sources = summary.sources,
+        structures = summary.structures,
+        controllers = summary.controllers,
     );
     Ok(())
 }
