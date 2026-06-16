@@ -88,7 +88,9 @@ mod tests {
                     hits_max: 100,
                     spawning: false,
                     age: 10,
+                    aging_remainder: 0,
                     lifespan: DEFAULT_DRONE_LIFESPAN,
+                    executed_command_this_tick: false,
                 },
                 Position {
                     x: 5,
