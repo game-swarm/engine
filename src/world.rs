@@ -618,7 +618,7 @@ fn code_propagation_system(
     let sources: Vec<Position> = match config.code.propagation_source {
         CodePropagationSource::Spawn => spawn_structures.iter().map(|(_, pos)| *pos).collect(),
         CodePropagationSource::Controller => controllers.iter().map(|(_, pos)| *pos).collect(),
-        CodePropagationSource::Global => return,
+        CodePropagationSource::AnyDrone => return,
     };
 
     if sources.is_empty() {
@@ -1478,7 +1478,7 @@ propagation_source = "AnyDrone"
         )
         .unwrap();
 
-        assert_eq!(config.code.propagation_source, CodePropagationSource::Global);
+        assert_eq!(config.code.propagation_source, CodePropagationSource::AnyDrone);
     }
 
     #[test]
