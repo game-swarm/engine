@@ -819,7 +819,7 @@ pub fn source_capabilities(source: CommandSource) -> SourceCapabilities {
             global_storage: false,
             deploy_code: false,
             query_world: true,
-            trigger_combat: false,
+            trigger_combat: true,
         },
         CommandSource::Rollback => SourceCapabilities {
             write_world: true,
@@ -840,7 +840,7 @@ pub fn source_capabilities(source: CommandSource) -> SourceCapabilities {
             global_storage: false,
             deploy_code: false,
             query_world: true,
-            trigger_combat: true,
+            trigger_combat: false,
         },
         CommandSource::DryRun => SourceCapabilities {
             write_world: false,
@@ -855,9 +855,7 @@ pub fn source_capabilities(source: CommandSource) -> SourceCapabilities {
 pub fn source_allows_action(source: CommandSource, action: &CommandAction) -> bool {
     match source {
         CommandSource::Wasm | CommandSource::Admin | CommandSource::TestHarness => true,
-        CommandSource::Tutorial => {
-            !action_triggers_combat(action) && !action_uses_global_storage(action)
-        }
+        CommandSource::Tutorial => !action_uses_global_storage(action),
         CommandSource::McpDeploy
         | CommandSource::McpQuery
         | CommandSource::Replay
