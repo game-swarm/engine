@@ -1117,6 +1117,15 @@ pub struct Drone {
 
 impl Drone {
     pub fn new(owner: PlayerId, body: Vec<BodyPart>, registry: &BodyPartRegistry) -> Self {
+        Self::new_with_lifespan(owner, body, registry, DEFAULT_DRONE_LIFESPAN)
+    }
+
+    pub fn new_with_lifespan(
+        owner: PlayerId,
+        body: Vec<BodyPart>,
+        registry: &BodyPartRegistry,
+        base_lifespan: u32,
+    ) -> Self {
         let carry_capacity = body
             .iter()
             .filter(|part| matches!(part, BodyPart::Carry))
@@ -1127,7 +1136,7 @@ impl Drone {
             .filter_map(|part| registry.parts.get(part))
             .map(|def| def.age_modifier)
             .sum();
-        let lifespan = DEFAULT_DRONE_LIFESPAN.saturating_add_signed(lifespan_mod);
+        let lifespan = base_lifespan.saturating_add_signed(lifespan_mod);
         Self {
             owner,
             body,
@@ -1240,5 +1249,13 @@ mod tests {
         // Multiple Tough (+100 each)
         let drone = Drone::new(4, vec![BodyPart::Tough, BodyPart::Tough], &registry);
         assert_eq!(drone.lifespan, 1700); // 1500 + 100 + 100
+    }
+
+    #[test]
+    fn drone_lifespan_uses_configurable_base() {
+        let registry = BodyPartRegistry::default();
+        let drone = Drone::new_with_lifespan(1, vec![BodyPart::Tough], &registry, 2_000);
+
+        assert_eq!(drone.lifespan, 2_100);
     }
 }

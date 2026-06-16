@@ -17,7 +17,7 @@ use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::replay_storage::ReplayStore;
 use crate::resources::{
     GlobalStorageConfig, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage,
-    PlayerLocalStorage, ResourceRegistry,
+    PlayerLocalStorage, ResourceDef, ResourceRegistry, SourceDef,
 };
 use crate::rule_module::{
     RhaiRuleModules, rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system,
@@ -44,6 +44,8 @@ pub struct WorldConfig {
     pub damage_types: Vec<crate::components::DamageTypeDef>,
     pub body_part_types: Vec<crate::components::BodyPartTypeDef>,
     pub structure_types: Vec<crate::components::StructureTypeDef>,
+    pub resource_types: Vec<ResourceDef>,
+    pub source_types: Vec<SourceDef>,
     #[serde(default = "default_special_effects")]
     pub special_effects: Vec<crate::components::SpecialEffectDef>,
     #[serde(default = "default_custom_actions")]
@@ -68,16 +70,14 @@ pub enum SpawnPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RespawnPolicy {
     NewRoom,
-    SameRoom,
-    FixedSpawn,
-    Disabled,
-    Inherit,
+    OriginalRoom,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SpawnConfig {
     pub policy: SpawnPolicy,
     pub cooldown: Tick,
+    pub safe_mode_duration: Tick,
     #[serde(alias = "respawn")]
     pub respawn_policy: RespawnPolicy,
 }
@@ -91,6 +91,7 @@ pub struct CodeUpdateWindow {
 pub enum CodePropagationSource {
     Spawn,
     Controller,
+    #[serde(alias = "AnyDrone")]
     Global,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +110,9 @@ pub struct DroneConfig {
     pub memory_size: u32,
     pub memory_spawn_cost: crate::resources::ResourceCost,
     pub memory_upkeep_cost: crate::resources::ResourceCost,
+    pub lifespan: u32,
+    pub max_body_parts: usize,
+    pub max_drones_per_player: u32,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -164,6 +168,8 @@ impl Default for WorldConfig {
             damage_types: Vec::new(),
             body_part_types: Vec::new(),
             structure_types: Vec::new(),
+            resource_types: Vec::new(),
+            source_types: Vec::new(),
             special_effects: default_special_effects(),
             custom_actions: default_custom_actions(),
         }
@@ -403,6 +409,7 @@ impl Default for SpawnConfig {
         Self {
             policy: SpawnPolicy::RandomRoom,
             cooldown: 0,
+            safe_mode_duration: 500,
             respawn_policy: RespawnPolicy::NewRoom,
         }
     }
@@ -438,6 +445,9 @@ impl Default for DroneConfig {
             memory_size: 1024,
             memory_spawn_cost: crate::resources::ResourceCost::new(),
             memory_upkeep_cost: crate::resources::ResourceCost::new(),
+            lifespan: DEFAULT_DRONE_LIFESPAN,
+            max_body_parts: 50,
+            max_drones_per_player: 500,
         }
     }
 }
@@ -527,6 +537,10 @@ impl WorldConfig {
         app.insert_resource(body_registry);
         app.insert_resource(StructureTypeRegistry::from_defs(
             self.structure_types.clone(),
+        ));
+        app.insert_resource(ResourceRegistry::from_defs(
+            self.resource_types.clone(),
+            self.source_types.clone(),
         ));
         app.insert_resource(SpecialEffectRegistry::from_defs(
             self.special_effects.clone(),
@@ -681,10 +695,19 @@ impl SwarmWorld {
         self.ensure_room(room);
         let position = Position { x, y, room };
         let registry = self.app.world().resource::<BodyPartRegistry>().clone();
+        let config = self.app.world().resource::<WorldConfig>().drone.clone();
+        let body = body
+            .into_iter()
+            .take(config.max_body_parts)
+            .collect::<Vec<_>>();
         let entity = self
             .app
             .world_mut()
-            .spawn((position, Owner(owner), Drone::new(owner, body, &registry)))
+            .spawn((
+                position,
+                Owner(owner),
+                Drone::new_with_lifespan(owner, body, &registry, config.lifespan),
+            ))
             .id();
         let mut counts = self.app.world_mut().resource_mut::<RoomDroneCounts>();
         *counts.0.entry((position.room, owner)).or_default() += 1;
@@ -1319,11 +1342,15 @@ mod shard_tests {
         let config = WorldConfig::default();
         assert_eq!(config.spawn.policy, SpawnPolicy::RandomRoom);
         assert_eq!(config.spawn.cooldown, 0);
+        assert_eq!(config.spawn.safe_mode_duration, 500);
         assert_eq!(config.spawn.respawn_policy, RespawnPolicy::NewRoom);
         assert_eq!(config.code.update_cooldown, 5);
         assert_eq!(config.code.propagation_speed, 0);
         assert!(config.drone.env_vars);
         assert_eq!(config.drone.memory_size, 1024);
+        assert_eq!(config.drone.lifespan, DEFAULT_DRONE_LIFESPAN);
+        assert_eq!(config.drone.max_body_parts, 50);
+        assert_eq!(config.drone.max_drones_per_player, 500);
         assert!(config.combat.pvp_enabled);
         assert!(!config.combat.friendly_fire);
         assert_eq!(config.resources.source_regeneration_rate, 10_000);
@@ -1361,8 +1388,9 @@ mod shard_tests {
 tick_interval_ms = 1500
 [spawn]
 policy = "ManualSelect"
-respawn = "FixedSpawn"
+respawn = "OriginalRoom"
 cooldown = 12
+safe_mode_duration = 42
 [code]
 update_cost = { Energy = 500 }
 update_cooldown = 7
@@ -1374,6 +1402,9 @@ env_vars = false
 memory_size = 4096
 memory_spawn_cost = { Energy = 1 }
 memory_upkeep_cost = { Energy = 2 }
+lifespan = 2000
+max_body_parts = 10
+max_drones_per_player = 25
 [visibility]
 fog_of_war = false
 player_view = "full"
@@ -1393,10 +1424,14 @@ damage_multiplier = 1.5
         .unwrap();
         assert_eq!(config.world.tick_interval_ms, 1500);
         assert_eq!(config.spawn.policy, SpawnPolicy::ManualSelect);
-        assert_eq!(config.spawn.respawn_policy, RespawnPolicy::FixedSpawn);
+        assert_eq!(config.spawn.respawn_policy, RespawnPolicy::OriginalRoom);
+        assert_eq!(config.spawn.safe_mode_duration, 42);
         assert_eq!(config.code.update_cost.get("Energy"), Some(&500));
         assert_eq!(config.code.update_window.duration, 10);
         assert_eq!(config.drone.memory_upkeep_cost.get("Energy"), Some(&2));
+        assert_eq!(config.drone.lifespan, 2000);
+        assert_eq!(config.drone.max_body_parts, 10);
+        assert_eq!(config.drone.max_drones_per_player, 25);
         assert!(!config.visibility.fog_of_war);
         assert_eq!(config.visibility.player_view, PlayerViewMode::Full);
         assert!(config.visibility.public_spectate);
@@ -1406,6 +1441,66 @@ damage_multiplier = 1.5
         assert!(config.combat.friendly_fire);
         assert_eq!(config.combat_damage_multiplier_fixed(), 15_000);
         assert!(config.propagation_system_enabled());
+    }
+
+    #[test]
+    fn world_config_parses_resource_and_source_types() {
+        let config = WorldConfig::from_toml_str(
+            r#"
+[[resource_types]]
+name = "Mineral"
+display_name = "Mineral"
+category = "mineral"
+starting_amount = 0
+max_storage = 50000
+decay_rate = 0.0
+tradeable = true
+
+[[source_types]]
+name = "MineralVein"
+produces = { Mineral = 2 }
+capacity = 1000
+regeneration = 100
+"#,
+        )
+        .unwrap();
+        let world = create_world_with_mode_and_config(WorldMode::Default, config);
+        let registry = world.app.world().resource::<ResourceRegistry>();
+
+        assert_eq!(registry.resource("Mineral").unwrap().max_storage, 50_000);
+        assert_eq!(registry.source("MineralVein").unwrap().capacity, 1_000);
+    }
+
+    #[test]
+    fn code_propagation_source_accepts_global_alias() {
+        let config = WorldConfig::from_toml_str(
+            r#"
+[code]
+propagation_speed = 1
+propagation_source = "AnyDrone"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.code.propagation_source, CodePropagationSource::Global);
+    }
+
+    #[test]
+    fn spawn_drone_uses_configured_lifespan_and_body_limit() {
+        let config = WorldConfig::from_toml_str(
+            r#"
+[drone]
+lifespan = 2000
+max_body_parts = 1
+"#,
+        )
+        .unwrap();
+        let mut world = create_world_with_mode_and_config(WorldMode::Default, config);
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Tough, BodyPart::Attack]);
+        let drone = world.app.world().entity(drone).get::<Drone>().unwrap();
+
+        assert_eq!(drone.body, vec![BodyPart::Tough]);
+        assert_eq!(drone.lifespan, 2_100);
     }
 
     #[test]

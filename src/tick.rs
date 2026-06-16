@@ -53,6 +53,54 @@ pub trait TickCommitter {
 }
 
 pub const DEFAULT_KEYFRAME_INTERVAL: Tick = 100;
+pub const COLLECT_TIMEOUT_MS: u64 = 2_500;
+pub const EXECUTE_TIMEOUT_MS: u64 = 500;
+pub const MAX_COMMIT_ATTEMPTS: u32 = 3;
+pub const DEGRADED_ABANDON_THRESHOLD: u32 = 3;
+pub const DEGRADED_RECOVERY_TICKS: u32 = 10;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DegradedModeState {
+    pub enabled: bool,
+    pub join_lock: bool,
+    pub mcp_deploy_enabled: bool,
+    pub consecutive_abandoned_ticks: u32,
+    pub consecutive_normal_ticks: u32,
+}
+
+impl Default for DegradedModeState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            join_lock: false,
+            mcp_deploy_enabled: true,
+            consecutive_abandoned_ticks: 0,
+            consecutive_normal_ticks: 0,
+        }
+    }
+}
+
+impl DegradedModeState {
+    fn record_abandoned_tick(&mut self) {
+        self.consecutive_abandoned_ticks += 1;
+        self.consecutive_normal_ticks = 0;
+        if self.consecutive_abandoned_ticks >= DEGRADED_ABANDON_THRESHOLD {
+            self.enabled = true;
+            self.join_lock = true;
+            self.mcp_deploy_enabled = false;
+        }
+    }
+
+    fn record_committed_tick(&mut self) {
+        self.consecutive_abandoned_ticks = 0;
+        if self.enabled {
+            self.consecutive_normal_ticks += 1;
+            if self.consecutive_normal_ticks >= DEGRADED_RECOVERY_TICKS {
+                *self = Self::default();
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModsLock {
@@ -140,6 +188,10 @@ pub struct TickMetrics {
     pub refund_events: u64,
     pub refund_fuel: u64,
     pub duration_ms: u64,
+    pub collect_duration_ms: u64,
+    pub execute_duration_ms: u64,
+    pub collect_timeouts: u64,
+    pub execute_timeouts: u64,
 }
 
 impl TickMetrics {
@@ -228,6 +280,10 @@ impl TickMetrics {
         self.refund_events += other.refund_events;
         self.refund_fuel += other.refund_fuel;
         self.duration_ms += other.duration_ms;
+        self.collect_duration_ms += other.collect_duration_ms;
+        self.execute_duration_ms += other.execute_duration_ms;
+        self.collect_timeouts += other.collect_timeouts;
+        self.execute_timeouts += other.execute_timeouts;
     }
 
     /// Subtract execution metrics (used when replaying from cache to avoid
@@ -606,6 +662,7 @@ pub struct MultiPlayerTickScheduler<C, B> {
     pub tick_counter: Tick,
     pub metrics: TickMetrics,
     pub collect_cache: Option<CollectCache>,
+    pub degraded_mode: DegradedModeState,
 }
 
 impl<C, B> MultiPlayerTickScheduler<C, B>
@@ -627,6 +684,7 @@ where
             tick_counter: 0,
             metrics: TickMetrics::default(),
             collect_cache: None,
+            degraded_mode: DegradedModeState::default(),
         }
     }
 
@@ -643,6 +701,7 @@ where
             .as_ref()
             .filter(|cache| cache.matches(tick, state_checksum));
 
+        let collect_started_at = Instant::now();
         let raw_commands = if let Some(cache) = cache_hit {
             debug_assert!(
                 cache.fuel_metrics.fuel_consumed <= MAX_FUEL,
@@ -696,53 +755,90 @@ where
                 .collect::<Vec<_>>();
             serial_execution_queue(collected)
         };
+        let collect_duration_ms = collect_started_at.elapsed().as_millis() as u64;
+        self.metrics.collect_duration_ms = collect_duration_ms;
+        if collect_duration_ms > COLLECT_TIMEOUT_MS {
+            self.metrics.collect_timeouts += 1;
+        }
 
         let world_snapshot = WorldSnapshot::capture(self.world.app.world_mut());
-        let execution = execute_deterministic(&mut self.world, raw_commands);
-        let accepted = execution.commands;
-        let rejections = execution.rejections;
-        self.metrics.record_execution(accepted.len(), &rejections);
+        let mut last_accepted = Vec::new();
+        let mut last_rejections = Vec::new();
+        let mut last_security_alerts = Vec::new();
+        let mut committed_trace = None;
+        for attempt in 0..MAX_COMMIT_ATTEMPTS {
+            if attempt > 0 {
+                world_snapshot.clone().restore(self.world.app.world_mut());
+            }
+            let execute_started_at = Instant::now();
+            let execution = execute_deterministic(&mut self.world, raw_commands.clone());
+            let execute_duration_ms = execute_started_at.elapsed().as_millis() as u64;
+            self.metrics.execute_duration_ms = execute_duration_ms;
+            if execute_duration_ms > EXECUTE_TIMEOUT_MS {
+                self.metrics.execute_timeouts += 1;
+                last_accepted = execution.commands;
+                last_rejections = execution.rejections;
+                world_snapshot.clone().restore(self.world.app.world_mut());
+                break;
+            }
 
-        let checksum = self.world.state_checksum();
-        let state = TickState::capture(self.world.app.world_mut());
-        let mut trace = TickTrace {
-            tick,
-            player_id: 0,
-            commands: accepted.clone(),
-            state,
-            rejections: rejections.clone(),
-            metrics: self.metrics.clone(),
-            state_checksum: checksum,
-            security_alerts: Vec::new(),
-        };
-        trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
+            let accepted = execution.commands;
+            let rejections = execution.rejections;
+            let metrics_before_execution = self.metrics.clone();
+            self.metrics.record_execution(accepted.len(), &rejections);
 
-        let environment = ReplayEnvironment::capture(self.world.app.world());
-        if self
-            .committer
-            .commit_with_environment(trace.clone(), environment)
-            .is_err()
-        {
-            world_snapshot.restore(self.world.app.world_mut());
+            let checksum = self.world.state_checksum();
+            let state = TickState::capture(self.world.app.world_mut());
+            let mut trace = TickTrace {
+                tick,
+                player_id: 0,
+                commands: accepted.clone(),
+                state,
+                rejections: rejections.clone(),
+                metrics: self.metrics.clone(),
+                state_checksum: checksum,
+                security_alerts: Vec::new(),
+            };
+            trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
+            let environment = ReplayEnvironment::capture(self.world.app.world());
+            last_accepted = accepted;
+            last_rejections = rejections;
+            last_security_alerts = trace.security_alerts.clone();
+            if self
+                .committer
+                .commit_with_environment(trace.clone(), environment)
+                .is_ok()
+            {
+                committed_trace = Some(trace);
+                break;
+            }
+            self.metrics = metrics_before_execution;
             self.metrics.commit_failures += 1;
+            world_snapshot.clone().restore(self.world.app.world_mut());
+        }
+
+        let Some(trace) = committed_trace else {
+            self.degraded_mode.record_abandoned_tick();
             return TickReport {
                 tick,
                 committed: false,
                 broadcasted: false,
-                accepted,
-                rejections,
+                accepted: last_accepted,
+                rejections: last_rejections,
                 metrics: self.metrics.clone(),
-                security_alerts: trace.security_alerts,
+                security_alerts: last_security_alerts,
             };
-        }
+        };
 
         self.tick_counter += 1;
+        self.collect_cache = None;
+        self.degraded_mode.record_committed_tick();
         let broadcast = TickBroadcast {
             tick,
             player_id: 0,
-            accepted: accepted.clone(),
-            rejections: rejections.clone(),
-            state_checksum: checksum,
+            accepted: trace.commands.clone(),
+            rejections: trace.rejections.clone(),
+            state_checksum: trace.state_checksum,
         };
         let broadcasted = if self.broadcaster.broadcast(broadcast).is_ok() {
             true
@@ -757,8 +853,8 @@ where
             tick,
             committed: true,
             broadcasted,
-            accepted,
-            rejections,
+            accepted: trace.commands,
+            rejections: trace.rejections,
             metrics: self.metrics.clone(),
             security_alerts: trace.security_alerts,
         }
@@ -773,6 +869,7 @@ pub struct TickScheduler<E, C, B> {
     pub broadcaster: B,
     pub tick_counter: Tick,
     pub metrics: TickMetrics,
+    pub degraded_mode: DegradedModeState,
 }
 
 impl<E, C, B> TickScheduler<E, C, B>
@@ -796,6 +893,7 @@ where
             broadcaster,
             tick_counter: 0,
             metrics: TickMetrics::default(),
+            degraded_mode: DegradedModeState::default(),
         }
     }
 
@@ -807,6 +905,7 @@ where
             player_id: self.player_id,
             state_checksum: self.world.state_checksum(),
         };
+        let collect_started_at = Instant::now();
         let intents = match self.executor.collect(snapshot) {
             Ok(intents) => intents,
             Err(ExecutorError::Timeout) => {
@@ -818,6 +917,11 @@ where
                 Vec::new()
             }
         };
+        let collect_duration_ms = collect_started_at.elapsed().as_millis() as u64;
+        self.metrics.collect_duration_ms = collect_duration_ms;
+        if collect_duration_ms > COLLECT_TIMEOUT_MS {
+            self.metrics.collect_timeouts += 1;
+        }
 
         let world_snapshot = WorldSnapshot::capture(self.world.app.world_mut());
         let mut raw_commands = intents
@@ -828,51 +932,81 @@ where
             .collect::<Vec<_>>();
         raw_commands.sort_by_key(|command| command.sequence);
 
-        let execution = execute_deterministic(&mut self.world, raw_commands);
-        let accepted = execution.commands;
-        let rejections = execution.rejections;
-        self.metrics.record_execution(accepted.len(), &rejections);
+        let mut last_accepted = Vec::new();
+        let mut last_rejections = Vec::new();
+        let mut last_security_alerts = Vec::new();
+        let mut committed_trace = None;
+        for attempt in 0..MAX_COMMIT_ATTEMPTS {
+            if attempt > 0 {
+                world_snapshot.clone().restore(self.world.app.world_mut());
+            }
+            let execute_started_at = Instant::now();
+            let execution = execute_deterministic(&mut self.world, raw_commands.clone());
+            let execute_duration_ms = execute_started_at.elapsed().as_millis() as u64;
+            self.metrics.execute_duration_ms = execute_duration_ms;
+            if execute_duration_ms > EXECUTE_TIMEOUT_MS {
+                self.metrics.execute_timeouts += 1;
+                last_accepted = execution.commands;
+                last_rejections = execution.rejections;
+                world_snapshot.clone().restore(self.world.app.world_mut());
+                break;
+            }
+            let accepted = execution.commands;
+            let rejections = execution.rejections;
+            let metrics_before_execution = self.metrics.clone();
+            self.metrics.record_execution(accepted.len(), &rejections);
 
-        let checksum = self.world.state_checksum();
-        let state = TickState::capture(self.world.app.world_mut());
-        let mut trace = TickTrace {
-            tick,
-            player_id: self.player_id,
-            commands: accepted.clone(),
-            state,
-            rejections: rejections.clone(),
-            metrics: self.metrics.clone(),
-            state_checksum: checksum,
-            security_alerts: Vec::new(),
-        };
-        trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
-
-        let environment = ReplayEnvironment::capture(self.world.app.world());
-        if self
-            .committer
-            .commit_with_environment(trace.clone(), environment)
-            .is_err()
-        {
-            world_snapshot.restore(self.world.app.world_mut());
+            let checksum = self.world.state_checksum();
+            let state = TickState::capture(self.world.app.world_mut());
+            let mut trace = TickTrace {
+                tick,
+                player_id: self.player_id,
+                commands: accepted.clone(),
+                state,
+                rejections: rejections.clone(),
+                metrics: self.metrics.clone(),
+                state_checksum: checksum,
+                security_alerts: Vec::new(),
+            };
+            trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
+            let environment = ReplayEnvironment::capture(self.world.app.world());
+            last_accepted = accepted;
+            last_rejections = rejections;
+            last_security_alerts = trace.security_alerts.clone();
+            if self
+                .committer
+                .commit_with_environment(trace.clone(), environment)
+                .is_ok()
+            {
+                committed_trace = Some(trace);
+                break;
+            }
+            self.metrics = metrics_before_execution;
             self.metrics.commit_failures += 1;
+            world_snapshot.clone().restore(self.world.app.world_mut());
+        }
+
+        let Some(trace) = committed_trace else {
+            self.degraded_mode.record_abandoned_tick();
             return TickReport {
                 tick,
                 committed: false,
                 broadcasted: false,
-                accepted,
-                rejections,
+                accepted: last_accepted,
+                rejections: last_rejections,
                 metrics: self.metrics.clone(),
-                security_alerts: trace.security_alerts,
+                security_alerts: last_security_alerts,
             };
-        }
+        };
 
         self.tick_counter += 1;
+        self.degraded_mode.record_committed_tick();
         let broadcast = TickBroadcast {
             tick,
             player_id: self.player_id,
-            accepted: accepted.clone(),
-            rejections: rejections.clone(),
-            state_checksum: checksum,
+            accepted: trace.commands.clone(),
+            rejections: trace.rejections.clone(),
+            state_checksum: trace.state_checksum,
         };
         let broadcasted = if self.broadcaster.broadcast(broadcast).is_ok() {
             true
@@ -887,8 +1021,8 @@ where
             tick,
             committed: true,
             broadcasted,
-            accepted,
-            rejections,
+            accepted: trace.commands,
+            rejections: trace.rejections,
             metrics: self.metrics.clone(),
             security_alerts: trace.security_alerts,
         }
@@ -899,12 +1033,17 @@ where
 pub struct InMemoryTickCommitter {
     pub records: Vec<TickTrace>,
     pub fail_next: bool,
+    pub fail_count: u32,
 }
 
 impl TickCommitter for InMemoryTickCommitter {
     fn commit(&mut self, trace: TickTrace) -> Result<(), CommitError> {
         if self.fail_next {
             self.fail_next = false;
+            return Err(CommitError::Failed("in-memory commit failed".to_string()));
+        }
+        if self.fail_count > 0 {
+            self.fail_count -= 1;
             return Err(CommitError::Failed("in-memory commit failed".to_string()));
         }
 
@@ -1470,6 +1609,22 @@ mod tests {
             &mut self,
             _snapshot: TickSnapshot,
         ) -> Result<Vec<CommandIntent>, ExecutorError> {
+            self.result.clone()
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct CountingExecutor {
+        result: Result<Vec<CommandIntent>, ExecutorError>,
+        calls: Arc<Mutex<u32>>,
+    }
+
+    impl PlayerExecutor for CountingExecutor {
+        fn collect(
+            &mut self,
+            _snapshot: TickSnapshot,
+        ) -> Result<Vec<CommandIntent>, ExecutorError> {
+            *self.calls.lock().unwrap() += 1;
             self.result.clone()
         }
     }
@@ -2146,7 +2301,7 @@ mod tests {
             1,
             executor,
             InMemoryTickCommitter {
-                fail_next: true,
+                fail_count: MAX_COMMIT_ATTEMPTS,
                 ..Default::default()
             },
             InMemoryTickBroadcaster::default(),
@@ -2157,6 +2312,7 @@ mod tests {
         assert!(!report.committed);
         assert!(!report.broadcasted);
         assert_eq!(scheduler.tick_counter, 0);
+        assert_eq!(report.metrics.commit_failures, MAX_COMMIT_ATTEMPTS as u64);
         assert_eq!(scheduler.broadcaster.broadcasts.len(), 0);
         assert_eq!(before, scheduler.world.state_checksum());
         assert_eq!(
@@ -2170,6 +2326,120 @@ mod tests {
                 .y,
             10
         );
+    }
+
+    #[test]
+    fn commit_failures_retry_three_times_and_restore_snapshot_between_attempts() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let before = world.state_checksum();
+        let executor = StaticExecutor {
+            result: Ok(vec![CommandIntent {
+                sequence: 1,
+                action: CommandAction::Move {
+                    object_id: object_id(drone),
+                    direction: Direction::Top,
+                },
+            }]),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter {
+                fail_count: 2,
+                ..Default::default()
+            },
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(report.committed);
+        assert_eq!(report.metrics.commit_failures, 2);
+        assert_eq!(scheduler.tick_counter, 1);
+        assert_ne!(before, scheduler.world.state_checksum());
+        assert_eq!(
+            scheduler
+                .world
+                .app
+                .world()
+                .entity(drone)
+                .get::<Position>()
+                .unwrap()
+                .y,
+            9
+        );
+    }
+
+    #[test]
+    fn multiplayer_commit_retry_reuses_collect_results() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let calls = Arc::new(Mutex::new(0));
+        let mut executors: HashMap<PlayerId, Box<dyn PlayerExecutor>> = HashMap::new();
+        executors.insert(
+            1,
+            Box::new(CountingExecutor {
+                calls: calls.clone(),
+                result: Ok(vec![CommandIntent {
+                    sequence: 1,
+                    action: CommandAction::Move {
+                        object_id: object_id(drone),
+                        direction: Direction::Top,
+                    },
+                }]),
+            }),
+        );
+        let mut scheduler = MultiPlayerTickScheduler::new(
+            world,
+            executors,
+            InMemoryTickCommitter {
+                fail_count: 2,
+                ..Default::default()
+            },
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(report.committed);
+        assert_eq!(*calls.lock().unwrap(), 1);
+        assert_eq!(report.metrics.commit_failures, 2);
+        assert!(scheduler.collect_cache.is_none());
+    }
+
+    #[test]
+    fn three_abandoned_ticks_enter_degraded_mode_and_disable_mcp_deploy() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let executor = StaticExecutor {
+            result: Ok(vec![CommandIntent {
+                sequence: 1,
+                action: CommandAction::Move {
+                    object_id: object_id(drone),
+                    direction: Direction::Top,
+                },
+            }]),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter {
+                fail_count: MAX_COMMIT_ATTEMPTS * DEGRADED_ABANDON_THRESHOLD,
+                ..Default::default()
+            },
+            InMemoryTickBroadcaster::default(),
+        );
+
+        for _ in 0..DEGRADED_ABANDON_THRESHOLD {
+            assert!(!scheduler.tick().committed);
+        }
+
+        assert!(scheduler.degraded_mode.enabled);
+        assert!(scheduler.degraded_mode.join_lock);
+        assert!(!scheduler.degraded_mode.mcp_deploy_enabled);
     }
 
     #[test]
