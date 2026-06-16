@@ -1193,11 +1193,21 @@ pub struct Controller {
     pub repair_per_drone: u32,
 }
 
+/// Tracks the deployed code version for a drone. Updated by
+/// code_propagation_system when a new code version propagates to this drone.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct CodeVersion(pub u64);
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MarkedForDeath;
 
 /// Shared resource tracking per-player age repair totals across Controller and Depot systems.
 /// Combined repair cannot exceed 50% of natural growth per tick per drone.
+/// Per-player latest deployed code version. Set by MCP deploy; read by
+/// code_propagation_system to determine which drones are outdated.
+#[derive(BevyResource, Debug, Clone, Default)]
+pub struct LatestCodeVersions(pub indexmap::IndexMap<PlayerId, u64>);
+
 #[derive(BevyResource, Debug, Clone, Default)]
 pub struct RepairTracker {
     pub per_player: IndexMap<PlayerId, u32>,

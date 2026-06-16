@@ -17,6 +17,7 @@ pub mod security;
 pub mod sim;
 pub mod systems;
 pub mod tick;
+pub mod tutorial;
 pub mod visibility;
 pub mod world;
 

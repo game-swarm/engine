@@ -532,6 +532,7 @@ impl WorldConfig {
             self.special_effects.clone(),
         ));
         app.insert_resource(CustomActionRegistry::from_defs(self.custom_actions.clone()));
+        app.insert_resource(LatestCodeVersions::default());
         app.insert_resource(RepairTracker {
             per_player: Default::default(),
             hard_cap: 1,
@@ -587,7 +588,58 @@ impl std::fmt::Display for WorldConfigLoadError {
     }
 }
 impl std::error::Error for WorldConfigLoadError {}
-fn code_propagation_system() {}
+fn code_propagation_system(
+    config: Res<WorldConfig>,
+    latest: Res<LatestCodeVersions>,
+    mut commands: Commands,
+    positions: Query<(Entity, &Position, &Owner, Option<&CodeVersion>)>,
+    spawn_structures: Query<(Entity, &Position), With<Structure>>,
+    controllers: Query<(Entity, &Position), With<Controller>>,
+) {
+    let speed = config.code.propagation_speed;
+    if speed == 0 {
+        return;
+    }
+
+    let sources: Vec<Position> = match config.code.propagation_source {
+        CodePropagationSource::Spawn => {
+            spawn_structures.iter().map(|(_, pos)| *pos).collect()
+        }
+        CodePropagationSource::Controller => {
+            controllers.iter().map(|(_, pos)| *pos).collect()
+        }
+        CodePropagationSource::Global => return,
+    };
+
+    if sources.is_empty() {
+        return;
+    }
+
+    for (entity, pos, owner, code_version) in positions.iter() {
+        let Some(&latest_version) = latest.0.get(&owner.0) else {
+            continue;
+        };
+        let current = code_version.copied().unwrap_or_default();
+        if current.0 >= latest_version {
+            continue;
+        }
+        let nearest = sources
+            .iter()
+            .map(|src| hex_distance(pos, src))
+            .min()
+            .unwrap_or(u32::MAX);
+        if nearest <= speed {
+            commands.entity(entity).insert(CodeVersion(latest_version));
+        }
+    }
+}
+
+fn hex_distance(a: &Position, b: &Position) -> u32 {
+    let dx = (a.x - b.x).unsigned_abs();
+    let dy = (a.y - b.y).unsigned_abs();
+    let dz = ((a.x + a.y) - (b.x + b.y)).unsigned_abs();
+    (dx + dy + dz) / 2
+}
 
 pub struct SwarmWorld {
     pub app: App,

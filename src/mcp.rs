@@ -939,6 +939,16 @@ impl McpServer {
                 serde_json::to_value(self.swarm_oauth2_login(params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
+            "swarm_list_modules" => {
+                let params: ListModulesParams = if params.is_null() {
+                    ListModulesParams { player_id: None }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(self.swarm_list_modules(&params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_deploy" => {
                 let params: DeployParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -1123,6 +1133,19 @@ impl McpServer {
             issued_at,
             expires_at: issued_at + CERTIFICATE_TTL_SECONDS,
         })
+    }
+
+    pub fn swarm_list_modules(&self, params: &ListModulesParams) -> Vec<ModuleInfo> {
+        self.modules
+            .iter()
+            .filter(|m| params.player_id.is_none() || params.player_id == Some(m.player_id))
+            .map(|m| ModuleInfo {
+                player_id: m.player_id,
+                module_hash: m.module_id.clone(),
+                wasm_size: m.wasm_bytes.len(),
+                compiled_at: None,
+            })
+            .collect()
     }
 
     pub fn swarm_deploy(
@@ -1571,6 +1594,10 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
         ToolInfo {
             name: "swarm_get_docs".to_string(),
             description: "Get Swarm documentation and reference material".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_list_modules".to_string(),
+            description: "List all deployed WASM modules across all players".to_string(),
         },
         ToolInfo {
             name: "swarm_deploy".to_string(),
@@ -3164,22 +3191,20 @@ pub fn swarm_inspect_room(
     })
 }
 
-// ── G13: swarm_list_modules ──────────────────────────────────────────
+
+// ── G13: swarm_list_modules types ────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListModulesParams {
+    pub player_id: Option<PlayerId>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleInfo {
-    pub module_id: String,
-    pub hash: String,
-    pub deployed_at: String,
-}
-
-pub fn swarm_list_modules(context: McpContext) -> Vec<ModuleInfo> {
-    // Return stub — real implementation queries module storage
-    vec![ModuleInfo {
-        module_id: format!("player-{}-default", context.player_id),
-        hash: "not-implemented".to_string(),
-        deployed_at: "not-implemented".to_string(),
-    }]
+    pub player_id: PlayerId,
+    pub module_hash: String,
+    pub wasm_size: usize,
+    pub compiled_at: Option<u64>,
 }
 
 // ── G14: swarm_get_replay ────────────────────────────────────────────
