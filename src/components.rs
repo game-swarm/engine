@@ -1174,3 +1174,11 @@ pub struct Controller {
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MarkedForDeath;
+
+/// Shared resource tracking per-player age repair totals across Controller and Depot systems.
+/// Combined repair cannot exceed 50% of natural growth per tick per drone.
+#[derive(BevyResource, Debug, Clone, Default)]
+pub struct RepairTracker {
+    pub per_player: IndexMap<PlayerId, u32>,
+    pub hard_cap: u32,
+}

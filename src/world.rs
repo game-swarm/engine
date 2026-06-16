@@ -531,6 +531,10 @@ impl WorldConfig {
             self.special_effects.clone(),
         ));
         app.insert_resource(CustomActionRegistry::from_defs(self.custom_actions.clone()));
+        app.insert_resource(RepairTracker {
+            per_player: Default::default(),
+            hard_cap: 1,
+        });
     }
     fn register_systems(&self, app: &mut App) {
         if self.propagation_system_enabled() {
@@ -548,6 +552,7 @@ impl WorldConfig {
                 global_storage_system,
                 controller_system,
                 controller_repair_system,
+                depot_repair_system,
                 room_state_system,
                 combat_system,
                 decay_system,

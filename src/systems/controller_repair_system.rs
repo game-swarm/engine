@@ -1,14 +1,18 @@
 use bevy::prelude::*;
-use indexmap::IndexMap;
 
-use crate::components::{Controller, Drone, PlayerId, Position};
+use crate::components::{Controller, Drone, PlayerId, Position, RepairTracker};
 
-/// Drone age repair system — handles both Controller and Depot repair.
+/// Drone age repair system — handles Controller repair only.
+/// Depot repair is handled separately in depot_repair_system.
+/// Both systems share RepairTracker to enforce the combined hard cap.
 /// Runs after command execution, before decay.
 pub fn controller_repair_system(
     mut drones: Query<(&mut Drone, &Position)>,
     controllers: Query<(&Controller, &Position)>,
+    mut repair_tracker: ResMut<RepairTracker>,
 ) {
+    let hard_cap = repair_tracker.hard_cap;
+
     // Collect all repair sources: Controllers with repair capacity
     let repair_sources: Vec<(&Controller, &Position)> = controllers
         .iter()
@@ -19,15 +23,20 @@ pub fn controller_repair_system(
         return;
     }
 
-    // Track per-player age repair totals for hard cap
-    let mut player_repair_totals: IndexMap<PlayerId, u32> = IndexMap::new();
-
     for (mut drone, drone_pos) in drones.iter_mut() {
         if drone.age == 0 {
             continue;
         }
 
         let player_id = drone.owner;
+
+        // Check hard cap — shared across Controller + Depot
+        let total_so_far = *repair_tracker.per_player.get(&player_id).unwrap_or(&0);
+        if total_so_far >= hard_cap {
+            continue;
+        }
+
+        let remaining_cap = hard_cap - total_so_far;
 
         // Check each repair source
         for (controller, ctrl_pos) in &repair_sources {
@@ -43,21 +52,13 @@ pub fn controller_repair_system(
                 continue;
             }
 
-            // Check capacity — per-player hard cap: 50% of natural growth
-            let total_so_far = *player_repair_totals.get(&player_id).unwrap_or(&0);
-            let hard_cap = 1; // Natural growth is 1/tick, max repair is 0.5
-            if total_so_far >= hard_cap {
-                break;
-            }
-
             // Apply repair
             let repair_amount = controller.repair_per_drone.min(drone.age);
-            let remaining_cap = hard_cap - total_so_far;
             let actual_repair = repair_amount.min(remaining_cap);
 
             if actual_repair > 0 {
                 drone.age = drone.age.saturating_sub(actual_repair);
-                *player_repair_totals.entry(player_id).or_default() += actual_repair;
+                *repair_tracker.per_player.entry(player_id).or_default() += actual_repair;
             }
             break; // One repair per tick per drone
         }
@@ -70,10 +71,16 @@ mod tests {
     use crate::components::{DEFAULT_DRONE_LIFESPAN, RoomId};
     use crate::world::create_world;
     use bevy::prelude::*;
+    use indexmap::IndexMap;
 
     #[test]
     fn controller_repairs_drone_in_range() {
         let mut world = create_world();
+        // Insert RepairTracker
+        world.app.world_mut().insert_resource(RepairTracker {
+            per_player: IndexMap::new(),
+            hard_cap: 1,
+        });
         let drone = world
             .app
             .world_mut()
