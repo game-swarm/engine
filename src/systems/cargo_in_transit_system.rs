@@ -58,7 +58,7 @@ pub fn cargo_in_transit_system(
         } else {
             // Update remaining ticks
             commands.entity(entity).insert(CargoInTransit {
-                remaining,
+                remaining_ticks: remaining,
                 ..cargo.clone()
             });
         }

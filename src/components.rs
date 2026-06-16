@@ -530,6 +530,7 @@ impl StructureType {
     pub const OBSERVER: Self = Self("Observer");
     pub const POWER_SPAWN: Self = Self("PowerSpawn");
     pub const FACTORY: Self = Self("Factory");
+    pub const DEPOT: Self = Self("Depot");
 
     #[allow(non_upper_case_globals)]
     pub const Spawn: Self = Self::SPAWN;
@@ -878,6 +879,10 @@ impl StructureTypeRegistry {
                 attack,
                 sight_range,
                 cost,
+                repair_capacity: None,
+                repair_range: None,
+                repair_aging: None,
+                maintenance: IndexMap::new(),
             },
         );
     }

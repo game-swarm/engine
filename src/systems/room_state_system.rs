@@ -36,7 +36,7 @@ pub struct PendingRoomClaims(pub Vec<PendingRoomClaim>);
 
 /// Room state machine system — transitions rooms between states based on controller status.
 pub fn room_state_system(
-    mut commands: Commands,
+    _commands: Commands,
     mut room_states: ResMut<RoomStates>,
     mut pending_claims: ResMut<PendingRoomClaims>,
     controllers: Query<(Entity, &Controller, &Position)>,
