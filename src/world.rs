@@ -1479,7 +1479,10 @@ propagation_source = "AnyDrone"
         )
         .unwrap();
 
-        assert_eq!(config.code.propagation_source, CodePropagationSource::AnyDrone);
+        assert_eq!(
+            config.code.propagation_source,
+            CodePropagationSource::AnyDrone
+        );
     }
 
     #[test]

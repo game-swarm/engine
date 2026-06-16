@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::clickhouse::ClickHouseWriter;
 use crate::command::{
-    CommandIntent, CommandRejection, CommandSource, MAX_FUEL, RawCommand, RefundAccumulator, Tick,
-    apply_command, source_gate, validate_command,
+    CommandAction, CommandIntent, CommandRejection, CommandSource, MAX_FUEL, ObjectId, RawCommand,
+    RefundAccumulator, Tick, apply_command, source_gate, validate_command,
 };
 use crate::components::*;
 use crate::replay_storage::WorldDelta;
@@ -774,28 +774,32 @@ where
         let mut last_security_alerts = Vec::new();
         let mut committed_trace = None;
         for attempt in 0..MAX_COMMIT_ATTEMPTS {
-            if attempt > 0 {
-                world_snapshot.clone().restore(self.world.app.world_mut());
-            }
+            let entity_map = if attempt > 0 {
+                world_snapshot.clone().restore(self.world.app.world_mut())
+            } else {
+                EntityRemap::default()
+            };
+            let attempt_commands = remap_commands(raw_commands.clone(), &entity_map);
             let execute_started_at = Instant::now();
-            let execution = execute_deterministic(&mut self.world, raw_commands.clone());
+            let execution = execute_deterministic(&mut self.world, attempt_commands);
             let execute_duration_ms = execute_started_at.elapsed().as_millis() as u64;
             self.metrics.execute_duration_ms = execute_duration_ms;
             if execute_duration_ms > EXECUTE_TIMEOUT_MS {
                 self.metrics.execute_timeouts += 1;
-                last_accepted = execution.commands;
+                last_accepted = remap_commands(execution.commands, &entity_map.inverse());
                 last_rejections = execution.rejections;
                 world_snapshot.clone().restore(self.world.app.world_mut());
                 break;
             }
 
-            let accepted = execution.commands;
+            let accepted = remap_commands(execution.commands, &entity_map.inverse());
             let rejections = execution.rejections;
             let metrics_before_execution = self.metrics.clone();
             self.metrics.record_execution(accepted.len(), &rejections);
 
             let checksum = self.world.state_checksum();
-            let state = TickState::capture(self.world.app.world_mut());
+            let state =
+                TickState::capture(self.world.app.world_mut()).remap_keys(&entity_map.inverse());
             let mut trace = TickTrace {
                 tick,
                 player_id: 0,
@@ -944,27 +948,31 @@ where
         let mut last_security_alerts = Vec::new();
         let mut committed_trace = None;
         for attempt in 0..MAX_COMMIT_ATTEMPTS {
-            if attempt > 0 {
-                world_snapshot.clone().restore(self.world.app.world_mut());
-            }
+            let entity_map = if attempt > 0 {
+                world_snapshot.clone().restore(self.world.app.world_mut())
+            } else {
+                EntityRemap::default()
+            };
+            let attempt_commands = remap_commands(raw_commands.clone(), &entity_map);
             let execute_started_at = Instant::now();
-            let execution = execute_deterministic(&mut self.world, raw_commands.clone());
+            let execution = execute_deterministic(&mut self.world, attempt_commands);
             let execute_duration_ms = execute_started_at.elapsed().as_millis() as u64;
             self.metrics.execute_duration_ms = execute_duration_ms;
             if execute_duration_ms > EXECUTE_TIMEOUT_MS {
                 self.metrics.execute_timeouts += 1;
-                last_accepted = execution.commands;
+                last_accepted = remap_commands(execution.commands, &entity_map.inverse());
                 last_rejections = execution.rejections;
                 world_snapshot.clone().restore(self.world.app.world_mut());
                 break;
             }
-            let accepted = execution.commands;
+            let accepted = remap_commands(execution.commands, &entity_map.inverse());
             let rejections = execution.rejections;
             let metrics_before_execution = self.metrics.clone();
             self.metrics.record_execution(accepted.len(), &rejections);
 
             let checksum = self.world.state_checksum();
-            let state = TickState::capture(self.world.app.world_mut());
+            let state =
+                TickState::capture(self.world.app.world_mut()).remap_keys(&entity_map.inverse());
             let mut trace = TickTrace {
                 tick,
                 player_id: self.player_id,
@@ -1240,8 +1248,10 @@ pub fn replay_tick(
     trace: &TickTrace,
 ) -> Result<TickState, ReplayError> {
     let mut world = crate::world::create_world();
-    previous_state.clone().restore(world.app.world_mut());
-    let replayed = execute_deterministic(&mut world, trace.commands.clone());
+    let entity_map = previous_state.clone().restore(world.app.world_mut());
+    let replay_commands = remap_commands(trace.commands.clone(), &entity_map);
+    let mut replayed = execute_deterministic(&mut world, replay_commands);
+    replayed.state = replayed.state.remap_keys(&entity_map.inverse());
     if replayed.state != trace.state {
         return Err(ReplayError::StateMismatch {
             tick: trace.tick,
@@ -1267,8 +1277,122 @@ pub fn replay_visible_entities(
     player_id: PlayerId,
 ) -> Vec<crate::mcp::VisibleEntity> {
     let mut world = crate::world::create_world();
-    trace.state.clone().restore(world.app.world_mut());
+    let entity_map = trace.state.clone().restore(world.app.world_mut());
     crate::mcp::visible_entities_for_player(world.app.world_mut(), player_id)
+        .into_iter()
+        .map(|entity| remap_visible_entity(entity, &entity_map.inverse()))
+        .collect()
+}
+
+fn remap_commands(mut commands: Vec<RawCommand>, entity_map: &EntityRemap) -> Vec<RawCommand> {
+    for command in &mut commands {
+        remap_command_action(&mut command.action, entity_map);
+    }
+    commands
+}
+
+fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
+    match action {
+        CommandAction::Move { object_id, .. } | CommandAction::Build { object_id, .. } => {
+            remap_object_id(object_id, entity_map)
+        }
+        CommandAction::Harvest {
+            object_id,
+            target_id,
+            ..
+        }
+        | CommandAction::Transfer {
+            object_id,
+            target_id,
+            ..
+        }
+        | CommandAction::Withdraw {
+            object_id,
+            target_id,
+            ..
+        }
+        | CommandAction::Attack {
+            object_id,
+            target_id,
+        }
+        | CommandAction::RangedAttack {
+            object_id,
+            target_id,
+            ..
+        }
+        | CommandAction::Heal {
+            object_id,
+            target_id,
+        } => {
+            remap_object_id(object_id, entity_map);
+            remap_object_id(target_id, entity_map);
+        }
+        CommandAction::ClaimController {
+            object_id,
+            controller_id,
+        } => {
+            remap_object_id(object_id, entity_map);
+            remap_object_id(controller_id, entity_map);
+        }
+        CommandAction::SpawnDrone { spawn_id, .. } => remap_object_id(spawn_id, entity_map),
+        CommandAction::Recycle {
+            object_id,
+            spawn_id,
+        } => {
+            remap_object_id(object_id, entity_map);
+            remap_object_id(spawn_id, entity_map);
+        }
+        CommandAction::Custom {
+            object_id,
+            target_id,
+            ..
+        } => {
+            remap_object_id(object_id, entity_map);
+            if let Some(target_id) = target_id {
+                remap_object_id(target_id, entity_map);
+            }
+        }
+        CommandAction::TransferToGlobal { .. }
+        | CommandAction::TransferFromGlobal { .. }
+        | CommandAction::CreateMarketOrder { .. }
+        | CommandAction::BuyMarketOrder { .. } => {}
+    }
+}
+
+fn remap_object_id(object_id: &mut ObjectId, entity_map: &EntityRemap) {
+    if let Some(entity) = entity_map.get(SnapshotEntity(*object_id)) {
+        *object_id = entity.0;
+    }
+}
+
+fn remap_visible_entity(
+    entity: crate::mcp::VisibleEntity,
+    entity_map: &EntityRemap,
+) -> crate::mcp::VisibleEntity {
+    use crate::mcp::VisibleEntity;
+
+    match entity {
+        VisibleEntity::Drone(mut drone) => {
+            remap_object_id(&mut drone.id, entity_map);
+            VisibleEntity::Drone(drone)
+        }
+        VisibleEntity::Structure(mut structure) => {
+            remap_object_id(&mut structure.id, entity_map);
+            VisibleEntity::Structure(structure)
+        }
+        VisibleEntity::Source(mut source) => {
+            remap_object_id(&mut source.id, entity_map);
+            VisibleEntity::Source(source)
+        }
+        VisibleEntity::Resource(mut resource) => {
+            remap_object_id(&mut resource.id, entity_map);
+            VisibleEntity::Resource(resource)
+        }
+        VisibleEntity::Controller(mut controller) => {
+            remap_object_id(&mut controller.id, entity_map);
+            VisibleEntity::Controller(controller)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1305,6 +1429,23 @@ impl From<Entity> for SnapshotEntity {
 impl From<SnapshotEntity> for Entity {
     fn from(entity: SnapshotEntity) -> Self {
         Entity::from_bits(entity.0)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EntityRemap(HashMap<SnapshotEntity, SnapshotEntity>);
+
+impl EntityRemap {
+    fn insert(&mut self, old: SnapshotEntity, new: SnapshotEntity) {
+        self.0.insert(old, new);
+    }
+
+    fn get(&self, entity: SnapshotEntity) -> Option<SnapshotEntity> {
+        self.0.get(&entity).copied()
+    }
+
+    fn inverse(&self) -> Self {
+        Self(self.0.iter().map(|(old, new)| (*new, *old)).collect())
     }
 }
 
@@ -1432,19 +1573,19 @@ impl WorldSnapshot {
         }
     }
 
-    pub fn restore(self, world: &mut World) {
+    pub fn restore(self, world: &mut World) -> EntityRemap {
         let current_entities = Self::tracked_entities(world);
         for entity in current_entities {
-            if !self.entities.contains_key(&SnapshotEntity::from(entity)) {
-                let _ = world.despawn(entity);
-            }
+            let _ = world.despawn(entity);
         }
 
-        for (entity, snapshot) in self.entities {
-            #[allow(deprecated)]
-            let mut entity_mut = world
-                .get_or_spawn(Entity::from(entity))
-                .expect("snapshot entity should be spawnable during restore");
+        let mut entity_map = EntityRemap::default();
+        let mut entities = self.entities.into_iter().collect::<Vec<_>>();
+        entities.sort_unstable_by_key(|(entity, _)| *entity);
+        for (old_entity, snapshot) in entities {
+            let mut entity_mut = world.spawn_empty();
+            let new_entity = SnapshotEntity::from(entity_mut.id());
+            entity_map.insert(old_entity, new_entity);
             restore_component(&mut entity_mut, snapshot.position);
             restore_component(&mut entity_mut, snapshot.owner);
             restore_component(&mut entity_mut, snapshot.drone);
@@ -1468,6 +1609,17 @@ impl WorldSnapshot {
         *world.resource_mut::<PlayerGlobalStorage>() = self.global_storage;
         *world.resource_mut::<PendingGlobalTransfers>() = self.pending_global_transfers;
         *world.resource_mut::<MarketOrders>() = self.market_orders;
+        entity_map
+    }
+
+    fn remap_keys(mut self, entity_map: &EntityRemap) -> Self {
+        self.entities = self
+            .entities
+            .into_iter()
+            .map(|(entity, snapshot)| (entity_map.get(entity).unwrap_or(entity), snapshot))
+            .collect();
+        remap_pending_combat(&mut self.pending_combat, entity_map);
+        self
     }
 
     fn tracked_entities(world: &mut World) -> Vec<Entity> {
@@ -1511,6 +1663,18 @@ impl WorldSnapshot {
                 },
             )
             .collect()
+    }
+}
+
+fn remap_pending_combat(combat: &mut PendingCombat, entity_map: &EntityRemap) {
+    for (entity, _) in &mut combat.damage {
+        remap_object_id(entity, entity_map);
+    }
+    for (entity, _, _) in &mut combat.typed_damage {
+        remap_object_id(entity, entity_map);
+    }
+    for (entity, _) in &mut combat.heal {
+        remap_object_id(entity, entity_map);
     }
 }
 
