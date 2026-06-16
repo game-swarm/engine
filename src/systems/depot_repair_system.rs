@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
 
-use crate::components::{Drone, PlayerId, Position, RepairTracker, Structure, StructureType, StructureTypeRegistry};
+use crate::components::{
+    Drone, PlayerId, Position, RepairTracker, Structure, StructureType, StructureTypeRegistry,
+};
 
 /// Depot repair system — runs after controller_repair_system.
 /// Depots within range consume stored energy to reduce drone age.
@@ -188,7 +190,11 @@ mod tests {
                 lifespan: DEFAULT_DRONE_LIFESPAN,
                 executed_command_this_tick: false,
             },
-            Position { x: 0, y: 0, room: RoomId(0) },
+            Position {
+                x: 0,
+                y: 0,
+                room: RoomId(0),
+            },
         ));
         // Depot with 0 energy
         world.app.world_mut().spawn((
@@ -201,12 +207,21 @@ mod tests {
                 energy_capacity: Some(500),
                 cooldown: 0,
             },
-            Position { x: 0, y: 0, room: RoomId(0) },
+            Position {
+                x: 0,
+                y: 0,
+                room: RoomId(0),
+            },
         ));
 
         world.app.update();
 
-        let drones: Vec<&Drone> = world.app.world_mut().query::<&Drone>().iter(world.app.world()).collect();
+        let drones: Vec<&Drone> = world
+            .app
+            .world_mut()
+            .query::<&Drone>()
+            .iter(world.app.world())
+            .collect();
         // No repair should happen — energy is 0, decay adds +1 → 11
         assert_eq!(
             drones[0].age, 11,
@@ -238,7 +253,11 @@ mod tests {
                 lifespan: DEFAULT_DRONE_LIFESPAN,
                 executed_command_this_tick: false,
             },
-            Position { x: 0, y: 0, room: RoomId(0) },
+            Position {
+                x: 0,
+                y: 0,
+                room: RoomId(0),
+            },
         ));
         // Player 2 drone
         world.app.world_mut().spawn((
@@ -256,7 +275,11 @@ mod tests {
                 lifespan: DEFAULT_DRONE_LIFESPAN,
                 executed_command_this_tick: false,
             },
-            Position { x: 0, y: 0, room: RoomId(0) },
+            Position {
+                x: 0,
+                y: 0,
+                room: RoomId(0),
+            },
         ));
         // Player 1 Depot
         world.app.world_mut().spawn((
@@ -269,12 +292,21 @@ mod tests {
                 energy_capacity: Some(500),
                 cooldown: 0,
             },
-            Position { x: 0, y: 0, room: RoomId(0) },
+            Position {
+                x: 0,
+                y: 0,
+                room: RoomId(0),
+            },
         ));
 
         world.app.update();
 
-        let drones: Vec<&Drone> = world.app.world_mut().query::<&Drone>().iter(world.app.world()).collect();
+        let drones: Vec<&Drone> = world
+            .app
+            .world_mut()
+            .query::<&Drone>()
+            .iter(world.app.world())
+            .collect();
         // Player 1 drone: repair -2 + decay +1 → 9
         assert!(drones[0].age < 10, "player 1's drone should be repaired");
         // Player 2 drone NOT repaired, decay +1 → 11

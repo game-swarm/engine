@@ -8,10 +8,7 @@ use crate::world::WorldConfig;
 ///
 /// Runs before `spawn_system` in the system chain so PvP-blocked tick
 /// processes zero combat.
-pub fn pvp_block_system(
-    config: Res<WorldConfig>,
-    mut combat: ResMut<PendingCombat>,
-) {
+pub fn pvp_block_system(config: Res<WorldConfig>, mut combat: ResMut<PendingCombat>) {
     if config.combat.pvp_enabled {
         return;
     }

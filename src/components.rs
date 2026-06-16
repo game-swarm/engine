@@ -836,7 +836,9 @@ impl Default for StructureTypeRegistry {
                 structure_type,
                 StructureTypeDef {
                     name: structure_type,
-                    description: "Forward maintenance depot — consumes resources to reduce drone age".to_string(),
+                    description:
+                        "Forward maintenance depot — consumes resources to reduce drone age"
+                            .to_string(),
                     category: "logistics".to_string(),
                     hits: 3000,
                     rcl_required: 4,

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::clickhouse::ClickHouseWriter;
 use crate::command::{
-    CommandIntent, CommandRejection, CommandSource, RawCommand, RefundAccumulator, Tick,
-    apply_command, source_gate, validate_command, MAX_FUEL,
+    CommandIntent, CommandRejection, CommandSource, MAX_FUEL, RawCommand, RefundAccumulator, Tick,
+    apply_command, source_gate, validate_command,
 };
 use crate::components::*;
 use crate::replay_storage::WorldDelta;
@@ -289,8 +289,12 @@ impl TickMetrics {
     /// Subtract execution metrics (used when replaying from cache to avoid
     /// double-counting fuel when the cache's COLLECT already charged).
     pub fn subtract_execution(&mut self, other: &TickMetrics) {
-        self.accepted_commands = self.accepted_commands.saturating_sub(other.accepted_commands);
-        self.rejected_commands = self.rejected_commands.saturating_sub(other.rejected_commands);
+        self.accepted_commands = self
+            .accepted_commands
+            .saturating_sub(other.accepted_commands);
+        self.rejected_commands = self
+            .rejected_commands
+            .saturating_sub(other.rejected_commands);
         self.total_commands = self.total_commands.saturating_sub(other.total_commands);
         self.fuel_consumed = self.fuel_consumed.saturating_sub(other.fuel_consumed);
         self.refund_events = self.refund_events.saturating_sub(other.refund_events);
@@ -715,7 +719,10 @@ where
                     .map(|(&player_id, executor)| {
                         scope.spawn(move || {
                             collect_player_commands(
-                                tick, player_id, state_checksum, executor.as_mut(),
+                                tick,
+                                player_id,
+                                state_checksum,
+                                executor.as_mut(),
                             )
                         })
                     })

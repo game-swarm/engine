@@ -616,12 +616,8 @@ fn code_propagation_system(
     }
 
     let sources: Vec<Position> = match config.code.propagation_source {
-        CodePropagationSource::Spawn => {
-            spawn_structures.iter().map(|(_, pos)| *pos).collect()
-        }
-        CodePropagationSource::Controller => {
-            controllers.iter().map(|(_, pos)| *pos).collect()
-        }
+        CodePropagationSource::Spawn => spawn_structures.iter().map(|(_, pos)| *pos).collect(),
+        CodePropagationSource::Controller => controllers.iter().map(|(_, pos)| *pos).collect(),
         CodePropagationSource::Global => return,
     };
 

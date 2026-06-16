@@ -11,11 +11,18 @@ pub enum RoomState {
     /// No player controller present
     Neutral,
     /// Controller placed, progress < progress_total (not yet RCL 1)
-    Reserved { owner: PlayerId, remaining_ticks: u32 },
+    Reserved {
+        owner: PlayerId,
+        remaining_ticks: u32,
+    },
     /// Room fully owned and operational
     Owned { owner: PlayerId },
     /// Two players contesting the same controller
-    Contested { player_a: PlayerId, player_b: PlayerId, progress_offset: i32 },
+    Contested {
+        player_a: PlayerId,
+        player_b: PlayerId,
+        progress_offset: i32,
+    },
     /// Owner lost, downgrade timer active
     Abandoned { remaining_ticks: u32 },
 }
@@ -43,7 +50,11 @@ pub fn room_state_system(
 ) {
     // Process pending claims first
     for claim in pending_claims.0.drain(..) {
-        let current = room_states.0.get(&claim.room).copied().unwrap_or(RoomState::Neutral);
+        let current = room_states
+            .0
+            .get(&claim.room)
+            .copied()
+            .unwrap_or(RoomState::Neutral);
         match current {
             RoomState::Neutral => {
                 room_states.0.insert(
@@ -74,7 +85,10 @@ pub fn room_state_system(
     for (room, state) in room_states.0.iter() {
         let new_state = match *state {
             RoomState::Neutral | RoomState::Owned { .. } => continue,
-            RoomState::Reserved { owner, remaining_ticks } => {
+            RoomState::Reserved {
+                owner,
+                remaining_ticks,
+            } => {
                 // Check if this room's controller has reached RCL 1
                 let mut upgraded = false;
                 for (_e, ctrl, pos) in controllers.iter() {
@@ -204,7 +218,9 @@ mod tests {
 
         let state = states.0.get(&room).unwrap();
         match state {
-            RoomState::Contested { player_a, player_b, .. } => {
+            RoomState::Contested {
+                player_a, player_b, ..
+            } => {
                 assert_eq!(*player_a, 1);
                 assert_eq!(*player_b, 2);
             }
