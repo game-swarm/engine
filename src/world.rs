@@ -91,8 +91,8 @@ pub struct CodeUpdateWindow {
 pub enum CodePropagationSource {
     Spawn,
     Controller,
-    #[serde(alias = "AnyDrone")]
-    Global,
+    #[serde(alias = "Global")]
+    AnyDrone,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -898,6 +898,9 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
         .resource_mut::<GlobalStorageConfig>()
         .namespace = namespace;
 
+    config.install_resources(&mut app);
+    config.register_systems(&mut app);
+
     if mode == WorldMode::Tutorial {
         let mut registry = app.world_mut().resource_mut::<ResourceRegistry>();
         if let Some(source) = registry.sources.get_mut("EnergyField") {
@@ -905,8 +908,6 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
             source.regeneration = (source.regeneration / 10).max(1);
         }
     }
-    config.install_resources(&mut app);
-    config.register_systems(&mut app);
 
     let room = RoomId(0);
     let mut terrains = RoomTerrains::default();

@@ -1,0 +1,27 @@
+--cfg=feature="default"
+--check-cfg=cfg(docsrs,test)
+--check-cfg=cfg(feature, values("default", "fdb"))
+-Lnative=/data/swarm/engine/target/debug/build/blake3-a366396bf7a78a09/out
+-Lnative=/data/swarm/engine/target/debug/build/ittapi-sys-87eefb7347f1a028/out
+-Lnative=/data/swarm/engine/target/debug/build/wasmtime-d9da496e9359ba8e/out
+-Lnative=/data/swarm/engine/target/debug/build/wasmtime-jit-debug-5ac599b564b92f4c/out
+-Lnative=/data/swarm/engine/target/debug/build/zstd-sys-fe9c400a06b8b239/out
+-Lnative=/usr/lib
+-Ldependency=/data/swarm/engine/target/debug/deps
+--extern=bevy=/data/swarm/engine/target/debug/deps/libbevy-35f7041e6c1e36c7.rlib
+--extern=blake3=/data/swarm/engine/target/debug/deps/libblake3-448b68ac14142cc9.rlib
+--extern=ed25519_dalek=/data/swarm/engine/target/debug/deps/libed25519_dalek-df966af559b9f244.rlib
+--extern=getrandom=/data/swarm/engine/target/debug/deps/libgetrandom-36001cdd6f889735.rlib
+--extern=indexmap=/data/swarm/engine/target/debug/deps/libindexmap-405e8e1e27fbefc3.rlib
+--extern=redis=/data/swarm/engine/target/debug/deps/libredis-ba0b16a7727b783f.rlib
+--extern=reqwest=/data/swarm/engine/target/debug/deps/libreqwest-c0b875522b672457.rlib
+--extern=rhai=/data/swarm/engine/target/debug/deps/librhai-e907211d0d0df6da.rlib
+--extern=serde=/data/swarm/engine/target/debug/deps/libserde-cd2704e33009c496.rlib
+--extern=serde_json=/data/swarm/engine/target/debug/deps/libserde_json-547331909f3d69e6.rlib
+--extern=swarm_engine=/data/swarm/engine/target/debug/deps/libswarm_engine-d5532a24e711b4fd.rlib
+--extern=swarm_wasm_sandbox=/data/swarm/engine/target/debug/deps/libswarm_wasm_sandbox-17857c859d7ab7ea.rlib
+--extern=tempfile=/data/swarm/engine/target/debug/deps/libtempfile-bb9702d16246f836.rlib
+--extern=toml=/data/swarm/engine/target/debug/deps/libtoml-13b6d8f8ac6efc31.rlib
+--extern=wat=/data/swarm/engine/target/debug/deps/libwat-a3a03d44777666a7.rlib
+-Ccodegen-units=1
+-Cembed-bitcode=no

@@ -626,7 +626,7 @@ mod tests {
             (CommandSource::Admin, true, true),
             (CommandSource::Replay, false, false),
             (CommandSource::TestHarness, true, true),
-            (CommandSource::Tutorial, true, false),
+            (CommandSource::Tutorial, true, true),
             (CommandSource::Deploy, false, false),
             (CommandSource::Rollback, false, false),
             (CommandSource::RuleMod, false, false),
@@ -657,11 +657,11 @@ mod tests {
             (CommandSource::Admin, (true, true, true, true, true)),
             (CommandSource::Replay, (false, false, false, true, false)),
             (CommandSource::TestHarness, (true, true, true, true, true)),
-            (CommandSource::Tutorial, (true, false, false, true, false)),
+            (CommandSource::Tutorial, (true, false, false, true, true)),
             (CommandSource::Deploy, (false, false, true, false, false)),
             (CommandSource::Rollback, (true, true, true, true, false)),
             (CommandSource::RuleMod, (true, false, false, false, false)),
-            (CommandSource::Simulate, (false, false, false, true, true)),
+            (CommandSource::Simulate, (false, false, false, true, false)),
             (CommandSource::DryRun, (false, false, false, false, false)),
         ];
 
