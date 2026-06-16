@@ -1145,6 +1145,13 @@ impl Drone {
     }
 }
 
+/// Per-drone environment variables accessible from WASM modules.
+/// Managed by drone_env_var_system according to DroneConfig.env_vars.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroneEnv {
+    pub vars: indexmap::IndexMap<String, String>,
+}
+
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Structure {
     pub structure_type: StructureType,

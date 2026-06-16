@@ -3309,6 +3309,6 @@ fn build_cost(world: &World, structure: StructureType) -> ResourceCost {
         .unwrap_or_default()
 }
 
-fn entity(object_id: ObjectId) -> Result<Entity, RejectionReason> {
+pub fn entity(object_id: ObjectId) -> Result<Entity, RejectionReason> {
     Ok(Entity::from_bits(object_id))
 }

@@ -536,6 +536,7 @@ impl WorldConfig {
             per_player: Default::default(),
             hard_cap: 1,
         });
+        app.insert_resource(DroneEnvVars::default());
         app.insert_resource(ReplayStore::default());
     }
     fn register_systems(&self, app: &mut App) {
@@ -547,6 +548,7 @@ impl WorldConfig {
             (
                 rhai_rule_module_tick_start_system,
                 death_mark_system,
+                pvp_block_system,
                 spawn_system,
                 regeneration_system,
                 seed_rotation_system,
@@ -558,6 +560,8 @@ impl WorldConfig {
                 room_state_system,
                 combat_system,
                 decay_system,
+                memory_upkeep_system,
+                drone_env_var_system,
                 rhai_rule_module_tick_end_system,
                 death_cleanup_system,
                 onboarding_system,

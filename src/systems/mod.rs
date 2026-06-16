@@ -10,6 +10,9 @@ pub mod global_storage_system;
 pub mod regeneration_system;
 pub mod room_state_system;
 pub mod seed_rotation_system;
+pub mod drone_env_var_system;
+pub mod memory_upkeep_system;
+pub mod pvp_block_system;
 pub mod spawn_system;
 
 pub use combat_system::{
@@ -30,4 +33,10 @@ pub use global_storage_system::global_storage_system;
 pub use regeneration_system::regeneration_system;
 pub use room_state_system::{PendingRoomClaims, RoomState, RoomStates, room_state_system};
 pub use seed_rotation_system::{SeedRotationState, seed_rotation_system};
+pub use drone_env_var_system::{
+    DroneEnvVarError, DroneEnvVars, drone_env_var_system, read_drone_env_var,
+    write_drone_env_var,
+};
+pub use memory_upkeep_system::memory_upkeep_system;
+pub use pvp_block_system::pvp_block_system;
 pub use spawn_system::{PendingSpawn, PendingSpawnQueue, RoomDroneCounts, spawn_system};
