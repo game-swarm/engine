@@ -849,6 +849,12 @@ impl McpServer {
                 serde_json::to_value(self.swarm_explain_last_tick(world, context))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
+            "swarm_inspect_room" => {
+                let params: InspectRoomParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_inspect_room(world, context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_inspect_entity" => {
                 let params: InspectEntityParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -1576,6 +1582,10 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Inspect full state for an owned or visible entity".to_string(),
         },
         ToolInfo {
+            name: "swarm_inspect_room".to_string(),
+            description: "Inspect a room visible to the player: drone count, structures, controller".to_string(),
+        },
+        ToolInfo {
             name: "swarm_profile".to_string(),
             description: "Profile a player's current world state".to_string(),
         },
@@ -1647,6 +1657,7 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_get_available_actions"
         | "swarm_explain_last_tick"
         | "swarm_inspect_entity"
+        | "swarm_inspect_room"
         | "swarm_profile"
         | "swarm_dry_run_commands"
         | "swarm_get_docs"
@@ -1659,7 +1670,8 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_match_result"
         | "swarm_oauth2_login" => Some(CommandSource::McpQuery),
         "swarm_simulate" => Some(CommandSource::Simulate),
-        "swarm_get_replay" => Some(CommandSource::McpQuery),
+        "swarm_list_modules"
+        | "swarm_get_replay" => Some(CommandSource::McpQuery),
         _ => None,
     }
 }
