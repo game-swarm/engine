@@ -172,7 +172,10 @@ pub struct ReplayStore {
 impl ReplayStore {
     /// Find the nearest keyframe at or before `tick`.
     pub fn nearest_keyframe(&self, tick: Tick) -> Option<(Tick, &KeyframeData)> {
-        self.keyframes.range(..=tick).next_back().map(|(t, k)| (*t, k))
+        self.keyframes
+            .range(..=tick)
+            .next_back()
+            .map(|(t, k)| (*t, k))
     }
 
     /// Collect all deltas in (from_tick, to_tick] range inclusive.

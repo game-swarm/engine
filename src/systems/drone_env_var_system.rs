@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
 
-use crate::command::{entity, object_id, ObjectId};
+use crate::command::{ObjectId, entity, object_id};
 use crate::components::{Drone, DroneEnv};
 use crate::world::WorldConfig;
 
@@ -107,5 +107,7 @@ fn trim_to_memory_size(vars: &mut IndexMap<String, String>, max_size: usize) {
 }
 
 fn env_size(vars: &IndexMap<String, String>) -> usize {
-    vars.iter().map(|(key, value)| key.len() + value.len()).sum()
+    vars.iter()
+        .map(|(key, value)| key.len() + value.len())
+        .sum()
 }

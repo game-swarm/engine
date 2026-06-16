@@ -1670,8 +1670,7 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_match_result"
         | "swarm_oauth2_login" => Some(CommandSource::McpQuery),
         "swarm_simulate" => Some(CommandSource::Simulate),
-        "swarm_list_modules"
-        | "swarm_get_replay" => Some(CommandSource::McpQuery),
+        "swarm_list_modules" | "swarm_get_replay" => Some(CommandSource::McpQuery),
         _ => None,
     }
 }
@@ -3203,7 +3202,6 @@ pub fn swarm_inspect_room(
     })
 }
 
-
 // ── G13: swarm_list_modules types ────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3251,20 +3249,16 @@ pub fn swarm_get_replay(
         .ok_or_else(|| McpError::invalid_params("replay store not initialized"))?;
 
     if params.from_tick > params.to_tick {
-        return Err(McpError::invalid_params(
-            "from_tick must be <= to_tick",
-        ));
+        return Err(McpError::invalid_params("from_tick must be <= to_tick"));
     }
 
     // Find nearest keyframe at or before from_tick
-    let (keyframe_tick, _keyframe) = store
-        .nearest_keyframe(params.from_tick)
-        .ok_or_else(|| {
-            McpError::invalid_params(format!(
-                "no keyframe found at or before tick {}",
-                params.from_tick
-            ))
-        })?;
+    let (keyframe_tick, _keyframe) = store.nearest_keyframe(params.from_tick).ok_or_else(|| {
+        McpError::invalid_params(format!(
+            "no keyframe found at or before tick {}",
+            params.from_tick
+        ))
+    })?;
 
     // Collect deltas from keyframe+1 to to_tick
     let deltas = store.deltas_in_range(keyframe_tick, params.to_tick);
@@ -4289,8 +4283,14 @@ mod tests {
         // ReplayStore is initialized but empty (no keyframes/deltas recorded yet)
         let result = swarm_get_replay(
             &world,
-            McpContext { player_id: 0, tick: 0 },
-            GetReplayParams { from_tick: 0, to_tick: 10 },
+            McpContext {
+                player_id: 0,
+                tick: 0,
+            },
+            GetReplayParams {
+                from_tick: 0,
+                to_tick: 10,
+            },
         );
         // Should find no keyframe since store is empty → error
         assert!(result.is_err());
@@ -4302,11 +4302,22 @@ mod tests {
         let world = create_world();
         let result = swarm_get_replay(
             &world,
-            McpContext { player_id: 0, tick: 0 },
-            GetReplayParams { from_tick: 10, to_tick: 5 },
+            McpContext {
+                player_id: 0,
+                tick: 0,
+            },
+            GetReplayParams {
+                from_tick: 10,
+                to_tick: 5,
+            },
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("from_tick must be <= to_tick"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("from_tick must be <= to_tick")
+        );
     }
 
     #[test]

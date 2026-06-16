@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::{BodyPart, BodyPartRegistry, Drone, Owner, PlayerId, Position, RoomId, RoomTerrains};
+use crate::components::{
+    BodyPart, BodyPartRegistry, Drone, Owner, PlayerId, Position, RoomId, RoomTerrains,
+};
 use crate::onboarding::OnboardingEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
