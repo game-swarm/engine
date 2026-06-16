@@ -13,7 +13,7 @@ use crate::components::{
     Resource, Structure,
 };
 
-pub const DEFAULT_RHAI_AST_NODES_PER_TICK: usize = 10_000;
+pub const DEFAULT_RHAI_AST_NODES_PER_TICK: usize = 100_000;
 pub const DEFAULT_RHAI_ACTIONS_PER_TICK: usize = 100;
 pub const DEFAULT_RHAI_WALL_CLOCK_PER_TICK: Duration = Duration::from_millis(100);
 pub const DEFAULT_RHAI_MAX_CONSECUTIVE_OVER_BUDGET_TICKS: u32 = 10;
@@ -463,6 +463,8 @@ fn execute_rhai_script(
     engine.register_fn("set_attribute", rhai_set_attribute_enabled);
     engine.register_fn("add_damage_type", rhai_add_damage_type);
     engine.register_fn("set_resistance", rhai_set_resistance);
+    engine.register_fn("add_body_part_type", add_body_part_type);
+    engine.register_fn("register_action_handler", register_action_handler);
     {
         let buffered = Arc::clone(&buffered);
         engine.register_fn(
@@ -649,6 +651,20 @@ fn rhai_add_damage_type(actions: &mut RhaiActionBuffer, damage_type: &str) {
             damage_type: damage_type.to_string(),
         });
 }
+
+/// Rhai API stub for declaring a body part type from a rule module.
+///
+/// Full registry mutation is tracked on the roadmap; this no-op reserves
+/// `actions.add_body_part_type(name, definition)` for script modules.
+#[allow(unused)]
+fn add_body_part_type(_actions: &mut RhaiActionBuffer, _name: &str, _definition: rhai::Map) {}
+
+/// Rhai API stub for declaring a custom action handler from a rule module.
+///
+/// Handler isolation, capability checks, and deterministic invocation are tracked on the
+/// roadmap; this no-op reserves `actions.register_action_handler(name, handler)`.
+#[allow(unused)]
+fn register_action_handler(_actions: &mut RhaiActionBuffer, _name: &str, _handler: rhai::FnPtr) {}
 
 fn rhai_set_resistance(
     actions: &mut RhaiActionBuffer,
@@ -1017,7 +1033,7 @@ mod tests {
     #[test]
     fn default_budget_matches_design_limits() {
         let budget = RhaiExecutionBudget::default();
-        assert_eq!(budget.ast_nodes_per_tick, 10_000);
+        assert_eq!(budget.ast_nodes_per_tick, 100_000);
         assert_eq!(budget.actions_per_tick, 100);
         assert_eq!(budget.wall_clock_per_tick, Duration::from_millis(100));
         assert_eq!(budget.max_consecutive_over_budget_ticks, 10);
@@ -1028,7 +1044,7 @@ mod tests {
         let mut modules = RhaiRuleModules::default();
         modules.add_module(RhaiRuleModule::with_ast_nodes(
             "large",
-            10_001,
+            100_001,
             |_: &mut RhaiActions<'_>| panic!("over-budget AST module should be skipped"),
         ));
         for tick in 1..=10 {
@@ -1094,7 +1110,7 @@ mod tests {
     #[test]
     fn successful_tick_resets_consecutive_over_budget_count() {
         let mut module =
-            RhaiRuleModule::with_ast_nodes("recovering", 10_001, |_: &mut RhaiActions<'_>| {});
+            RhaiRuleModule::with_ast_nodes("recovering", 100_001, |_: &mut RhaiActions<'_>| {});
         let mut actions = Vec::new();
         run_module_tick_end(RhaiExecutionBudget::default(), &mut module, &mut actions);
         assert_eq!(module.consecutive_over_budget_ticks(), 1);
