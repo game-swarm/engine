@@ -217,6 +217,17 @@ impl Default for ResourceRegistry {
 }
 
 impl ResourceRegistry {
+    pub fn from_defs(resource_types: Vec<ResourceDef>, source_types: Vec<SourceDef>) -> Self {
+        let mut registry = Self::default();
+        for resource in resource_types {
+            registry.resources.insert(resource.name.clone(), resource);
+        }
+        for source in source_types {
+            registry.sources.insert(source.name.clone(), source);
+        }
+        registry
+    }
+
     pub fn resource(&self, name: &str) -> Option<&ResourceDef> {
         self.resources.get(name)
     }
@@ -276,5 +287,34 @@ mod tests {
         assert_eq!(source.produces.get("Energy"), Some(&1));
         assert_eq!(source.capacity, 3000);
         assert_eq!(source.regeneration, 300);
+    }
+
+    #[test]
+    fn registry_extends_defaults_from_resource_and_source_defs() {
+        let registry = ResourceRegistry::from_defs(
+            vec![ResourceDef {
+                name: "Mineral".to_string(),
+                display_name: "Mineral".to_string(),
+                category: "mineral".to_string(),
+                starting_amount: 0,
+                max_storage: 50_000,
+                decay_rate: 0.0,
+                tradeable: true,
+            }],
+            vec![SourceDef {
+                name: "MineralVein".to_string(),
+                produces: {
+                    let mut cost = ResourceCost::new();
+                    cost.insert("Mineral".to_string(), 2);
+                    cost
+                },
+                capacity: 1_000,
+                regeneration: 100,
+            }],
+        );
+
+        assert!(registry.resource("Energy").is_some());
+        assert_eq!(registry.resource("Mineral").unwrap().max_storage, 50_000);
+        assert_eq!(registry.source("MineralVein").unwrap().capacity, 1_000);
     }
 }
