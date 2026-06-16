@@ -1606,6 +1606,30 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Get Swarm documentation and reference material".to_string(),
         },
         ToolInfo {
+            name: "resources/list".to_string(),
+            description: "List available resource types".to_string(),
+        },
+        ToolInfo {
+            name: "resources/read".to_string(),
+            description: "Read resource definitions".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_oauth2_login".to_string(),
+            description: "Initiate OAuth2 login flow".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_oauth2_callback".to_string(),
+            description: "Handle OAuth2 provider callback".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_token_refresh".to_string(),
+            description: "Refresh an expiring access token".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_auth_revoke".to_string(),
+            description: "Revoke a session or certificate".to_string(),
+        },
+        ToolInfo {
             name: "swarm_list_modules".to_string(),
             description: "List all deployed WASM modules across all players".to_string(),
         },
