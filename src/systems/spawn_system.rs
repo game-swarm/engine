@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::{BodyPart, Drone, Owner, PlayerId, Position, RoomId, RoomTerrains};
+use crate::components::{BodyPart, BodyPartRegistry, Drone, Owner, PlayerId, Position, RoomId, RoomTerrains};
 use crate::onboarding::OnboardingEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +24,7 @@ pub fn spawn_system(
     mut queue: ResMut<PendingSpawnQueue>,
     mut room_counts: ResMut<RoomDroneCounts>,
     terrains: Res<RoomTerrains>,
+    body_registry: Res<BodyPartRegistry>,
     mut onboarding_events: EventWriter<OnboardingEvent>,
 ) {
     let pending = std::mem::take(&mut queue.0);
@@ -35,7 +36,7 @@ pub fn spawn_system(
         commands.spawn((
             spawn.position,
             Owner(spawn.owner),
-            Drone::new(spawn.owner, spawn.body),
+            Drone::new(spawn.owner, spawn.body, &body_registry),
         ));
         *room_counts
             .0

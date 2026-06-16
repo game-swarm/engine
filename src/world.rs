@@ -622,10 +622,11 @@ impl SwarmWorld {
     ) -> Entity {
         self.ensure_room(room);
         let position = Position { x, y, room };
+        let registry = self.app.world().resource::<BodyPartRegistry>().clone();
         let entity = self
             .app
             .world_mut()
-            .spawn((position, Owner(owner), Drone::new(owner, body)))
+            .spawn((position, Owner(owner), Drone::new(owner, body, &registry)))
             .id();
         let mut counts = self.app.world_mut().resource_mut::<RoomDroneCounts>();
         *counts.0.entry((position.room, owner)).or_default() += 1;

@@ -254,6 +254,7 @@ pub struct BodyPartTypeDef {
     pub base_damage: Option<u32>,
     pub heal_amount: Option<u32>,
     pub resistances: IndexMap<String, f64>,
+    pub age_modifier: i32,
 }
 impl Default for BodyPartTypeDef {
     fn default() -> Self {
@@ -263,6 +264,7 @@ impl Default for BodyPartTypeDef {
             base_damage: None,
             heal_amount: None,
             resistances: IndexMap::new(),
+            age_modifier: 0,
         }
     }
 }
@@ -298,6 +300,12 @@ impl Default for BodyPartRegistry {
             Some(DamageType::Kinetic.to_string());
         parts.get_mut(&BodyPart::RangedAttack).unwrap().base_damage = Some(25);
         parts.get_mut(&BodyPart::Heal).unwrap().heal_amount = Some(12);
+        // age_modifier: Tough lives longer, combat/utility parts reduce lifespan
+        parts.get_mut(&BodyPart::Tough).unwrap().age_modifier = 100;
+        parts.get_mut(&BodyPart::Attack).unwrap().age_modifier = -80;
+        parts.get_mut(&BodyPart::RangedAttack).unwrap().age_modifier = -50;
+        parts.get_mut(&BodyPart::Heal).unwrap().age_modifier = -30;
+        parts.get_mut(&BodyPart::Claim).unwrap().age_modifier = -50;
         parts
             .get_mut(&BodyPart::Tough)
             .unwrap()
@@ -1108,12 +1116,18 @@ pub struct Drone {
 }
 
 impl Drone {
-    pub fn new(owner: PlayerId, body: Vec<BodyPart>) -> Self {
+    pub fn new(owner: PlayerId, body: Vec<BodyPart>, registry: &BodyPartRegistry) -> Self {
         let carry_capacity = body
             .iter()
             .filter(|part| matches!(part, BodyPart::Carry))
             .count() as u32
             * 50;
+        let lifespan_mod: i32 = body
+            .iter()
+            .filter_map(|part| registry.parts.get(part))
+            .map(|def| def.age_modifier)
+            .sum();
+        let lifespan = DEFAULT_DRONE_LIFESPAN.saturating_add_signed(lifespan_mod);
         Self {
             owner,
             body,
@@ -1125,7 +1139,7 @@ impl Drone {
             spawning: false,
             age: 0,
             aging_remainder: 0,
-            lifespan: DEFAULT_DRONE_LIFESPAN,
+            lifespan,
             executed_command_this_tick: false,
         }
     }
@@ -1181,4 +1195,33 @@ pub struct MarkedForDeath;
 pub struct RepairTracker {
     pub per_player: IndexMap<PlayerId, u32>,
     pub hard_cap: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drone_lifespan_includes_age_modifiers() {
+        let registry = BodyPartRegistry::default();
+        // Tough (+100) + Attack (-80) → net +20
+        let drone = Drone::new(1, vec![BodyPart::Tough, BodyPart::Attack], &registry);
+        assert_eq!(drone.lifespan, 1520); // 1500 + 100 - 80
+
+        // Heal (-30) + Claim (-50) → net -80
+        let drone = Drone::new(2, vec![BodyPart::Heal, BodyPart::Claim], &registry);
+        assert_eq!(drone.lifespan, 1420); // 1500 - 30 - 50
+
+        // Move + Work + Carry → net 0
+        let drone = Drone::new(
+            3,
+            vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
+            &registry,
+        );
+        assert_eq!(drone.lifespan, 1500);
+
+        // Multiple Tough (+100 each)
+        let drone = Drone::new(4, vec![BodyPart::Tough, BodyPart::Tough], &registry);
+        assert_eq!(drone.lifespan, 1700); // 1500 + 100 + 100
+    }
 }
