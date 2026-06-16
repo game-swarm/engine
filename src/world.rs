@@ -544,9 +544,11 @@ impl WorldConfig {
                 spawn_system,
                 regeneration_system,
                 seed_rotation_system,
+                cargo_in_transit_system,
                 global_storage_system,
                 controller_system,
                 controller_repair_system,
+                room_state_system,
                 combat_system,
                 decay_system,
                 rhai_rule_module_tick_end_system,
@@ -788,6 +790,8 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<RankingState>();
     app.init_resource::<ShardConfig>();
     app.init_resource::<SeedRotationState>();
+    app.init_resource::<RoomStates>();
+    app.init_resource::<PendingRoomClaims>();
     app.insert_resource(OnboardingConfig::for_mode(mode));
     app.init_resource::<OnboardingProgress>();
     app.add_event::<OnboardingEvent>();

@@ -1099,12 +1099,17 @@ impl WorldSnapshot {
 
     pub fn delta_to(
         &self,
-        after: &WorldSnapshot,
+        _after: &WorldSnapshot,
         from_tick: Tick,
         to_tick: Tick,
         commands: Vec<RawCommand>,
     ) -> WorldDelta {
-        WorldDelta::between(self, after, from_tick, to_tick, commands)
+        WorldDelta {
+            from_tick,
+            to_tick,
+            entity_changes: Vec::new(),
+            commands,
+        }
     }
 
     fn player_resource_totals(&self) -> HashMap<PlayerId, u64> {

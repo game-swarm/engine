@@ -555,6 +555,8 @@ impl StructureType {
     pub const PowerSpawn: Self = Self::POWER_SPAWN;
     #[allow(non_upper_case_globals)]
     pub const Factory: Self = Self::FACTORY;
+    #[allow(non_upper_case_globals)]
+    pub const Depot: Self = Self::DEPOT;
 
     pub fn new(name: impl Into<String>) -> Self {
         Self(Box::leak(name.into().into_boxed_str()))
@@ -628,6 +630,10 @@ pub struct StructureTypeDef {
     pub attack: Option<StructureAttackDef>,
     pub sight_range: Option<u32>,
     pub cost: IndexMap<String, u32>,
+    pub repair_capacity: Option<u32>,
+    pub repair_range: Option<u32>,
+    pub repair_aging: Option<u32>,
+    pub maintenance: IndexMap<String, u32>,
 }
 
 impl Default for StructureTypeDef {
@@ -643,6 +649,10 @@ impl Default for StructureTypeDef {
             attack: None,
             sight_range: None,
             cost: IndexMap::new(),
+            repair_capacity: None,
+            repair_range: None,
+            repair_aging: None,
+            maintenance: IndexMap::new(),
         }
     }
 }
@@ -806,6 +816,33 @@ impl Default for StructureTypeRegistry {
             None,
             100000,
         );
+        // Depot: forward maintenance node
+        {
+            let structure_type = StructureType::DEPOT;
+            let mut cost = IndexMap::new();
+            cost.insert("Energy".to_string(), 700);
+            let mut maintenance = IndexMap::new();
+            maintenance.insert("Energy".to_string(), 1);
+            registry.structure_types.insert(
+                structure_type,
+                StructureTypeDef {
+                    name: structure_type,
+                    description: "Forward maintenance depot — consumes resources to reduce drone age".to_string(),
+                    category: "logistics".to_string(),
+                    hits: 3000,
+                    rcl_required: 4,
+                    max_per_room: None,
+                    capacity: Some(500),
+                    attack: None,
+                    sight_range: None,
+                    cost,
+                    repair_capacity: Some(10),
+                    repair_range: Some(3),
+                    repair_aging: Some(2),
+                    maintenance,
+                },
+            );
+        }
         registry
     }
 }
@@ -1060,7 +1097,9 @@ pub struct Drone {
     pub hits_max: u32,
     pub spawning: bool,
     pub age: u32,
+    pub aging_remainder: u8,
     pub lifespan: u32,
+    pub executed_command_this_tick: bool,
 }
 
 impl Drone {
@@ -1080,7 +1119,9 @@ impl Drone {
             hits_max: 100,
             spawning: false,
             age: 0,
+            aging_remainder: 0,
             lifespan: DEFAULT_DRONE_LIFESPAN,
+            executed_command_this_tick: false,
         }
     }
 }
