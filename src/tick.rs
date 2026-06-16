@@ -2486,17 +2486,14 @@ mod tests {
         assert_eq!(report.metrics.commit_failures, MAX_COMMIT_ATTEMPTS as u64);
         assert_eq!(scheduler.broadcaster.broadcasts.len(), 0);
         assert_eq!(before, scheduler.world.state_checksum());
-        assert_eq!(
-            scheduler
-                .world
-                .app
-                .world()
-                .entity(drone)
-                .get::<Position>()
-                .unwrap()
-                .y,
-            10
-        );
+        // Entity ID may change after snapshot restore (Bevy 0.16 spawn_empty),
+        // so find the drone by query instead of by entity ID.
+        let drone_y = {
+            let world = scheduler.world.app.world_mut();
+            let mut q = world.query_filtered::<&Position, With<Drone>>();
+            q.single(world).unwrap().y
+        };
+        assert_eq!(drone_y, 10);
     }
 
     #[test]
@@ -2530,17 +2527,13 @@ mod tests {
         assert_eq!(report.metrics.commit_failures, 2);
         assert_eq!(scheduler.tick_counter, 1);
         assert_ne!(before, scheduler.world.state_checksum());
-        assert_eq!(
-            scheduler
-                .world
-                .app
-                .world()
-                .entity(drone)
-                .get::<Position>()
-                .unwrap()
-                .y,
-            9
-        );
+        // Entity ID may change after snapshot restore (Bevy 0.16 spawn_empty).
+        let drone_y = {
+            let world = scheduler.world.app.world_mut();
+            let mut q = world.query_filtered::<&Position, With<Drone>>();
+            q.single(world).unwrap().y
+        };
+        assert_eq!(drone_y, 9);
     }
 
     #[test]
