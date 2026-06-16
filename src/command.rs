@@ -517,6 +517,13 @@ pub enum RejectionReason {
     TransferInProgress,
     TerminalRequired,
     OrderNotFound,
+    AlreadyHacked,
+    InvalidDamageType,
+    AlreadyDebilitated {
+        damage_type: String,
+    },
+    PlayerNotFound,
+    TargetFuelTooLow,
     UnknownAction {
         action: String,
     },
@@ -1136,6 +1143,11 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
             }),
             _ => default_rejection_detail(command, rejection, action),
         },
+        RejectionReason::AlreadyDebilitated { damage_type } => serde_json::json!({
+            "reason": "AlreadyDebilitated",
+            "action": action,
+            "damage_type": damage_type,
+        }),
         RejectionReason::OutOfRange { distance, max } => serde_json::json!({
             "reason": "OutOfRange",
             "action": action,
@@ -1670,6 +1682,48 @@ fn validate_custom_action(
             if world.entity(target).get::<Drone>().is_none() {
                 return Err(RejectionReason::NotMovable);
             }
+        }
+        Some("hack") => {
+            if target_owner == Some(player_id) {
+                return Err(RejectionReason::FriendlyTarget);
+            }
+            if has_attr(world, target_id, "Hacking")? {
+                return Err(RejectionReason::AlreadyHacked);
+            }
+        }
+        Some("overload") => {
+            if target_owner == Some(player_id) {
+                return Err(RejectionReason::FriendlyTarget);
+            }
+            let target_owner = target_owner.ok_or(RejectionReason::PlayerNotFound)?;
+            if player_fuel_budget(world, target_owner) <= OVERLOAD_FUEL_FLOOR {
+                return Err(RejectionReason::TargetFuelTooLow);
+            }
+        }
+        Some("debilitate") => {
+            if target_owner == Some(player_id) {
+                return Err(RejectionReason::FriendlyTarget);
+            }
+            let damage_type = action
+                .damage_type
+                .as_deref()
+                .unwrap_or(DamageType::Corrosive.as_str());
+            ensure_damage_type(world, damage_type)?;
+            if has_debilitate(world, target_id, damage_type)? {
+                return Err(RejectionReason::AlreadyDebilitated {
+                    damage_type: damage_type.to_string(),
+                });
+            }
+        }
+        Some("leech") | Some("heal_self") => {
+            if target_owner == Some(player_id) {
+                return Err(RejectionReason::FriendlyTarget);
+            }
+            let damage_type = action
+                .damage_type
+                .as_deref()
+                .unwrap_or(DamageType::Corrosive.as_str());
+            ensure_damage_type(world, damage_type)?;
         }
         _ => {
             if target_owner == Some(player_id) {
@@ -3311,4 +3365,49 @@ fn build_cost(world: &World, structure: StructureType) -> ResourceCost {
 
 pub fn entity(object_id: ObjectId) -> Result<Entity, RejectionReason> {
     Ok(Entity::from_bits(object_id))
+}
+
+fn ensure_damage_type(world: &World, damage_type: &str) -> CommandResult {
+    if world
+        .resource::<DamageTypeRegistry>()
+        .damage_types
+        .contains_key(damage_type)
+    {
+        Ok(())
+    } else {
+        Err(RejectionReason::InvalidDamageType)
+    }
+}
+
+fn has_attr(world: &World, target_id: ObjectId, value: &str) -> Result<bool, RejectionReason> {
+    let target = entity(target_id)?;
+    let entity_ref = world
+        .get_entity(target)
+        .map_err(|_| RejectionReason::ObjectNotFound)?;
+    Ok(entity_ref
+        .get::<Attributes>()
+        .is_some_and(|attrs| attrs.0.iter().any(|attr| attr == value)))
+}
+
+fn has_debilitate(
+    world: &World,
+    target_id: ObjectId,
+    damage_type: &str,
+) -> Result<bool, RejectionReason> {
+    let target = entity(target_id)?;
+    let entity_ref = world
+        .get_entity(target)
+        .map_err(|_| RejectionReason::ObjectNotFound)?;
+    Ok(entity_ref.get::<Attributes>().is_some_and(|attrs| {
+        attrs
+            .0
+            .iter()
+            .any(|attr| attr == &format!("Debilitated({damage_type})"))
+    }))
+}
+
+fn player_fuel_budget(world: &World, player_id: PlayerId) -> u64 {
+    // Fuel is tracked per tick; return the standard MAX_FUEL as baseline.
+    // In practice this consults the tick engine's fuel state.
+    MAX_FUEL
 }

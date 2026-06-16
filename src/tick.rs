@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::clickhouse::ClickHouseWriter;
 use crate::command::{
     CommandIntent, CommandRejection, CommandSource, RawCommand, RefundAccumulator, Tick,
-    apply_command, source_gate, validate_command,
+    apply_command, source_gate, validate_command, MAX_FUEL,
 };
 use crate::components::*;
 use crate::replay_storage::WorldDelta;
@@ -179,6 +179,66 @@ fn ratio(numerator: u64, denominator: u64) -> f64 {
         0.0
     } else {
         numerator as f64 / denominator as f64
+    }
+}
+
+/// Caches COLLECT results for cross-retry reuse.
+///
+/// When FDB commit fails, the tick is retried. Without caching, WASM COLLECT
+/// would be invoked again, leading to double fuel charges and non-deterministic
+/// side effects. This cache stores the raw commands and fuel metrics from the
+/// first COLLECT call so subsequent retries reuse the same output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CollectCache {
+    tick: Tick,
+    state_checksum: u64,
+    by_player: indexmap::IndexMap<PlayerId, Vec<RawCommand>>,
+    fuel_metrics: TickMetrics,
+}
+
+impl CollectCache {
+    fn raw_commands(&self) -> Vec<RawCommand> {
+        serial_execution_queue(
+            self.by_player
+                .iter()
+                .map(|(&player_id, commands)| CollectedPlayerCommands {
+                    player_id,
+                    commands: commands.clone(),
+                })
+                .collect(),
+        )
+    }
+
+    fn matches(&self, tick: Tick, state_checksum: u64) -> bool {
+        self.tick == tick && self.state_checksum == state_checksum
+    }
+}
+
+impl TickMetrics {
+    /// Add another TickMetrics into self (used to aggregate per-player metrics).
+    pub fn add(&mut self, other: &TickMetrics) {
+        self.executor_errors += other.executor_errors;
+        self.executor_timeouts += other.executor_timeouts;
+        self.accepted_commands += other.accepted_commands;
+        self.rejected_commands += other.rejected_commands;
+        self.commit_failures += other.commit_failures;
+        self.broadcast_failures += other.broadcast_failures;
+        self.total_commands += other.total_commands;
+        self.fuel_consumed = self.fuel_consumed.saturating_add(other.fuel_consumed);
+        self.refund_events += other.refund_events;
+        self.refund_fuel += other.refund_fuel;
+        self.duration_ms += other.duration_ms;
+    }
+
+    /// Subtract execution metrics (used when replaying from cache to avoid
+    /// double-counting fuel when the cache's COLLECT already charged).
+    pub fn subtract_execution(&mut self, other: &TickMetrics) {
+        self.accepted_commands = self.accepted_commands.saturating_sub(other.accepted_commands);
+        self.rejected_commands = self.rejected_commands.saturating_sub(other.rejected_commands);
+        self.total_commands = self.total_commands.saturating_sub(other.total_commands);
+        self.fuel_consumed = self.fuel_consumed.saturating_sub(other.fuel_consumed);
+        self.refund_events = self.refund_events.saturating_sub(other.refund_events);
+        self.refund_fuel = self.refund_fuel.saturating_sub(other.refund_fuel);
     }
 }
 
@@ -545,6 +605,7 @@ pub struct MultiPlayerTickScheduler<C, B> {
     pub broadcaster: B,
     pub tick_counter: Tick,
     pub metrics: TickMetrics,
+    pub collect_cache: Option<CollectCache>,
 }
 
 impl<C, B> MultiPlayerTickScheduler<C, B>
@@ -565,6 +626,7 @@ where
             broadcaster,
             tick_counter: 0,
             metrics: TickMetrics::default(),
+            collect_cache: None,
         }
     }
 
@@ -572,34 +634,68 @@ where
         let tick = self.tick_counter;
         let started_at = Instant::now();
         let state_checksum = self.world.state_checksum();
-        let mut results = thread::scope(|scope| {
-            self.executors
-                .iter_mut()
-                .map(|(&player_id, executor)| {
-                    scope.spawn(move || {
-                        collect_player_commands(tick, player_id, state_checksum, executor.as_mut())
+
+        // S1: Check COLLECT cache before executing WASM.
+        // If FDB commit failed last tick and we're retrying with the same state,
+        // reuse cached commands to avoid double fuel charges.
+        let cache_hit = self
+            .collect_cache
+            .as_ref()
+            .filter(|cache| cache.matches(tick, state_checksum));
+
+        let raw_commands = if let Some(cache) = cache_hit {
+            debug_assert!(
+                cache.fuel_metrics.fuel_consumed <= MAX_FUEL,
+                "cached COLLECT fuel exceeds MAX_FUEL"
+            );
+            cache.raw_commands()
+        } else {
+            let mut results = thread::scope(|scope| {
+                self.executors
+                    .iter_mut()
+                    .map(|(&player_id, executor)| {
+                        scope.spawn(move || {
+                            collect_player_commands(
+                                tick, player_id, state_checksum, executor.as_mut(),
+                            )
+                        })
                     })
-                })
-                .collect::<Vec<_>>()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|handle| handle.join().expect("player executor thread panicked"))
+                    .collect::<Vec<_>>()
+            });
+            results.sort_by_key(|result| result.player_id);
+
+            for result in &results {
+                self.metrics.executor_errors += result.metrics.executor_errors;
+                self.metrics.executor_timeouts += result.metrics.executor_timeouts;
+            }
+
+            // Build CollectCache for potential retry
+            let mut by_player: indexmap::IndexMap<PlayerId, Vec<RawCommand>> =
+                indexmap::IndexMap::new();
+            let mut collect_fuel_metrics = TickMetrics::default();
+            for result in &results {
+                by_player.insert(result.player_id, result.commands.clone());
+                collect_fuel_metrics.add(&result.metrics);
+            }
+            self.collect_cache = Some(CollectCache {
+                tick,
+                state_checksum,
+                by_player,
+                fuel_metrics: collect_fuel_metrics,
+            });
+
+            let collected = results
                 .into_iter()
-                .map(|handle| handle.join().expect("player executor thread panicked"))
-                .collect::<Vec<_>>()
-        });
-        results.sort_by_key(|result| result.player_id);
-
-        for result in &results {
-            self.metrics.executor_errors += result.metrics.executor_errors;
-            self.metrics.executor_timeouts += result.metrics.executor_timeouts;
-        }
-
-        let collected = results
-            .into_iter()
-            .map(|result| CollectedPlayerCommands {
-                player_id: result.player_id,
-                commands: result.commands,
-            })
-            .collect::<Vec<_>>();
-        let raw_commands = serial_execution_queue(collected);
+                .map(|result| CollectedPlayerCommands {
+                    player_id: result.player_id,
+                    commands: result.commands,
+                })
+                .collect::<Vec<_>>();
+            serial_execution_queue(collected)
+        };
 
         let world_snapshot = WorldSnapshot::capture(self.world.app.world_mut());
         let execution = execute_deterministic(&mut self.world, raw_commands);
