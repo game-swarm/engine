@@ -140,7 +140,7 @@ pub fn final_damage_multiplier(
     flags: Option<&EntityFlags>,
     damage_type: &str,
     _body_registry: &BodyPartRegistry,
-    _damage_registry: &DamageTypeRegistry,
+    damage_registry: &DamageTypeRegistry,
     resistance_registry: &ResistanceRegistry,
 ) -> f64 {
     if flags
@@ -150,9 +150,11 @@ pub fn final_damage_multiplier(
     {
         return 0.0;
     }
-    let component_mult = resistance_registry.component_multiplier(damage_type, body);
-    let attribute_mult =
-        resistance_registry.attribute_multiplier(damage_type, attrs) * fortify_multiplier(attrs);
+    let component_mult = damage_registry.component_multiplier(damage_type, body)
+        * resistance_registry.component_multiplier(damage_type, body);
+    let attribute_mult = damage_registry.attribute_multiplier(damage_type, attrs)
+        * resistance_registry.attribute_multiplier(damage_type, attrs)
+        * fortify_multiplier(attrs);
     component_mult * attribute_mult
 }
 

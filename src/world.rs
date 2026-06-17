@@ -165,7 +165,7 @@ impl Default for WorldConfig {
             visibility: VisibilityConfig::default(),
             resources: WorldResourceConfig::default(),
             combat: WorldCombatConfig::default(),
-            damage_types: Vec::new(),
+            damage_types: default_damage_types(),
             body_part_types: Vec::new(),
             structure_types: Vec::new(),
             resource_types: Vec::new(),
@@ -174,6 +174,101 @@ impl Default for WorldConfig {
             custom_actions: default_custom_actions(),
         }
     }
+}
+
+fn damage_type_def(
+    damage_type: DamageType,
+    component_multipliers: &[(&str, f64)],
+    attribute_multipliers: &[(&str, f64)],
+) -> crate::components::DamageTypeDef {
+    let mut def = crate::components::DamageTypeDef {
+        name: damage_type.to_string(),
+        ..Default::default()
+    };
+    for (component, multiplier) in component_multipliers {
+        def.component_multipliers
+            .insert((*component).to_string(), *multiplier);
+    }
+    for (attribute, multiplier) in attribute_multipliers {
+        def.attribute_multipliers
+            .insert((*attribute).to_string(), *multiplier);
+    }
+    def
+}
+
+fn default_damage_types() -> Vec<crate::components::DamageTypeDef> {
+    vec![
+        damage_type_def(
+            DamageType::Kinetic,
+            &[
+                ("Move", 1.0),
+                ("Work", 1.0),
+                ("Carry", 1.0),
+                ("Attack", 1.0),
+                ("RangedAttack", 1.0),
+                ("Heal", 1.0),
+                ("Claim", 1.0),
+                ("Tough", 0.5),
+            ],
+            &[("Shielded", 0.7)],
+        ),
+        damage_type_def(
+            DamageType::Thermal,
+            &[
+                ("Move", 1.2),
+                ("Work", 1.0),
+                ("Carry", 1.0),
+                ("Attack", 1.0),
+                ("RangedAttack", 1.0),
+                ("Heal", 1.0),
+                ("Claim", 1.0),
+                ("Tough", 0.8),
+            ],
+            &[],
+        ),
+        damage_type_def(
+            DamageType::EMP,
+            &[
+                ("Move", 1.0),
+                ("Work", 1.0),
+                ("Carry", 1.0),
+                ("Attack", 1.0),
+                ("RangedAttack", 1.0),
+                ("Heal", 1.0),
+                ("Claim", 1.3),
+                ("Tough", 1.0),
+            ],
+            &[],
+        ),
+        damage_type_def(
+            DamageType::Corrosive,
+            &[
+                ("Move", 1.0),
+                ("Work", 1.2),
+                ("Carry", 1.2),
+                ("Attack", 1.0),
+                ("RangedAttack", 1.0),
+                ("Heal", 1.0),
+                ("Claim", 1.0),
+                ("Tough", 0.7),
+            ],
+            &[],
+        ),
+        damage_type_def(
+            DamageType::Psionic,
+            &[
+                ("Move", 1.0),
+                ("Work", 1.0),
+                ("Carry", 1.0),
+                ("Attack", 1.0),
+                ("RangedAttack", 1.0),
+                ("Heal", 1.0),
+                ("Claim", 1.4),
+                ("Tough", 1.0),
+            ],
+            &[],
+        ),
+    ]
 }
 
 fn special_effect_def(
@@ -1367,6 +1462,25 @@ mod shard_tests {
         assert_eq!(config.visibility.spectate_delay, 0);
         assert_eq!(config.visibility.replay_privacy, ReplayPrivacy::Private);
         assert!(!config.propagation_system_enabled());
+        assert_eq!(config.damage_types.len(), 5);
+        assert_eq!(
+            config
+                .damage_types
+                .iter()
+                .find(|damage_type| damage_type.name == "Kinetic")
+                .and_then(|damage_type| damage_type.component_multipliers.get("Tough"))
+                .copied(),
+            Some(0.5)
+        );
+        assert_eq!(
+            config
+                .damage_types
+                .iter()
+                .find(|damage_type| damage_type.name == "EMP")
+                .and_then(|damage_type| damage_type.component_multipliers.get("Claim"))
+                .copied(),
+            Some(1.3)
+        );
         assert_eq!(config.special_effects.len(), 11);
         assert_eq!(config.custom_actions.len(), 8);
         assert_eq!(
@@ -1496,6 +1610,42 @@ damage_multiplier = 1.5
         assert!(config.combat.friendly_fire);
         assert_eq!(config.combat_damage_multiplier_fixed(), 15_000);
         assert!(config.propagation_system_enabled());
+    }
+
+    #[test]
+    fn world_config_parses_damage_type_component_multipliers() {
+        let config = WorldConfig::from_toml_str(
+            r#"
+[[damage_types]]
+name = "Acid"
+component_multipliers = { Tough = 0.25, Work = 1.5 }
+attribute_multipliers = { Shielded = 0.75 }
+"#,
+        )
+        .unwrap();
+        let registry = DamageTypeRegistry::from_defs(config.damage_types);
+        assert_eq!(
+            registry.component_multiplier("Acid", Some(&[BodyPart::Tough, BodyPart::Work])),
+            0.375
+        );
+        assert_eq!(
+            registry.attribute_multiplier("Acid", Some(&Attributes(vec!["Shielded".to_string()]))),
+            0.75
+        );
+    }
+
+    #[test]
+    fn damage_type_component_multipliers_affect_combat_damage() {
+        let mut world = create_world();
+        let target = world.spawn_drone(1, 0, 0, vec![BodyPart::Tough]);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PendingCombat>()
+            .queue_typed_damage(target, "Kinetic", 100);
+        world.run_tick();
+        let hits = world.app.world().get::<Drone>(target).unwrap().hits;
+        assert_eq!(hits, 75);
     }
 
     #[test]

@@ -236,12 +236,14 @@ impl fmt::Display for DamageType {
 #[serde(default)]
 pub struct DamageTypeDef {
     pub name: String,
+    pub component_multipliers: IndexMap<String, f64>,
     pub attribute_multipliers: IndexMap<String, f64>,
 }
 impl Default for DamageTypeDef {
     fn default() -> Self {
         Self {
             name: DamageType::Kinetic.to_string(),
+            component_multipliers: IndexMap::new(),
             attribute_multipliers: IndexMap::new(),
         }
     }
@@ -387,6 +389,17 @@ impl DamageTypeRegistry {
         }
         r
     }
+    pub fn component_multiplier(&self, dt: &str, body: Option<&[BodyPart]>) -> f64 {
+        let Some(def) = self.damage_types.get(dt) else {
+            return 1.0;
+        };
+        body.unwrap_or(&[])
+            .iter()
+            .filter_map(|part| def.component_multipliers.get(&part.to_string()))
+            .fold(1.0, |acc, multiplier| {
+                acc * damage_type_multiplier(*multiplier)
+            })
+    }
     pub fn attribute_multiplier(&self, dt: &str, attrs: Option<&Attributes>) -> f64 {
         let Some(attrs) = attrs else {
             return 1.0;
@@ -398,9 +411,20 @@ impl DamageTypeRegistry {
             .0
             .iter()
             .filter_map(|a| def.attribute_multipliers.get(a))
-            .fold(1.0, |acc, m| acc * m.clamp(0.0, 1.0))
+            .fold(1.0, |acc, multiplier| {
+                acc * damage_type_multiplier(*multiplier)
+            })
     }
 }
+
+fn damage_type_multiplier(multiplier: f64) -> f64 {
+    if multiplier.is_finite() {
+        multiplier.max(0.0)
+    } else {
+        1.0
+    }
+}
+
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Attributes(pub Vec<String>);
 
@@ -427,11 +451,8 @@ impl ResistanceRegistry {
         for damage_type in damage_registry.damage_types.keys() {
             registry.add_damage_type(damage_type);
         }
-        for (damage_type, def) in &damage_registry.damage_types {
+        for damage_type in damage_registry.damage_types.keys() {
             registry.add_damage_type(damage_type);
-            for (attribute, multiplier) in &def.attribute_multipliers {
-                registry.set_attribute_multiplier(damage_type, attribute, *multiplier);
-            }
         }
         for (part, def) in &body_registry.parts {
             for (damage_type, resistance) in &def.resistances {
