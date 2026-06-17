@@ -17,7 +17,11 @@ impl ClickHouseWriter {
 
     pub fn with_queue_capacity(base_url: impl Into<String>, queue_capacity: usize) -> Self {
         let (sender, receiver) = mpsc::sync_channel(queue_capacity);
-        let endpoint = format!("{}/", base_url.into().trim_end_matches('/'));
+        let endpoint = format!(
+            "{}/?query={}",
+            base_url.into().trim_end_matches('/'),
+            CLICKHOUSE_TICK_METRICS_INSERT
+        );
 
         thread::spawn(move || {
             let client = match reqwest::blocking::Client::builder()
@@ -31,7 +35,6 @@ impl ClickHouseWriter {
             for row in receiver {
                 let _ = client
                     .post(&endpoint)
-                    .query(&[("query", CLICKHOUSE_TICK_METRICS_INSERT)])
                     .body(Self::insert_body(&row))
                     .send()
                     .and_then(|response| response.error_for_status())
