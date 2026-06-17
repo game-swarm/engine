@@ -3,16 +3,17 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     thread,
     time::Duration,
 };
 
 use swarm_engine::{
-    BodyPart, WorldMode, create_world_with_mode,
+    create_world_with_mode,
     sim::{create_local_simulation_world, summarize_local_simulation},
+    BodyPart, WorldMode,
 };
 
 const DEFAULT_HEALTH_ADDR: &str = "0.0.0.0:8080";
@@ -40,12 +41,49 @@ fn main() {
         }
     };
 
-    match swarm_engine::mod_cli::try_run(cli_args) {
+    match swarm_engine::mod_cli::try_run(cli_args.clone()) {
         Ok(true) => return,
         Ok(false) => {}
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(1);
+        }
+    }
+
+    // ── SDK generation CLI ──────────────────────────────────────────
+    if let Some(cmd) = cli_args.first().map(|s| s.as_str()) {
+        match cmd {
+            "dump-idl" => {
+                let world_toml = cli_args.get(1).map(|s| s.as_str()).unwrap_or("world.toml");
+                match swarm_engine::sdk_gen::cli_dump_idl(world_toml) {
+                    Ok(json) => {
+                        println!("{json}");
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "generate-sdk" => {
+                let world_toml = cli_args.get(1).map(|s| s.as_str()).unwrap_or("world.toml");
+                let out_dir = cli_args
+                    .get(2)
+                    .map(|s| s.as_str())
+                    .unwrap_or("/data/swarm/sdk-cache");
+                match swarm_engine::sdk_gen::cli_generate_sdk(world_toml, out_dir) {
+                    Ok(()) => {
+                        println!("SDK generated to {out_dir}");
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -369,5 +407,9 @@ fn tcp_check(endpoint: &Endpoint) -> bool {
 }
 
 fn status(ok: bool) -> &'static str {
-    if ok { "ok" } else { "degraded" }
+    if ok {
+        "ok"
+    } else {
+        "degraded"
+    }
 }

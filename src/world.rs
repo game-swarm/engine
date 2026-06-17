@@ -1135,7 +1135,32 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
 
     let mut world = SwarmWorld { app };
     run_init_scripts(world.app.world_mut());
+
+    // ── Auto-generate SDK on world.toml change ──────────────────────
+    generate_sdk_on_startup("world.toml");
+
     world
+}
+
+/// Auto-generate the SDK cache on world startup if world.toml changed
+/// (different hash from last cached version).
+fn generate_sdk_on_startup(world_toml_path: &str) {
+    let toml_bytes = match std::fs::read(world_toml_path) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let hash = crate::sdk_gen::sha256_hex(&toml_bytes);
+    let cache_dir = crate::sdk_gen::sdk_cache_dir(&hash);
+    if cache_dir.exists() {
+        return; // already cached
+    }
+    // Generate in background — don't block world startup
+    println!("[SDK] world.toml changed (hash={}), regenerating SDK...", &hash[..12]);
+    if let Err(e) = crate::sdk_gen::cli_generate_sdk(world_toml_path, "/data/swarm/sdk-cache") {
+        eprintln!("[SDK] generation failed: {e}");
+    } else {
+        println!("[SDK] cached to {}", cache_dir.display());
+    }
 }
 
 /// Compute a deterministic, stable checksum over the full world state.
