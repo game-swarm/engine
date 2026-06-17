@@ -13,6 +13,9 @@ use crate::onboarding::{
     OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
     send_onboarding_event,
 };
+use crate::pve::{
+    DifficultyZone, WorldPveConfig, ZoneDefinition, zone_definition_for_room, zone_for_room,
+};
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::replay_storage::ReplayStore;
 use crate::resources::{
@@ -39,6 +42,7 @@ pub struct WorldConfig {
     pub code: CodeConfig,
     pub drone: DroneConfig,
     pub visibility: VisibilityConfig,
+    pub pve: WorldPveConfig,
     pub resources: WorldResourceConfig,
     pub combat: WorldCombatConfig,
     pub damage_types: Vec<crate::components::DamageTypeDef>,
@@ -164,6 +168,7 @@ impl Default for WorldConfig {
             code: CodeConfig::default(),
             drone: DroneConfig::default(),
             visibility: VisibilityConfig::default(),
+            pve: WorldPveConfig::default(),
             resources: WorldResourceConfig::default(),
             combat: WorldCombatConfig::default(),
             damage_types: default_damage_types(),
@@ -880,6 +885,14 @@ impl SwarmWorld {
             .world()
             .resource::<RoomTerrains>()
             .get_terrain(Position { x, y, room })
+    }
+
+    pub fn zone_for_room(&self, room: RoomId) -> DifficultyZone {
+        zone_for_room(room, &self.app.world().resource::<WorldConfig>().pve)
+    }
+
+    pub fn zone_definition_for_room(&self, room: RoomId) -> ZoneDefinition {
+        zone_definition_for_room(room, &self.app.world().resource::<WorldConfig>().pve).clone()
     }
 
     pub fn set_terrain(&mut self, room: RoomId, x: i32, y: i32, terrain: TerrainType) -> bool {

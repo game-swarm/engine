@@ -8,6 +8,7 @@ pub mod hot_cache;
 pub mod mcp;
 pub mod mod_cli;
 pub mod onboarding;
+pub mod pve;
 pub mod ranking;
 pub mod realtime;
 pub mod replay_storage;
@@ -37,6 +38,7 @@ pub use mcp::{
     visible_entities_for_player,
 };
 pub use onboarding::*;
+pub use pve::*;
 pub use ranking::*;
 pub use realtime::*;
 pub use replay_storage::*;
