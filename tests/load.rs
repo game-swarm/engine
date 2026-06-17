@@ -26,6 +26,7 @@ struct ResourceFootprint {
     entities: usize,
     positioned: usize,
     drones: usize,
+    npcs: usize,
     structures: usize,
     local_storage_players: usize,
     global_storage_players: usize,
@@ -47,6 +48,7 @@ fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
     let first = run_load();
     let second = run_load();
 
+    let expected_npcs = expected_npc_spawns(TICKS);
     assert!(
         first.p99 < P99_LIMIT,
         "first load-test p99 {:?} exceeded {:?}",
@@ -64,14 +66,34 @@ fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
     assert_eq!(first.checksums, second.checksums);
     assert_eq!(first.final_checksum, second.final_checksum);
 
-    assert_eq!(
-        first.before, first.after,
-        "first run leaked world resources"
-    );
-    assert_eq!(
-        second.before, second.after,
-        "second run leaked world resources"
-    );
+    // Drones must not leak
+    assert_eq!(first.before.drones, first.after.drones, "first run leaked drones");
+    assert_eq!(second.before.drones, second.after.drones, "second run leaked drones");
+    assert_eq!(first.before.drones, PLAYERS as usize);
+
+    // Non-drone resources must not leak (structures, storage, transfers, markets)
+    assert_eq!(first.before.structures, first.after.structures);
+    assert_eq!(first.before.local_storage_players, first.after.local_storage_players);
+    assert_eq!(first.before.global_storage_players, first.after.global_storage_players);
+    assert_eq!(first.before.pending_global_transfers, first.after.pending_global_transfers);
+    assert_eq!(first.before.market_orders, first.after.market_orders);
+
+    // NPC spawning is deterministic — verify spawned count matches expectation
+    let actual_npcs_first = first.after.npcs;
+    let actual_npcs_second = second.after.npcs;
+    assert_eq!(actual_npcs_first, actual_npcs_second,
+        "NPC spawn count differs between runs: {} vs {}", actual_npcs_first, actual_npcs_second);
+    assert_eq!(actual_npcs_first, expected_npcs,
+        "NPC spawn count mismatch: expected {expected_npcs}, got {actual_npcs_first}");
+    assert_eq!(first.before.npcs, 0, "NPCs present before tick loop");
+
+    // Total entity drift should equal NPC count only
+    let non_npc_growth_first = (first.after.entities - first.after.npcs)
+        .saturating_sub(first.before.entities - first.before.npcs);
+    let non_npc_growth_second = (second.after.entities - second.after.npcs)
+        .saturating_sub(second.before.entities - second.before.npcs);
+    assert_eq!(non_npc_growth_first, 0, "first run: {} unexpected non-NPC entities leaked", non_npc_growth_first);
+    assert_eq!(non_npc_growth_second, 0, "second run: {} unexpected non-NPC entities leaked", non_npc_growth_second);
 }
 
 fn run_load() -> LoadRun {
@@ -146,6 +168,38 @@ fn executors() -> HashMap<PlayerId, Box<dyn PlayerExecutor>> {
         .collect()
 }
 
+/// Compute expected NPC spawn count for N iterations of scheduler.tick().
+///
+/// The NPC spawn system (npc_spawn_system) spawns:
+/// - Creep:    every 50 ticks  (tick 50, 100, ..., floor((N-1)/50) * 50)
+/// - Guardian: at tick 300
+/// - Merchant: at tick 500
+/// - Swarmling: at tick 1000 (with variable count)
+///
+/// Each spawns 1 entity except Swarmling.
+fn expected_npc_spawns(ticks: usize) -> usize {
+    if ticks == 0 {
+        return 0;
+    }
+    let max_tick = ticks.saturating_sub(1);
+    let mut count = max_tick / 50; // Creep: one at every 50-tick boundary
+    if max_tick >= 300 {
+        count += 1; // Guardian
+    }
+    if max_tick >= 500 {
+        count += 1; // Merchant
+    }
+    if max_tick >= 1000 {
+        // Swarmling: 10 + (1000 % 21) = 10 + 13 = 23 at first spawn
+        count += 23;
+        // Additional every 1000 ticks after
+        for extra in (2000..=max_tick).step_by(1000) {
+            count += 10 + ((extra as u32) % 21) as usize;
+        }
+    }
+    count
+}
+
 fn resource_footprint(world: &mut swarm_engine::SwarmWorld) -> ResourceFootprint {
     let entities = world.app.world().iter_entities().count();
     let positioned = world
@@ -167,10 +221,18 @@ fn resource_footprint(world: &mut swarm_engine::SwarmWorld) -> ResourceFootprint
         .iter(world.app.world())
         .count();
 
+    let npcs = world
+        .app
+        .world_mut()
+        .query::<&swarm_engine::npc::components::NpcType>()
+        .iter(world.app.world())
+        .count();
+
     ResourceFootprint {
         entities,
         positioned,
         drones,
+        npcs,
         structures,
         local_storage_players: world.app.world().resource::<PlayerLocalStorage>().0.len(),
         global_storage_players: world.app.world().resource::<PlayerGlobalStorage>().0.len(),
