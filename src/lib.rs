@@ -38,6 +38,7 @@ pub use mcp::{
     visible_entities_for_player,
 };
 pub use npc::events::*;
+pub use npc::loot::*;
 pub use onboarding::*;
 pub use ranking::*;
 pub use realtime::*;
