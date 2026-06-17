@@ -174,6 +174,49 @@ mod tests {
         world
     }
 
+    fn recycle_refund_for_mode(mode: WorldMode) -> (u32, u32) {
+        let mut world = create_world_with_mode(mode);
+        let body = vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry];
+        let body_cost = world
+            .app
+            .world()
+            .resource::<ResourceRegistry>()
+            .body_energy_cost(&body);
+        let spawn = spawn_structure(&mut world, Some(1), 10, 10, 0, 300, 0);
+        let drone = world.spawn_drone(1, 11, 10, body);
+
+        submit(
+            &mut world,
+            1,
+            1,
+            CommandAction::Recycle {
+                object_id: object_id(drone),
+                spawn_id: object_id(spawn),
+            },
+        )
+        .unwrap();
+
+        let refund = world
+            .app
+            .world()
+            .get::<Structure>(spawn)
+            .and_then(|structure| structure.energy)
+            .expect("spawn energy after recycle");
+        (body_cost, refund)
+    }
+
+    #[test]
+    fn recycle_refunds_half_body_cost_in_default_world() {
+        let (body_cost, refund) = recycle_refund_for_mode(WorldMode::Default);
+        assert_eq!(refund, body_cost / 2);
+    }
+
+    #[test]
+    fn recycle_refunds_full_body_cost_in_tutorial_world_after_500_ticks() {
+        let (body_cost, refund) = recycle_refund_for_mode(WorldMode::Tutorial);
+        assert_eq!(refund, body_cost);
+    }
+
     #[test]
     fn room_id_parses_formats_and_checks_adjacency() {
         let room = RoomId::from_room_name("A12N34W").unwrap();

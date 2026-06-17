@@ -3274,10 +3274,10 @@ fn add_player_resource(world: &mut World, player_id: PlayerId, resource: &str, a
         .or_default() += amount;
 }
 
-fn recycle_refund_cost(world: &World, tick: Tick, body: &[BodyPart]) -> ResourceCost {
+fn recycle_refund_cost(world: &World, _tick: Tick, body: &[BodyPart]) -> ResourceCost {
     let full_refund = world
         .get_resource::<WorldSettings>()
-        .is_some_and(|settings| settings.mode == WorldMode::Tutorial && tick < 500);
+        .is_some_and(|settings| settings.mode == WorldMode::Tutorial);
     let mut refund = body_spawn_cost(world, body);
     if !full_refund {
         for amount in refund.values_mut() {
