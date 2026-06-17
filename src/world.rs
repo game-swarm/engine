@@ -11,6 +11,11 @@ use crate::dragonfly::DragonflyCache;
 use crate::fdb::FoundationDbStore;
 use crate::npc::events::{EventConfig, EventState, event_effect_system, world_event_system};
 use crate::npc::loot::{BlueprintRegistry, NpcLootTables};
+use crate::npc::{NpcSpawnState, npc_ai_system, npc_combat_system, npc_spawn_system};
+use crate::npc::strongholds::{
+    SpawnedStrongholdRooms, StrongholdSpawnConfig, stronghold_production_system,
+    stronghold_spawn_system,
+};
 use crate::onboarding::{
     OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
     send_onboarding_event,
@@ -679,6 +684,9 @@ impl WorldConfig {
         });
         app.insert_resource(DroneEnvVars::default());
         app.insert_resource(ReplayStore::default());
+        app.insert_resource(NpcSpawnState::default());
+        app.insert_resource(StrongholdSpawnConfig::default());
+        app.insert_resource(SpawnedStrongholdRooms::default());
     }
     fn register_systems(&self, app: &mut App) {
         if self.propagation_system_enabled() {
@@ -702,6 +710,36 @@ impl WorldConfig {
                 .chain()
                 .after(spawn_system)
                 .before(regeneration_system),
+        );
+        app.add_systems(
+            Update,
+            stronghold_spawn_system
+                .after(pvp_block_system)
+                .before(npc_spawn_system),
+        );
+        app.add_systems(
+            Update,
+            stronghold_production_system
+                .after(spawn_system)
+                .before(regeneration_system),
+        );
+        app.add_systems(
+            Update,
+            npc_ai_system
+                .after(room_state_system)
+                .before(npc_combat_system),
+        );
+        app.add_systems(
+            Update,
+            npc_combat_system
+                .after(npc_ai_system)
+                .before(combat_system),
+        );
+        app.add_systems(
+            Update,
+            npc_spawn_system
+                .after(pvp_block_system)
+                .before(spawn_system),
         );
         app.add_systems(
             Update,

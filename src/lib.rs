@@ -38,6 +38,7 @@ pub use mcp::{
     WorldRuleMod, WorldRules, swarm_get_snapshot, swarm_get_world_rules,
     visible_entities_for_player,
 };
+pub use npc::components::*;
 pub use npc::events::*;
 pub use npc::loot::*;
 pub use onboarding::*;
