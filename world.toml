@@ -2,6 +2,39 @@
 name = "World of Swarm"
 mode = "persistent"
 tick_interval_ms = 3000
+world_seed = 0
+
+[events]
+enabled = false
+resource_boom_multiplier = 2
+swarm_invasion_count = 30
+ruin_guardian_count = 3
+ruin_creep_count = 10
+merchant_count = 1
+
+[events.swarm_invasion]
+probability = 0.10
+interval = 1000
+event_cooldown = 1000
+duration = 200
+
+[events.resource_boom]
+probability = 0.15
+interval = 500
+event_cooldown = 500
+duration = 100
+
+[events.ruin_awakening]
+probability = 1.0
+interval = 1
+event_cooldown = 0
+duration = 0
+
+[events.merchant_arrival]
+probability = 1.0
+interval = 2000
+event_cooldown = 2000
+duration = 100
 
 [spawn]
 policy = "RandomRoom"

@@ -9,6 +9,7 @@ use crate::command::{
 use crate::components::*;
 use crate::dragonfly::DragonflyCache;
 use crate::fdb::FoundationDbStore;
+use crate::npc::events::{EventConfig, EventState, event_effect_system, world_event_system};
 use crate::onboarding::{
     OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
     send_onboarding_event,
@@ -39,6 +40,7 @@ pub struct WorldConfig {
     pub code: CodeConfig,
     pub drone: DroneConfig,
     pub visibility: VisibilityConfig,
+    pub events: EventConfig,
     pub resources: WorldResourceConfig,
     pub combat: WorldCombatConfig,
     pub damage_types: Vec<crate::components::DamageTypeDef>,
@@ -59,6 +61,7 @@ pub struct WorldSectionConfig {
     pub mode: String,
     pub tick_interval_ms: u64,
     pub seed_rotation_interval: u64,
+    pub world_seed: u64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpawnPolicy {
@@ -164,6 +167,7 @@ impl Default for WorldConfig {
             code: CodeConfig::default(),
             drone: DroneConfig::default(),
             visibility: VisibilityConfig::default(),
+            events: EventConfig::default(),
             resources: WorldResourceConfig::default(),
             combat: WorldCombatConfig::default(),
             damage_types: default_damage_types(),
@@ -497,6 +501,7 @@ impl Default for WorldSectionConfig {
             mode: "persistent".to_string(),
             tick_interval_ms: crate::components::DEFAULT_TICK_INTERVAL_MS,
             seed_rotation_interval: 0,
+            world_seed: 0,
         }
     }
 }
@@ -631,6 +636,7 @@ impl WorldConfig {
     }
     fn install_resources(&self, app: &mut App) {
         app.insert_resource(self.clone());
+        app.insert_resource(self.events.clone());
         app.insert_resource(CombatRules {
             damage_multiplier: self.combat_damage_multiplier_fixed(),
         });
@@ -676,6 +682,13 @@ impl WorldConfig {
             spawning_grace_expiry_system
                 .after(combat_system)
                 .before(decay_system),
+        );
+        app.add_systems(
+            Update,
+            (world_event_system, event_effect_system)
+                .chain()
+                .after(spawn_system)
+                .before(regeneration_system),
         );
         app.add_systems(
             Update,
@@ -999,6 +1012,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<ShardConfig>();
     app.init_resource::<SeedRotationState>();
     app.init_resource::<RoomStates>();
+    app.init_resource::<EventState>();
     app.init_resource::<PendingRoomClaims>();
     app.insert_resource(OnboardingConfig::for_mode(mode));
     app.init_resource::<OnboardingProgress>();
