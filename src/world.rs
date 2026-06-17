@@ -9,6 +9,7 @@ use crate::command::{
 use crate::components::*;
 use crate::dragonfly::DragonflyCache;
 use crate::fdb::FoundationDbStore;
+use crate::npc::loot::{BlueprintRegistry, NpcLootTables};
 use crate::onboarding::{
     OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
     send_onboarding_event,
@@ -653,6 +654,8 @@ impl WorldConfig {
             self.special_effects.clone(),
         ));
         app.insert_resource(CustomActionRegistry::from_defs(self.custom_actions.clone()));
+        app.insert_resource(NpcLootTables::default());
+        app.insert_resource(BlueprintRegistry::default());
         app.insert_resource(LatestCodeVersions::default());
         app.insert_resource(RepairTracker {
             per_player: Default::default(),

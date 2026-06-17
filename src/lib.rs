@@ -7,6 +7,7 @@ pub mod fdb;
 pub mod hot_cache;
 pub mod mcp;
 pub mod mod_cli;
+pub mod npc;
 pub mod onboarding;
 pub mod ranking;
 pub mod realtime;
@@ -36,6 +37,7 @@ pub use mcp::{
     WorldRuleMod, WorldRules, swarm_get_snapshot, swarm_get_world_rules,
     visible_entities_for_player,
 };
+pub use npc::*;
 pub use onboarding::*;
 pub use ranking::*;
 pub use realtime::*;
