@@ -327,6 +327,47 @@ fn default_custom_actions() -> Vec<crate::components::CustomActionDef> {
     );
     fortify.special_param = Some(0.5);
 
+    let mut hack = custom_action_def(
+        "Hack",
+        "Take control of a drone after a control lock",
+        "hack",
+        Some(200),
+        &[("Energy", 1000)],
+    );
+    hack.damage_type = Some("Psionic".to_string());
+    hack.range = 1;
+
+    let mut drain = custom_action_def(
+        "Drain",
+        "Steal resources from a target structure",
+        "drain",
+        Some(50),
+        &[("Energy", 200)],
+    );
+    drain.damage_type = Some("EMP".to_string());
+    drain.range = 1;
+
+    let mut overload = custom_action_def(
+        "Overload",
+        "Reduce the target player's fuel budget",
+        "overload",
+        Some(200),
+        &[("Energy", 300)],
+    );
+    overload.damage_type = Some("EMP".to_string());
+    overload.range = 1;
+    overload.special_param = Some(500_000.0);
+
+    let mut disrupt = custom_action_def(
+        "Disrupt",
+        "Interrupt a target's ongoing special action",
+        "disrupt",
+        Some(50),
+        &[("Energy", 100)],
+    );
+    disrupt.damage_type = Some("Sonic".to_string());
+    disrupt.range = 1;
+
     let mut leech = custom_action_def(
         "Leech",
         "Corrosive attack that heals the attacker for 50% of dealt damage",
@@ -349,38 +390,7 @@ fn default_custom_actions() -> Vec<crate::components::CustomActionDef> {
     fabricate.range = 1;
 
     vec![
-        custom_action_def(
-            "Hack",
-            "Take control of a drone after a control lock",
-            "hack",
-            Some(200),
-            &[("Energy", 1000)],
-        ),
-        custom_action_def(
-            "Drain",
-            "Steal resources from a target structure",
-            "drain",
-            Some(50),
-            &[("Energy", 200)],
-        ),
-        custom_action_def(
-            "Overload",
-            "Reduce the target player's fuel budget",
-            "overload",
-            Some(200),
-            &[("Energy", 300)],
-        ),
-        debilitate,
-        custom_action_def(
-            "Disrupt",
-            "Interrupt a target's ongoing special action",
-            "disrupt",
-            Some(50),
-            &[("Energy", 100)],
-        ),
-        fortify,
-        leech,
-        fabricate,
+        hack, drain, overload, debilitate, disrupt, fortify, leech, fabricate,
     ]
 }
 
@@ -1375,6 +1385,46 @@ mod shard_tests {
                 .and_then(|action| action.special_effect.as_deref()),
             Some("disrupt")
         );
+    }
+
+    #[test]
+    fn default_custom_actions_register_tier_one_special_attacks() {
+        let config = WorldConfig::default();
+        let action = |name: &str| {
+            config
+                .custom_actions
+                .iter()
+                .find(|action| action.name == name)
+                .unwrap()
+        };
+
+        assert_eq!(action("Hack").special_effect.as_deref(), Some("hack"));
+        assert_eq!(action("Hack").damage_type.as_deref(), Some("Psionic"));
+        assert_eq!(action("Hack").range, 1);
+        assert_eq!(action("Hack").cooldown, Some(200));
+        assert_eq!(action("Hack").cost.get("Energy"), Some(&1000));
+
+        assert_eq!(action("Drain").special_effect.as_deref(), Some("drain"));
+        assert_eq!(action("Drain").damage_type.as_deref(), Some("EMP"));
+        assert_eq!(action("Drain").range, 1);
+        assert_eq!(action("Drain").cooldown, Some(50));
+        assert_eq!(action("Drain").cost.get("Energy"), Some(&200));
+
+        assert_eq!(
+            action("Overload").special_effect.as_deref(),
+            Some("overload")
+        );
+        assert_eq!(action("Overload").damage_type.as_deref(), Some("EMP"));
+        assert_eq!(action("Overload").range, 1);
+        assert_eq!(action("Overload").cooldown, Some(200));
+        assert_eq!(action("Overload").cost.get("Energy"), Some(&300));
+        assert_eq!(action("Overload").special_param, Some(500_000.0));
+
+        assert_eq!(action("Disrupt").special_effect.as_deref(), Some("disrupt"));
+        assert_eq!(action("Disrupt").damage_type.as_deref(), Some("Sonic"));
+        assert_eq!(action("Disrupt").range, 1);
+        assert_eq!(action("Disrupt").cooldown, Some(50));
+        assert_eq!(action("Disrupt").cost.get("Energy"), Some(&100));
     }
 
     #[test]
