@@ -2166,6 +2166,13 @@ fn apply_custom_action(
                 apply_fortify_attrs(&mut attrs);
                 entity_mut.insert(Attributes(attrs));
             }
+            if let Some(mut flags) = entity_mut.get_mut::<EntityFlags>() {
+                apply_fortify_flags(&mut flags.0);
+            } else {
+                let mut flags = std::collections::HashMap::new();
+                apply_fortify_flags(&mut flags);
+                entity_mut.insert(EntityFlags(flags));
+            }
         }
         Some("disrupt") => {
             let Some(target_id) = target_id else {
@@ -2312,6 +2319,13 @@ fn apply_fortify_attrs(attrs: &mut Vec<String>) {
     if !attrs.iter().any(|attr| attr == "Fortified") {
         attrs.push("Fortified".to_string());
     }
+    attrs.retain(|attr| !attr.starts_with("Fortified:"));
+    attrs.push("Fortified:duration=3".to_string());
+}
+
+fn apply_fortify_flags(flags: &mut std::collections::HashMap<String, bool>) {
+    flags.retain(|flag, active| !*active || !is_negative_status_attr(flag));
+    flags.insert("Fortified".to_string(), true);
 }
 
 fn apply_disrupt(world: &mut World, target_id: ObjectId) -> CommandResult {
@@ -2320,12 +2334,31 @@ fn apply_disrupt(world: &mut World, target_id: ObjectId) -> CommandResult {
     if multiplier <= 0.0 {
         return Ok(());
     }
-    let mut entity_mut = world.entity_mut(target);
-    if let Some(mut attrs) = entity_mut.get_mut::<Attributes>() {
-        attrs.0.retain(|attr| !is_interruptible_action_attr(attr));
+    {
+        let mut entity_mut = world.entity_mut(target);
+        if let Some(mut attrs) = entity_mut.get_mut::<Attributes>() {
+            attrs.0.retain(|attr| !is_interruptible_action_attr(attr));
+            attrs.0.retain(|attr| !attr.starts_with("Disrupted:"));
+            push_unique(&mut attrs.0, "Disrupted");
+            attrs.0.push("Disrupted:duration=1".to_string());
+        } else {
+            entity_mut.insert(Attributes(vec![
+                "Disrupted".to_string(),
+                "Disrupted:duration=1".to_string(),
+            ]));
+        }
+        if let Some(mut flags) = entity_mut.get_mut::<EntityFlags>() {
+            flags.0.insert("Disrupted".to_string(), true);
+        } else {
+            let mut flags = std::collections::HashMap::new();
+            flags.insert("Disrupted".to_string(), true);
+            entity_mut.insert(EntityFlags(flags));
+        }
     }
-    if let Some(mut drone) = entity_mut.get_mut::<Drone>() {
-        drone.fatigue = drone.fatigue.max(1);
+    if let Some(mut cooldowns) = world.get_resource_mut::<CustomActionCooldowns>() {
+        cooldowns
+            .0
+            .retain(|(cooldown_object_id, _), _| *cooldown_object_id != target_id);
     }
     Ok(())
 }
@@ -3408,4 +3441,140 @@ fn player_fuel_budget(world: &World, player_id: PlayerId) -> u64 {
     // Fuel is tracked per tick; return the standard MAX_FUEL as baseline.
     // In practice this consults the tick engine's fuel state.
     MAX_FUEL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::create_world;
+
+    fn raw_custom(
+        player_id: PlayerId,
+        action_type: &str,
+        object_id: ObjectId,
+        target_id: Option<ObjectId>,
+    ) -> RawCommand {
+        RawCommand {
+            player_id,
+            tick: 1,
+            source: CommandSource::TestHarness,
+            auth: CommandAuth {
+                source: CommandSource::TestHarness,
+                player_id,
+                tick_submitted: 1,
+                tick_target: 1,
+            },
+            sequence: 1,
+            action: CommandAction::Custom {
+                action_type: action_type.to_string(),
+                object_id,
+                target_id,
+                resource: None,
+                amount: None,
+                structure: None,
+            },
+        }
+    }
+
+    fn give_local_energy(world: &mut World, player_id: PlayerId, amount: u32) {
+        world
+            .resource_mut::<PlayerLocalStorage>()
+            .0
+            .entry(player_id)
+            .or_default()
+            .insert(ENERGY_RESOURCE.to_string(), amount);
+    }
+
+    #[test]
+    fn disrupt_clears_target_current_action_and_sets_one_tick_flag() {
+        let mut world = create_world();
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
+        let target = world.spawn_drone(2, 11, 10, vec![BodyPart::Move]);
+        let attacker_id = object_id(attacker);
+        let target_id = object_id(target);
+
+        give_local_energy(world.app.world_mut(), 1, 100);
+        world
+            .app
+            .world_mut()
+            .entity_mut(target)
+            .insert(Attributes(vec![
+                "Hacking".to_string(),
+                "CurrentAction:Hack".to_string(),
+            ]));
+        world
+            .app
+            .world_mut()
+            .insert_resource(CustomActionCooldowns::default());
+        world
+            .app
+            .world_mut()
+            .resource_mut::<CustomActionCooldowns>()
+            .0
+            .insert((target_id, "Hack".to_string()), 50);
+
+        world
+            .submit_raw_command(raw_custom(1, "Disrupt", attacker_id, Some(target_id)))
+            .unwrap();
+
+        let target_ref = world.app.world().entity(target);
+        let attrs = &target_ref.get::<Attributes>().unwrap().0;
+        assert!(!attrs.iter().any(|attr| attr == "Hacking"));
+        assert!(!attrs.iter().any(|attr| attr == "CurrentAction:Hack"));
+        assert!(attrs.iter().any(|attr| attr == "Disrupted"));
+        assert!(attrs.iter().any(|attr| attr == "Disrupted:duration=1"));
+        assert_eq!(
+            target_ref.get::<EntityFlags>().unwrap().0.get("Disrupted"),
+            Some(&true)
+        );
+        assert!(
+            !world
+                .app
+                .world()
+                .resource::<CustomActionCooldowns>()
+                .0
+                .contains_key(&(target_id, "Hack".to_string()))
+        );
+    }
+
+    #[test]
+    fn fortify_clears_negative_flags_and_adds_three_tick_resistance() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Tough]);
+        let drone_id = object_id(drone);
+
+        give_local_energy(world.app.world_mut(), 1, 400);
+        let mut flags = std::collections::HashMap::new();
+        flags.insert("Debilitated".to_string(), true);
+        flags.insert("Hacking".to_string(), true);
+        flags.insert("immune_Kinetic".to_string(), true);
+        world.app.world_mut().entity_mut(drone).insert((
+            Attributes(vec![
+                "Debilitated".to_string(),
+                "Debilitate:Kinetic:resistance_x2:duration=50".to_string(),
+                "Hacking".to_string(),
+                "Shielded".to_string(),
+            ]),
+            EntityFlags(flags),
+        ));
+
+        world
+            .submit_raw_command(raw_custom(1, "Fortify", drone_id, None))
+            .unwrap();
+
+        let drone_ref = world.app.world().entity(drone);
+        let attrs = &drone_ref.get::<Attributes>().unwrap().0;
+        assert!(!attrs.iter().any(|attr| attr == "Debilitated"));
+        assert!(!attrs.iter().any(|attr| attr.starts_with("Debilitate:")));
+        assert!(!attrs.iter().any(|attr| attr == "Hacking"));
+        assert!(attrs.iter().any(|attr| attr == "Shielded"));
+        assert!(attrs.iter().any(|attr| attr == "Fortified"));
+        assert!(attrs.iter().any(|attr| attr == "Fortified:duration=3"));
+
+        let flags = &drone_ref.get::<EntityFlags>().unwrap().0;
+        assert!(!flags.contains_key("Debilitated"));
+        assert!(!flags.contains_key("Hacking"));
+        assert_eq!(flags.get("Fortified"), Some(&true));
+        assert_eq!(flags.get("immune_Kinetic"), Some(&true));
+    }
 }
