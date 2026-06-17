@@ -11,7 +11,8 @@ use crate::command::{
 use crate::components::*;
 use crate::replay_storage::WorldDelta;
 use crate::resources::{
-    MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
+    CurrentTick, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
+    ResourceCost,
 };
 use crate::rule_module::{RhaiRuleModules, run_tick_start_scripts};
 use crate::security::{SecurityAlert, SecurityAuditor};
@@ -1202,6 +1203,7 @@ pub fn execute_deterministic(
     let mut rejections = Vec::new();
     let mut refunds = RefundAccumulator::default();
     for raw in commands {
+        world.app.world_mut().resource_mut::<CurrentTick>().0 = raw.tick;
         match validate_command(world.app.world_mut(), raw.clone()) {
             Ok(validated) => match apply_command(world.app.world_mut(), validated) {
                 Ok(()) => accepted.push(raw),
@@ -2279,7 +2281,7 @@ mod tests {
                 .get::<Drone>()
                 .unwrap()
                 .age,
-            1
+            2
         );
     }
 

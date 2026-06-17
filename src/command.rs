@@ -1195,69 +1195,93 @@ fn json_depth(value: &serde_json::Value) -> usize {
 }
 
 pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandResult {
-    match command.raw.action {
+    let action_tick = command.raw.tick;
+    let player_id = command.raw.player_id;
+    let mut actor_id = None;
+    let result = match command.raw.action {
         CommandAction::Move {
             object_id,
             direction,
-        } => apply_move(world, object_id, direction),
+        } => {
+            actor_id = Some(object_id);
+            apply_move(world, object_id, direction)
+        }
         CommandAction::Harvest {
             object_id,
             target_id,
             resource,
-        } => apply_harvest(world, object_id, target_id, resource),
+        } => {
+            actor_id = Some(object_id);
+            apply_harvest(world, object_id, target_id, resource)
+        }
         CommandAction::Transfer {
             object_id,
             target_id,
             resource,
             amount,
-        } => apply_transfer(world, object_id, target_id, &resource, amount),
+        } => {
+            actor_id = Some(object_id);
+            apply_transfer(world, object_id, target_id, &resource, amount)
+        }
         CommandAction::Withdraw {
             object_id,
             target_id,
             resource,
             amount,
-        } => apply_withdraw(world, object_id, target_id, &resource, amount),
+        } => {
+            actor_id = Some(object_id);
+            apply_withdraw(world, object_id, target_id, &resource, amount)
+        }
         CommandAction::Attack {
             object_id,
             target_id,
-        } => apply_attack(world, object_id, target_id),
+        } => {
+            actor_id = Some(object_id);
+            apply_attack(world, object_id, target_id)
+        }
         CommandAction::RangedAttack {
             object_id,
             target_id,
             range: _,
-        } => apply_ranged_attack(world, object_id, target_id),
+        } => {
+            actor_id = Some(object_id);
+            apply_ranged_attack(world, object_id, target_id)
+        }
         CommandAction::Heal {
             object_id,
             target_id,
-        } => apply_heal(world, object_id, target_id),
+        } => {
+            actor_id = Some(object_id);
+            apply_heal(world, object_id, target_id)
+        }
         CommandAction::ClaimController {
-            object_id: _,
+            object_id,
             controller_id,
-        } => apply_claim_controller(world, command.raw.player_id, controller_id),
+        } => {
+            actor_id = Some(object_id);
+            apply_claim_controller(world, player_id, controller_id)
+        }
         CommandAction::SpawnDrone { spawn_id, body } => {
-            apply_spawn_drone(world, command.raw.player_id, spawn_id, body)
+            apply_spawn_drone(world, player_id, spawn_id, body)
         }
         CommandAction::Recycle {
             object_id,
             spawn_id,
-        } => apply_recycle(
-            world,
-            command.raw.player_id,
-            command.raw.tick,
-            object_id,
-            spawn_id,
-        ),
+        } => apply_recycle(world, player_id, action_tick, object_id, spawn_id),
         CommandAction::Build {
             object_id,
             x,
             y,
             structure,
-        } => apply_build(world, command.raw.player_id, object_id, x, y, structure),
+        } => {
+            actor_id = Some(object_id);
+            apply_build(world, player_id, object_id, x, y, structure)
+        }
         CommandAction::TransferToGlobal { resource, amount } => {
-            apply_transfer_to_global(world, command.raw.player_id, &resource, amount)
+            apply_transfer_to_global(world, player_id, &resource, amount)
         }
         CommandAction::TransferFromGlobal { resource, amount } => {
-            apply_transfer_from_global(world, command.raw.player_id, &resource, amount)
+            apply_transfer_from_global(world, player_id, &resource, amount)
         }
         CommandAction::CreateMarketOrder {
             resource,
@@ -1266,14 +1290,14 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             price_amount,
         } => apply_create_market_order(
             world,
-            command.raw.player_id,
+            player_id,
             &resource,
             amount,
             &price_resource,
             price_amount,
         ),
         CommandAction::BuyMarketOrder { order_id } => {
-            apply_buy_market_order(world, command.raw.player_id, order_id)
+            apply_buy_market_order(world, player_id, order_id)
         }
         CommandAction::Custom {
             action_type,
@@ -1281,15 +1305,34 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             target_id,
             structure,
             ..
-        } => apply_custom_action(
-            world,
-            command.raw.player_id,
-            command.raw.tick,
-            &action_type,
-            object_id,
-            target_id,
-            structure,
-        ),
+        } => {
+            actor_id = Some(object_id);
+            apply_custom_action(
+                world,
+                player_id,
+                action_tick,
+                &action_type,
+                object_id,
+                target_id,
+                structure,
+            )
+        }
+    };
+
+    if result.is_ok() {
+        if let Some(object_id) = actor_id {
+            mark_drone_action(world, object_id, action_tick);
+        }
+    }
+
+    result
+}
+
+fn mark_drone_action(world: &mut World, object_id: ObjectId, tick: Tick) {
+    if let Ok(entity) = entity(object_id) {
+        if let Some(mut drone) = world.entity_mut(entity).get_mut::<Drone>() {
+            drone.last_action_tick = tick;
+        }
     }
 }
 

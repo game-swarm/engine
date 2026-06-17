@@ -16,7 +16,7 @@ use crate::onboarding::{
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::replay_storage::ReplayStore;
 use crate::resources::{
-    GlobalStorageConfig, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage,
+    CurrentTick, GlobalStorageConfig, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, ResourceDef, ResourceRegistry, SourceDef,
 };
 use crate::rule_module::{
@@ -763,6 +763,7 @@ pub struct SwarmWorld {
 impl SwarmWorld {
     pub fn run_tick(&mut self) {
         self.app.update();
+        self.app.world_mut().resource_mut::<CurrentTick>().0 += 1;
     }
 
     pub fn submit_intent(
@@ -777,6 +778,7 @@ impl SwarmWorld {
     }
 
     pub fn submit_raw_command(&mut self, raw: RawCommand) -> CommandResult {
+        self.app.world_mut().resource_mut::<CurrentTick>().0 = raw.tick;
         let validated = validate_command(self.app.world_mut(), raw)?;
         apply_command(self.app.world_mut(), validated)
     }
@@ -970,6 +972,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<PlayerLocalStorage>();
     app.init_resource::<PlayerGlobalStorage>();
     app.init_resource::<PendingGlobalTransfers>();
+    app.init_resource::<CurrentTick>();
     app.init_resource::<crate::resources::MarketConfig>();
     app.init_resource::<MarketOrders>();
     app.init_resource::<RhaiRuleModules>();

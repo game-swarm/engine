@@ -1133,9 +1133,8 @@ pub struct Drone {
     pub hits_max: u32,
     pub spawning: bool,
     pub age: u32,
-    pub aging_remainder: u8,
+    pub last_action_tick: crate::command::Tick,
     pub lifespan: u32,
-    pub executed_command_this_tick: bool,
 }
 
 impl Drone {
@@ -1170,9 +1169,8 @@ impl Drone {
             hits_max: 100,
             spawning: false,
             age: 0,
-            aging_remainder: 0,
+            last_action_tick: u64::MAX,
             lifespan,
-            executed_command_this_tick: false,
         }
     }
 }

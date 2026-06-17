@@ -15,6 +15,9 @@ pub const TRANSFER_TO_GLOBAL_FEE_PER_10_000: u32 = 100;
 pub const TRANSFER_FROM_GLOBAL_FEE_PER_10_000: u32 = 500;
 pub const GLOBAL_STORAGE_INTERCEPT_RANGE: u32 = 3;
 
+#[derive(BevyResource, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurrentTick(pub Tick);
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceDef {
     pub name: ResourceName,

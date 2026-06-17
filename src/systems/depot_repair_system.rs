@@ -126,9 +126,8 @@ mod tests {
                     hits_max: 100,
                     spawning: false,
                     age: 10,
-                    aging_remainder: 0,
+                    last_action_tick: u64::MAX,
                     lifespan: DEFAULT_DRONE_LIFESPAN,
-                    executed_command_this_tick: false,
                 },
                 Position {
                     x: 5,
@@ -186,9 +185,8 @@ mod tests {
                 hits_max: 100,
                 spawning: false,
                 age: 10,
-                aging_remainder: 0,
+                last_action_tick: u64::MAX,
                 lifespan: DEFAULT_DRONE_LIFESPAN,
-                executed_command_this_tick: false,
             },
             Position {
                 x: 0,
@@ -249,9 +247,8 @@ mod tests {
                 hits_max: 100,
                 spawning: false,
                 age: 10,
-                aging_remainder: 0,
+                last_action_tick: u64::MAX,
                 lifespan: DEFAULT_DRONE_LIFESPAN,
-                executed_command_this_tick: false,
             },
             Position {
                 x: 0,
@@ -271,9 +268,8 @@ mod tests {
                 hits_max: 100,
                 spawning: false,
                 age: 10,
-                aging_remainder: 0,
+                last_action_tick: u64::MAX,
                 lifespan: DEFAULT_DRONE_LIFESPAN,
-                executed_command_this_tick: false,
             },
             Position {
                 x: 0,
