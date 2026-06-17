@@ -20,6 +20,8 @@ env_vars = true
 memory_size = 1024
 memory_spawn_cost = {}
 memory_upkeep_cost = {}
+lifespan = 1500
+min_lifespan = 100
 
 [resources]
 source_regeneration_rate = 10000

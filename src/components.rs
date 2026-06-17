@@ -6,6 +6,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const DEFAULT_DRONE_LIFESPAN: u32 = 1500;
+pub const MIN_LIFESPAN: u32 = 100;
 
 pub type PlayerId = u32;
 

@@ -111,6 +111,7 @@ pub struct DroneConfig {
     pub memory_spawn_cost: crate::resources::ResourceCost,
     pub memory_upkeep_cost: crate::resources::ResourceCost,
     pub lifespan: u32,
+    pub min_lifespan: u32,
     pub max_body_parts: usize,
     pub max_drones_per_player: u32,
 }
@@ -551,6 +552,7 @@ impl Default for DroneConfig {
             memory_spawn_cost: crate::resources::ResourceCost::new(),
             memory_upkeep_cost: crate::resources::ResourceCost::new(),
             lifespan: DEFAULT_DRONE_LIFESPAN,
+            min_lifespan: MIN_LIFESPAN,
             max_body_parts: 50,
             max_drones_per_player: 500,
         }
@@ -815,13 +817,15 @@ impl SwarmWorld {
             .into_iter()
             .take(config.max_body_parts)
             .collect::<Vec<_>>();
+        let mut drone = Drone::new_with_lifespan(owner, body, &registry, config.lifespan);
+        drone.lifespan = drone.lifespan.max(config.min_lifespan);
         let entity = self
             .app
             .world_mut()
             .spawn((
                 position,
                 Owner(owner),
-                Drone::new_with_lifespan(owner, body, &registry, config.lifespan),
+                drone,
                 SpawningGrace { remaining: 1 },
             ))
             .id();
@@ -1467,6 +1471,7 @@ mod shard_tests {
         assert!(config.drone.env_vars);
         assert_eq!(config.drone.memory_size, 1024);
         assert_eq!(config.drone.lifespan, DEFAULT_DRONE_LIFESPAN);
+        assert_eq!(config.drone.min_lifespan, MIN_LIFESPAN);
         assert_eq!(config.drone.max_body_parts, 50);
         assert_eq!(config.drone.max_drones_per_player, 500);
         assert!(config.combat.pvp_enabled);
@@ -1588,6 +1593,7 @@ memory_size = 4096
 memory_spawn_cost = { Energy = 1 }
 memory_upkeep_cost = { Energy = 2 }
 lifespan = 2000
+min_lifespan = 250
 max_body_parts = 10
 max_drones_per_player = 25
 [visibility]
@@ -1615,6 +1621,7 @@ damage_multiplier = 1.5
         assert_eq!(config.code.update_window.duration, 10);
         assert_eq!(config.drone.memory_upkeep_cost.get("Energy"), Some(&2));
         assert_eq!(config.drone.lifespan, 2000);
+        assert_eq!(config.drone.min_lifespan, 250);
         assert_eq!(config.drone.max_body_parts, 10);
         assert_eq!(config.drone.max_drones_per_player, 25);
         assert!(!config.visibility.fog_of_war);
@@ -1654,6 +1661,11 @@ attribute_multipliers = { Shielded = 0.75 }
     fn damage_type_component_multipliers_affect_combat_damage() {
         let mut world = create_world();
         let target = world.spawn_drone(1, 0, 0, vec![BodyPart::Tough]);
+        world
+            .app
+            .world_mut()
+            .entity_mut(target)
+            .remove::<SpawningGrace>();
         world
             .app
             .world_mut()
@@ -1725,6 +1737,23 @@ max_body_parts = 1
 
         assert_eq!(drone.body, vec![BodyPart::Tough]);
         assert_eq!(drone.lifespan, 2_100);
+    }
+
+    #[test]
+    fn spawn_drone_applies_configured_min_lifespan_floor() {
+        let config = WorldConfig::from_toml_str(
+            r#"
+[drone]
+lifespan = 50
+min_lifespan = 120
+"#,
+        )
+        .unwrap();
+        let mut world = create_world_with_mode_and_config(WorldMode::Default, config);
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
+        let drone = world.app.world().entity(drone).get::<Drone>().unwrap();
+
+        assert_eq!(drone.lifespan, 120);
     }
 
     #[test]
