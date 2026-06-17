@@ -401,6 +401,11 @@ mod tests {
     fn combat_applies_damage_before_heal() {
         let mut world = create_world();
         let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .remove::<SpawningGrace>();
 
         {
             let mut combat = world.app.world_mut().resource_mut::<PendingCombat>();
@@ -411,6 +416,23 @@ mod tests {
         world.run_tick();
 
         assert_eq!(drone_hits(&mut world), 70);
+    }
+
+    #[test]
+    fn spawning_grace_skips_first_tick_damage_then_expires() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+
+        {
+            let mut combat = world.app.world_mut().resource_mut::<PendingCombat>();
+            combat.queue_damage(drone, 60);
+        }
+
+        world.run_tick();
+
+        let entity = world.app.world().entity(drone);
+        assert_eq!(entity.get::<Drone>().unwrap().hits, 100);
+        assert!(entity.get::<SpawningGrace>().is_none());
     }
 
     #[test]

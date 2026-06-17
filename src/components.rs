@@ -1137,6 +1137,11 @@ pub struct Drone {
     pub lifespan: u32,
 }
 
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawningGrace {
+    pub remaining: u32,
+}
+
 impl Drone {
     pub fn new(owner: PlayerId, body: Vec<BodyPart>, registry: &BodyPartRegistry) -> Self {
         Self::new_with_lifespan(owner, body, registry, DEFAULT_DRONE_LIFESPAN)

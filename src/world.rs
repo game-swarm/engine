@@ -665,6 +665,18 @@ impl WorldConfig {
         }
         app.add_systems(
             Update,
+            spawning_grace_system
+                .after(spawn_system)
+                .before(combat_system),
+        );
+        app.add_systems(
+            Update,
+            spawning_grace_expiry_system
+                .after(combat_system)
+                .before(decay_system),
+        );
+        app.add_systems(
+            Update,
             (
                 rhai_rule_module_tick_start_system,
                 death_mark_system,
@@ -810,6 +822,7 @@ impl SwarmWorld {
                 position,
                 Owner(owner),
                 Drone::new_with_lifespan(owner, body, &registry, config.lifespan),
+                SpawningGrace { remaining: 1 },
             ))
             .id();
         let mut counts = self.app.world_mut().resource_mut::<RoomDroneCounts>();

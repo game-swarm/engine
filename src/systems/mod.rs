@@ -14,6 +14,7 @@ pub mod regeneration_system;
 pub mod room_state_system;
 pub mod seed_rotation_system;
 pub mod spawn_system;
+pub mod spawning_grace_system;
 
 pub use cargo_in_transit_system::{CargoInTransit, cargo_in_transit_system};
 pub use combat_system::{
@@ -39,3 +40,4 @@ pub use regeneration_system::regeneration_system;
 pub use room_state_system::{PendingRoomClaims, RoomState, RoomStates, room_state_system};
 pub use seed_rotation_system::{SeedRotationState, seed_rotation_system};
 pub use spawn_system::{PendingSpawn, PendingSpawnQueue, RoomDroneCounts, spawn_system};
+pub use spawning_grace_system::{spawning_grace_expiry_system, spawning_grace_system};

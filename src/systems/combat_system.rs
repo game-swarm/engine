@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::{
     Attributes, BodyPart, BodyPartRegistry, DamageTypeRegistry, Drone, EntityFlags,
-    ResistanceRegistry, Structure,
+    ResistanceRegistry, SpawningGrace, Structure,
 };
 
 pub const DEFAULT_ATTACK_DAMAGE: u32 = 30;
@@ -179,7 +179,12 @@ pub fn combat_system(
     body_registry: Res<BodyPartRegistry>,
     damage_registry: Res<DamageTypeRegistry>,
     resistance_registry: Res<ResistanceRegistry>,
-    mut drones: Query<(&mut Drone, Option<&Attributes>, Option<&EntityFlags>)>,
+    mut drones: Query<(
+        &mut Drone,
+        Option<&Attributes>,
+        Option<&EntityFlags>,
+        Option<&SpawningGrace>,
+    )>,
     mut structures: Query<
         (&mut Structure, Option<&Attributes>, Option<&EntityFlags>),
         Without<Drone>,
@@ -204,7 +209,10 @@ pub fn combat_system(
     damage_by_target.sort_keys();
 
     for (entity, damages) in &damage_by_target {
-        if let Ok((mut drone, attrs, flags)) = drones.get_mut(*entity) {
+        if let Ok((mut drone, attrs, flags, grace)) = drones.get_mut(*entity) {
+            if grace.is_some() {
+                continue;
+            }
             let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
                 let multiplier = final_damage_multiplier(
                     Some(&drone.body),
@@ -243,7 +251,7 @@ pub fn combat_system(
     heal_by_target.sort_keys();
 
     for (entity, amount) in &heal_by_target {
-        if let Ok((mut drone, _, _)) = drones.get_mut(*entity) {
+        if let Ok((mut drone, _, _, _)) = drones.get_mut(*entity) {
             drone.hits = (drone.hits + amount).min(drone.hits_max);
         }
     }

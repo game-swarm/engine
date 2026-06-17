@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::{
     BodyPart, BodyPartRegistry, Drone, Owner, PlayerId, Position, RoomId, RoomTerrains,
+    SpawningGrace,
 };
 use crate::onboarding::OnboardingEvent;
 
@@ -39,6 +40,7 @@ pub fn spawn_system(
             spawn.position,
             Owner(spawn.owner),
             Drone::new(spawn.owner, spawn.body, &body_registry),
+            SpawningGrace { remaining: 1 },
         ));
         *room_counts
             .0
