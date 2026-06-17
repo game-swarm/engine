@@ -1,0 +1,36 @@
+{
+  "name": "@swarm/sdk-ts",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the Swarm programmable MMO RTS API",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:example": "npm run build && sh -c 'tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --noUncheckedIndexedAccess --exactOptionalPropertyTypes --skipLibCheck examples/$0.ts'",
+    "example:starter-bot:build": "npm run build -w examples/starter-bot",
+    "example:starter-bot:typecheck": "npm run typecheck -w examples/starter-bot",
+    "example:starter-bot:wasm": "npm run build:wasm -w examples/starter-bot",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.28.19",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  },
+  "workspaces": [
+    "examples/starter-bot"
+  ]
+}

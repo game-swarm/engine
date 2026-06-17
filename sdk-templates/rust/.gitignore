@@ -1,0 +1,12 @@
+# Rust (library)
+/target
+Cargo.lock
+**/*.rs.bk
+*.pdb
+rustc-ice-*.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~

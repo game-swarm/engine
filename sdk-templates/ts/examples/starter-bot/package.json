@@ -1,0 +1,19 @@
+{
+  "name": "@swarm/example-starter-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "5-minute Swarm TypeScript starter bot tutorial",
+  "scripts": {
+    "build": "npm run typecheck && npm run build:wasm",
+    "build:wasm": "asc assembly/tick.ts --target release --runtime stub --outFile build/starter-bot.wasm --textFile build/starter-bot.wat --bindings esm",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@swarm/sdk-ts": "file:../.."
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.28.19",
+    "typescript": "^5.5.4"
+  }
+}

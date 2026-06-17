@@ -5,8 +5,7 @@
 //! (方案β). For Rust, custom actions are generated as helper constructors
 //! on CommandAction (the Rust equivalent of concrete types).
 
-use crate::idl::{CommandDef, EnumDefs, IdlDoc, ModCustomAction};
-use std::collections::BTreeMap;
+use crate::idl::{EnumDefs, IdlDoc, ModCustomAction};
 
 // ── TypeScript generation ───────────────────────────────────────────
 
@@ -226,6 +225,11 @@ fn ts_command_factories(idl: &IdlDoc) -> String {
     let mut out = String::from(
         "export interface CommandIntent<A extends Action = Action> {\n  sequence: UInt32;\n  action: A;\n}\n\n",
     );
+    // ---- addCost helper ----
+    out.push_str(
+        "export function addCost(target: ResourceCost, source: ResourceCost): ResourceCost {\n  for (const [res, amt] of Object.entries(source)) {\n    target[res] = (target[res] ?? 0) + amt;\n  }\n  return target;\n}\n\n",
+    );
+    // ---- command factory ----
 
     out.push_str("export function command<A extends Action>(sequence: number, action: A): CommandIntent<A> {\n");
     out.push_str("  return { sequence, action };\n");
@@ -318,6 +322,9 @@ fn ts_constants(idl: &IdlDoc) -> String {
         idl.idl_version
     ));
     out.push_str("export const ABI_VERSION = 1;\n\n");
+    // AI game data markers (used by tick protocol)
+    out.push_str("export const AI_GAME_DATA_START = \"___AI_GAME_DATA_START___\";\n");
+    out.push_str("export const AI_GAME_DATA_END = \"___AI_GAME_DATA_END___\";\n\n");
 
     for (name, value) in &idl.core.constants {
         let js_val = match value {
@@ -350,8 +357,7 @@ pub fn generate_rust(idl: &IdlDoc) -> String {
 
     out.push_str(&rust_header(idl));
     out.push_str("\n");
-    out.push_str(&rust_types());
-    out.push_str("\n");
+    // Type aliases live in types_template.rs; only enums + commands generated here.
     out.push_str(&rust_enums(idl));
     out.push_str("\n");
     out.push_str(&rust_structure_types(idl));
@@ -372,16 +378,11 @@ fn rust_header(idl: &IdlDoc) -> String {
          // world hash: {world_hash}\n\
          // engine version: {engine_version}\n\
          // DO NOT EDIT — this file is auto-generated.\n\n\
-         use serde::{{Deserialize, Serialize}};\n\
-         use crate::types::{{BodyPart, ObjectId, ResourceAmount, ResourceName, StructureType}};\n",
+         use serde::{{Deserialize, Serialize}};\n",
         idl_version = idl.idl_version,
         world_hash = idl.world_hash,
         engine_version = idl.engine_version,
     )
-}
-
-fn rust_types() -> String {
-    "pub type PlayerId = u32;\npub type RoomId = u32;\npub type ObjectId = u64;\npub type Tick = u64;\npub type ResourceName = String;\npub type ResourceAmount = u32;\n".into()
 }
 
 fn rust_enums(idl: &IdlDoc) -> String {
@@ -459,7 +460,30 @@ fn rust_structure_types(idl: &IdlDoc) -> String {
     out.push_str("        Self(Box::leak(name.into().into_boxed_str()))\n");
     out.push_str("    }\n\n");
     out.push_str("    pub fn as_str(self) -> &'static str { self.0 }\n");
-    out.push_str("}\n");
+
+    // Add PascalCase aliases (backward compat)
+    for s in &all {
+        if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            out.push_str(&format!(
+                "    #[allow(non_upper_case_globals)]\n    pub const {s}: Self = Self::{};\n",
+                s.to_uppercase().replace('-', "_")
+            ));
+        }
+    }
+    out.push_str("}\n\n");
+
+    // Custom Serialize / Deserialize (same pattern as engine's StructureType)
+    out.push_str("impl Serialize for StructureType {\n");
+    out.push_str("    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {\n");
+    out.push_str("        s.serialize_str(self.0)\n    }\n}\n\n");
+    out.push_str("impl<'de> Deserialize<'de> for StructureType {\n");
+    out.push_str("    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {\n");
+    out.push_str("        String::deserialize(d).map(Self::new)\n    }\n}\n\n");
+    out.push_str("impl std::fmt::Display for StructureType {\n");
+    out.push_str("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n");
+    out.push_str("        f.write_str(self.0)\n    }\n}\n\n");
+    out.push_str("impl Default for StructureType {\n");
+    out.push_str("    fn default() -> Self { Self::SPAWN }\n}\n");
 
     out
 }
@@ -486,7 +510,7 @@ fn rust_command_action(idl: &IdlDoc) -> String {
     }
 
     // Custom variant (generic — mod actions go through here)
-    out.push_str("    Custom {\n        action_type: String,\n        object_id: ObjectId,\n        target_id: Option<ObjectId>,\n        resource: Option<ResourceName>,\n        amount: Option<ResourceAmount>,\n        structure: Option<StructureType>,\n    },\n");
+    out.push_str("    Custom {\n        action_type: String,\n        object_id: u64,\n        target_id: Option<u64>,\n        resource: Option<String>,\n        amount: Option<u32>,\n        structure: Option<StructureType>,\n    },\n");
 
     out.push_str("}\n");
     out
@@ -494,11 +518,11 @@ fn rust_command_action(idl: &IdlDoc) -> String {
 
 fn idl_to_rust_type(idl_type: &str) -> String {
     match idl_type {
-        "ObjectId" => "ObjectId".into(),
+        "ObjectId" => "u64".into(),
         "Direction" => "Direction".into(),
-        "ResourceName" => "ResourceName".into(),
-        "ResourceName?" => "Option<ResourceName>".into(),
-        "ResourceAmount" => "ResourceAmount".into(),
+        "ResourceName" => "String".into(),
+        "ResourceName?" => "Option<String>".into(),
+        "ResourceAmount" => "u32".into(),
         "u32" => "u32".into(),
         "u64" => "u64".into(),
         "i32" => "i32".into(),
@@ -589,6 +613,61 @@ pub fn sdk_cache_dir(world_hash: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("/data/swarm/sdk-cache").join(world_hash)
 }
 
+/// Return the engine source dir path.
+fn engine_dir() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    // Walk up from the binary to find the engine src/ directory
+    for ancestor in exe.ancestors().take(10) {
+        let path = ancestor.join("sdk-templates");
+        if path.is_dir() {
+            return Ok(path.to_path_buf());
+        }
+    }
+    // Fallback: check relative to CWD
+    let cwd_templates = std::env::current_dir()
+        .unwrap_or_default()
+        .join("sdk-templates");
+    if cwd_templates.is_dir() {
+        return Ok(cwd_templates);
+    }
+    Err("Cannot locate engine sdk-templates directory".into())
+}
+
+/// Copy all template files from engine/sdk-templates/<lang>/ into the output SDK directory.
+fn merge_sdk_templates(lang: &str, out_dir: &std::path::Path) -> Result<(), String> {
+    let templates_dir = engine_dir()?.join(lang);
+    if !templates_dir.is_dir() {
+        return Err(format!(
+            "sdk-templates/{lang} not found at {}",
+            templates_dir.display()
+        ));
+    }
+    copy_dir(&templates_dir, out_dir)
+        .map_err(|e| format!("copy sdk-templates/{lang}: {e}"))?;
+    Ok(())
+}
+
+/// Recursive directory copy. Overwrites existing files.
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst)
+        .map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
+    for entry in
+        std::fs::read_dir(src).map_err(|e| format!("readdir {}: {e}", src.display()))?
+    {
+        let entry = entry.map_err(|e| format!("entry: {e}"))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path).map_err(|e| {
+                format!("copy {} -> {}: {e}", src_path.display(), dst_path.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -634,19 +713,25 @@ pub fn cli_generate_sdk(world_toml_path: &str, out_base: &str) -> Result<(), Str
     let out_dir = std::path::PathBuf::from(out_base).join(&idl.world_hash);
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
 
-    // Generate TypeScript SDK
+    // Merge templates with generated code for TypeScript
     let ts_code = generate_typescript(&idl);
-    let ts_dir = out_dir.join("sdk-ts").join("src");
-    std::fs::create_dir_all(&ts_dir).map_err(|e| format!("create {}: {e}", ts_dir.display()))?;
-    std::fs::write(ts_dir.join("index.ts"), ts_code).map_err(|e| format!("write sdk-ts: {e}"))?;
+    let ts_sdk_dir = out_dir.join("sdk-ts");
+    merge_sdk_templates("ts", &ts_sdk_dir)?;
+    let ts_src = ts_sdk_dir.join("src");
+    std::fs::create_dir_all(&ts_src)
+        .map_err(|e| format!("create {}: {e}", ts_src.display()))?;
+    std::fs::write(ts_src.join("commands.ts"), ts_code)
+        .map_err(|e| format!("write sdk-ts/commands.ts: {e}"))?;
 
-    // Generate Rust SDK
+    // Merge templates with generated code for Rust
     let rust_code = generate_rust(&idl);
-    let rust_dir = out_dir.join("sdk-rust").join("src");
-    std::fs::create_dir_all(&rust_dir)
-        .map_err(|e| format!("create {}: {e}", rust_dir.display()))?;
-    std::fs::write(rust_dir.join("commands.rs"), rust_code)
-        .map_err(|e| format!("write sdk-rust: {e}"))?;
+    let rust_sdk_dir = out_dir.join("sdk-rust");
+    merge_sdk_templates("rust", &rust_sdk_dir)?;
+    let rust_src = rust_sdk_dir.join("src");
+    std::fs::create_dir_all(&rust_src)
+        .map_err(|e| format!("create {}: {e}", rust_src.display()))?;
+    std::fs::write(rust_src.join("commands.rs"), rust_code)
+        .map_err(|e| format!("write sdk-rust/commands.rs: {e}"))?;
 
     // Write IDL itself
     std::fs::write(out_dir.join("idl.json"), idl_json)
