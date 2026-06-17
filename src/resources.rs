@@ -14,9 +14,18 @@ pub const TRANSFER_FROM_GLOBAL_TICKS: Tick = 5;
 pub const TRANSFER_TO_GLOBAL_FEE_PER_10_000: u32 = 100;
 pub const TRANSFER_FROM_GLOBAL_FEE_PER_10_000: u32 = 500;
 pub const GLOBAL_STORAGE_INTERCEPT_RANGE: u32 = 3;
+pub const DEFAULT_MAX_PVE_OUTPUT_PER_TICK: ResourceAmount = ResourceAmount::MAX;
 
 #[derive(BevyResource, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentTick(pub Tick);
+
+#[derive(BevyResource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PveOutputTracker {
+    pub max_pve_output_per_tick: ResourceAmount,
+    pub tick: Tick,
+    pub produced_this_tick: ResourceAmount,
+    pub discarded_this_tick: ResourceAmount,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceDef {
@@ -171,6 +180,69 @@ impl Default for MarketOrders {
     }
 }
 
+impl Default for PveOutputTracker {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_PVE_OUTPUT_PER_TICK)
+    }
+}
+
+impl PveOutputTracker {
+    pub fn new(max_pve_output_per_tick: ResourceAmount) -> Self {
+        Self {
+            max_pve_output_per_tick,
+            tick: 0,
+            produced_this_tick: 0,
+            discarded_this_tick: 0,
+        }
+    }
+
+    pub fn reset_for_tick(&mut self, tick: Tick) {
+        if self.tick != tick {
+            self.tick = tick;
+            self.produced_this_tick = 0;
+            self.discarded_this_tick = 0;
+        }
+    }
+
+    pub fn cap_output(&mut self, tick: Tick, output: &ResourceCost) -> ResourceCost {
+        self.reset_for_tick(tick);
+
+        let mut capped = ResourceCost::new();
+        let mut discarded = ResourceCost::new();
+
+        for (resource, amount) in output {
+            if is_pve_output_capped_resource(resource) {
+                let remaining = self
+                    .max_pve_output_per_tick
+                    .saturating_sub(self.produced_this_tick);
+                let accepted = (*amount).min(remaining);
+                if accepted > 0 {
+                    capped.insert(resource.clone(), accepted);
+                    self.produced_this_tick = self.produced_this_tick.saturating_add(accepted);
+                }
+
+                let discarded_amount = amount.saturating_sub(accepted);
+                if discarded_amount > 0 {
+                    discarded.insert(resource.clone(), discarded_amount);
+                    self.discarded_this_tick =
+                        self.discarded_this_tick.saturating_add(discarded_amount);
+                }
+            } else {
+                capped.insert(resource.clone(), *amount);
+            }
+        }
+
+        if !discarded.is_empty() {
+            eprintln!(
+                "pve output cap discarded tick={} max={} discarded={:?}",
+                tick, self.max_pve_output_per_tick, discarded
+            );
+        }
+
+        capped
+    }
+}
+
 impl Default for ResourceRegistry {
     fn default() -> Self {
         let mut resources = IndexMap::new();
@@ -263,6 +335,18 @@ pub fn energy_cost(amount: ResourceAmount) -> ResourceCost {
     cost
 }
 
+pub fn cap_pve_output(
+    tracker: &mut PveOutputTracker,
+    tick: Tick,
+    output: &ResourceCost,
+) -> ResourceCost {
+    tracker.cap_output(tick, output)
+}
+
+pub fn is_pve_output_capped_resource(resource: &str) -> bool {
+    matches!(resource, "Energy" | "Crystal")
+}
+
 fn add_cost(total: &mut ResourceCost, cost: &ResourceCost) {
     for (resource, amount) in cost {
         *total.entry(resource.clone()).or_default() += amount;
@@ -272,6 +356,47 @@ fn add_cost(total: &mut ResourceCost, cost: &ResourceCost) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pve_output_tracker_caps_energy_and_crystal_per_tick() {
+        let mut tracker = PveOutputTracker::new(100);
+        let mut output = ResourceCost::new();
+        output.insert("Energy".to_string(), 70);
+        output.insert("Crystal".to_string(), 50);
+        output.insert("Blueprint".to_string(), 1);
+
+        let capped = cap_pve_output(&mut tracker, 7, &output);
+
+        assert_eq!(capped.get("Energy"), Some(&70));
+        assert_eq!(capped.get("Crystal"), Some(&30));
+        assert_eq!(capped.get("Blueprint"), Some(&1));
+        assert_eq!(tracker.produced_this_tick, 100);
+        assert_eq!(tracker.discarded_this_tick, 20);
+    }
+
+    #[test]
+    fn pve_output_tracker_resets_for_new_tick() {
+        let mut tracker = PveOutputTracker::new(10);
+        let mut output = ResourceCost::new();
+        output.insert("Energy".to_string(), 10);
+
+        assert_eq!(
+            cap_pve_output(&mut tracker, 1, &output).get("Energy"),
+            Some(&10)
+        );
+        assert!(
+            cap_pve_output(&mut tracker, 1, &output)
+                .get("Energy")
+                .is_none()
+        );
+        assert_eq!(tracker.discarded_this_tick, 10);
+        assert_eq!(
+            cap_pve_output(&mut tracker, 2, &output).get("Energy"),
+            Some(&10)
+        );
+        assert_eq!(tracker.produced_this_tick, 10);
+        assert_eq!(tracker.discarded_this_tick, 0);
+    }
 
     #[test]
     fn default_registry_defines_energy_costs_and_source() {

@@ -22,7 +22,7 @@ use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::replay_storage::ReplayStore;
 use crate::resources::{
     CurrentTick, GlobalStorageConfig, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage,
-    PlayerLocalStorage, ResourceDef, ResourceRegistry, SourceDef,
+    PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
 };
 use crate::rule_module::{
     RhaiRuleModules, rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system,
@@ -156,6 +156,7 @@ pub struct WorldResourceConfig {
     pub source_regeneration_rate: u32,
     pub build_cost_multiplier: u32,
     pub drone_decay_rate: u32,
+    pub max_pve_output_per_tick: u32,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -599,6 +600,7 @@ impl Default for WorldResourceConfig {
             source_regeneration_rate: 10_000,
             build_cost_multiplier: 10_000,
             drone_decay_rate: 10_000,
+            max_pve_output_per_tick: crate::resources::DEFAULT_MAX_PVE_OUTPUT_PER_TICK,
         }
     }
 }
@@ -667,6 +669,9 @@ impl WorldConfig {
         app.insert_resource(CustomActionRegistry::from_defs(self.custom_actions.clone()));
         app.insert_resource(NpcLootTables::default());
         app.insert_resource(BlueprintRegistry::default());
+        app.insert_resource(PveOutputTracker::new(
+            self.resources.max_pve_output_per_tick,
+        ));
         app.insert_resource(LatestCodeVersions::default());
         app.insert_resource(RepairTracker {
             per_player: Default::default(),
@@ -1018,6 +1023,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<PlayerLocalStorage>();
     app.init_resource::<PlayerGlobalStorage>();
     app.init_resource::<PendingGlobalTransfers>();
+    app.init_resource::<PveOutputTracker>();
     app.init_resource::<CurrentTick>();
     app.init_resource::<crate::resources::MarketConfig>();
     app.init_resource::<MarketOrders>();
@@ -1507,6 +1513,10 @@ mod shard_tests {
         assert!(config.combat.pvp_enabled);
         assert!(!config.combat.friendly_fire);
         assert_eq!(config.resources.source_regeneration_rate, 10_000);
+        assert_eq!(
+            config.resources.max_pve_output_per_tick,
+            crate::resources::DEFAULT_MAX_PVE_OUTPUT_PER_TICK
+        );
         assert!(config.visibility.fog_of_war);
         assert_eq!(config.visibility.player_view, PlayerViewMode::Drone);
         assert!(!config.visibility.public_spectate);
@@ -1636,6 +1646,7 @@ replay_privacy = "public"
 source_regeneration_rate = 9000
 build_cost_multiplier = 11000
 drone_decay_rate = 12000
+max_pve_output_per_tick = 1234
 [combat]
 pvp_enabled = false
 friendly_fire = true
@@ -1659,6 +1670,7 @@ damage_multiplier = 1.5
         assert!(config.visibility.public_spectate);
         assert_eq!(config.visibility.spectate_delay, 100);
         assert_eq!(config.visibility.replay_privacy, ReplayPrivacy::Public);
+        assert_eq!(config.resources.max_pve_output_per_tick, 1234);
         assert!(!config.combat.pvp_enabled);
         assert!(config.combat.friendly_fire);
         assert_eq!(config.combat_damage_multiplier_fixed(), 15_000);
