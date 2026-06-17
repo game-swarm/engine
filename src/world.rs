@@ -241,7 +241,7 @@ fn default_special_effects() -> Vec<crate::components::SpecialEffectDef> {
             "Shield and cleanse self or an ally",
             "fortify",
             "self_or_ally",
-            100,
+            3,
             None,
         ),
         special_effect_def(
@@ -1384,6 +1384,14 @@ mod shard_tests {
                 .find(|action| action.name == "Disrupt")
                 .and_then(|action| action.special_effect.as_deref()),
             Some("disrupt")
+        );
+        assert_eq!(
+            config
+                .special_effects
+                .iter()
+                .find(|effect| effect.name == "fortify")
+                .map(|effect| effect.duration),
+            Some(3)
         );
     }
 
