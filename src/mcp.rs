@@ -13,11 +13,11 @@ use swarm_wasm_sandbox::{
 use crate::arena::{
     ArenaReplay, ReplayPrivacy, TournamentBracket, TournamentElimination, TournamentMatchSchedule,
 };
+use crate::auth::{CertificateIssuer, PlayerCertificate, PlayerCertificatePayload};
 use crate::command::{
     CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand, RejectionReason, Tick,
     object_id, validate_command,
 };
-use crate::auth::{CertificateIssuer, PlayerCertificate, PlayerCertificatePayload};
 use crate::components::*;
 use crate::economy::*;
 use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
@@ -363,6 +363,50 @@ pub struct DeployResult {
     pub cache_status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployStatusParams {
+    pub deploy_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployStatusResult {
+    pub deploy_id: String,
+    pub status: String,
+    pub errors: Vec<String>,
+    pub deployed_at: String,
+    pub fdb_version_counter: u64,
+    pub object_store_key: String,
+    pub module_hash: String,
+    pub load_after_tick: Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListDeploymentsParams {
+    pub player_id: Option<PlayerId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploymentInfo {
+    pub id: String,
+    pub drone_id: Option<ObjectId>,
+    pub room_id: u32,
+    pub player_id: PlayerId,
+    pub status: String,
+    pub at: String,
+    pub fdb_version_counter: u64,
+    pub object_store_key: String,
+    pub hash: String,
+    pub language: String,
+    pub size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListDeploymentsResult {
+    pub deployments: Vec<DeploymentInfo>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredModule {
     pub module_id: String,
@@ -474,6 +518,104 @@ pub struct AvailableActionsResult {
     pub player_id: PlayerId,
     pub wasm_actions: Vec<String>,
     pub mcp_tools: Vec<ToolInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TickTraceParams {
+    pub tick: Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TickTraceResult {
+    pub tick: Tick,
+    pub commands: Vec<RawCommand>,
+    pub state_diff: Value,
+    pub rejections: Vec<crate::command::CommandRejection>,
+    pub metrics: crate::tick::TickMetrics,
+    pub state_checksum: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineStatsResult {
+    pub tick_duration: u64,
+    pub player_count: usize,
+    pub memory: EngineMemoryStats,
+    pub cpu: EngineCpuStats,
+    pub sandbox_stats: SandboxStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineMemoryStats {
+    pub deployed_modules: usize,
+    pub cached_modules: usize,
+    pub wasm_bytes: usize,
+    pub tick_traces: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineCpuStats {
+    pub total_commands: u64,
+    pub accepted_commands: u64,
+    pub rejected_commands: u64,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxStats {
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cached_modules: usize,
+    pub wasmtime_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxProfileParams {
+    pub drone_id: ObjectId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxProfileResult {
+    pub drone_id: ObjectId,
+    pub fuel_used: u64,
+    pub host_calls: u64,
+    pub memory_peak: usize,
+    pub execution_time: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListErrorsParams {
+    pub player_id: Option<PlayerId>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorInfo {
+    pub tick: Tick,
+    pub drone: Option<ObjectId>,
+    pub code: RejectionReason,
+    pub detail: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListErrorsResult {
+    pub errors: Vec<ErrorInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateChecksumParams {
+    pub tick: Option<Tick>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateChecksumResult {
+    pub checksum: String,
+    pub algorithm: String,
+    pub scope: String,
+    pub tick: Tick,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -811,6 +953,7 @@ impl McpServer {
                 serde_json::to_value(self.swarm_explain_last_tick(world, context))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
+
             "swarm_get_drone" => {
                 let params: InspectEntityParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -840,6 +983,45 @@ impl McpServer {
             "swarm_list_controllers" => Ok(world_view_list(world, context, "controllers")),
             "swarm_get_events" => Ok(json!({ "events": Vec::<Value>::new() })),
             "swarm_get_messages" => Ok(world_view_messages(params)?),
+
+            "swarm_get_tick_trace" => {
+                let params: TickTraceParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_get_tick_trace(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_engine_stats" => serde_json::to_value(self.swarm_get_engine_stats(world))
+                .map_err(|error| McpError::invalid_params(error.to_string())),
+            "swarm_get_state_checksum" => {
+                let params: StateChecksumParams = if params.is_null() {
+                    StateChecksumParams { tick: None }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(self.swarm_get_state_checksum(world, context, params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_sandbox_profile" => {
+                let params: SandboxProfileParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_get_sandbox_profile(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_list_errors" => {
+                let params: ListErrorsParams = if params.is_null() {
+                    ListErrorsParams {
+                        player_id: None,
+                        limit: None,
+                    }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(self.swarm_list_errors(params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+
             "swarm_profile" => serde_json::to_value(self.swarm_profile(world, context))
                 .map_err(|error| McpError::invalid_params(error.to_string())),
             "swarm_get_economy" => {
@@ -961,8 +1143,10 @@ impl McpServer {
             | "swarm_auth_cert_rotate"
             | "swarm_auth_device_list"
             | "swarm_auth_device_register"
-            | "swarm_get_world_config" => serde_json::to_value(auth_stub_result(tool, context, params))
-                .map_err(|error| McpError::invalid_params(error.to_string())),
+            | "swarm_get_world_config" => {
+                serde_json::to_value(auth_stub_result(tool, context, params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_tournament_precommit" => {
                 let params: TournamentPrecommitParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -1004,7 +1188,7 @@ impl McpServer {
             "swarm_get_deploy_status" => {
                 let params: DeployStatusParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(get_deploy_status(&self.modules, params)?)
+                serde_json::to_value(self.swarm_get_deploy_status(params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_list_deployments" => {
@@ -1014,7 +1198,7 @@ impl McpServer {
                     serde_json::from_value(params)
                         .map_err(|error| McpError::invalid_params(error.to_string()))?
                 };
-                serde_json::to_value(list_deployments(&self.modules, params))
+                serde_json::to_value(self.swarm_list_deployments(params))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_validate_module" => {
@@ -1557,6 +1741,160 @@ impl McpServer {
     pub fn swarm_profile(&self, world: &mut SwarmWorld, context: McpContext) -> ProfileResult {
         swarm_profile(world, context, self.modules.len())
     }
+
+    pub fn swarm_get_tick_trace(
+        &self,
+        params: TickTraceParams,
+    ) -> Result<TickTraceResult, McpError> {
+        let trace = self
+            .tick_traces
+            .iter()
+            .rev()
+            .find(|trace| trace.tick == params.tick)
+            .ok_or_else(|| McpError::invalid_params("tick trace not found"))?;
+        Ok(TickTraceResult {
+            tick: trace.tick,
+            commands: trace.commands.clone(),
+            state_diff: serde_json::to_value(&trace.state)
+                .map_err(|error| McpError::invalid_params(error.to_string()))?,
+            rejections: trace.rejections.clone(),
+            metrics: trace.metrics.clone(),
+            state_checksum: trace.state_checksum,
+        })
+    }
+
+    pub fn swarm_get_engine_stats(&self, world: &mut SwarmWorld) -> EngineStatsResult {
+        let metrics = aggregate_tick_metrics(&self.tick_traces);
+        let cache_stats = self.module_cache.stats();
+        EngineStatsResult {
+            tick_duration: metrics.duration_ms,
+            player_count: world_player_count(world),
+            memory: EngineMemoryStats {
+                deployed_modules: self.modules.len(),
+                cached_modules: cache_stats.entries,
+                wasm_bytes: self
+                    .modules
+                    .iter()
+                    .map(|module| module.wasm_bytes.len())
+                    .sum(),
+                tick_traces: self.tick_traces.len(),
+            },
+            cpu: EngineCpuStats {
+                total_commands: metrics.total_commands,
+                accepted_commands: metrics.accepted_commands,
+                rejected_commands: metrics.rejected_commands,
+                duration_ms: metrics.duration_ms,
+            },
+            sandbox_stats: SandboxStats {
+                cache_hits: cache_stats.hits,
+                cache_misses: cache_stats.misses,
+                cached_modules: cache_stats.entries,
+                wasmtime_version: wasmtime_version().to_string(),
+            },
+        }
+    }
+
+    pub fn swarm_get_sandbox_profile(
+        &self,
+        params: SandboxProfileParams,
+    ) -> Result<SandboxProfileResult, McpError> {
+        let mut fuel_used = 0;
+        let mut host_calls = 0;
+        let mut execution_time = 0;
+        for trace in &self.tick_traces {
+            fuel_used += trace.metrics.fuel_consumed;
+            host_calls += trace.metrics.total_commands;
+            execution_time += trace.metrics.execute_duration_ms;
+        }
+        Ok(SandboxProfileResult {
+            drone_id: params.drone_id,
+            fuel_used,
+            host_calls,
+            memory_peak: self
+                .modules
+                .iter()
+                .map(|module| module.wasm_bytes.len())
+                .max()
+                .unwrap_or(0),
+            execution_time,
+        })
+    }
+
+    pub fn swarm_list_errors(&self, params: ListErrorsParams) -> ListErrorsResult {
+        let mut errors = self
+            .tick_traces
+            .iter()
+            .flat_map(|trace| {
+                trace.rejections.iter().filter_map(move |rejection| {
+                    if params
+                        .player_id
+                        .is_some_and(|player_id| player_id != rejection.command.player_id)
+                    {
+                        return None;
+                    }
+                    Some(ErrorInfo {
+                        tick: trace.tick,
+                        drone: Some(ObjectId::from(rejection.command.sequence)),
+                        code: rejection.rejection.clone(),
+                        detail: rejection.detail.clone(),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        errors.sort_by_key(|error| error.tick);
+        if let Some(limit) = params.limit {
+            let keep_from = errors.len().saturating_sub(limit);
+            errors = errors.split_off(keep_from);
+        }
+        ListErrorsResult { errors }
+    }
+
+    pub fn swarm_get_state_checksum(
+        &self,
+        world: &mut SwarmWorld,
+        context: McpContext,
+        params: StateChecksumParams,
+    ) -> StateChecksumResult {
+        let tick = params.tick.unwrap_or(context.tick);
+        let checksum = self
+            .tick_traces
+            .iter()
+            .rev()
+            .find(|trace| trace.tick == tick)
+            .map(|trace| trace.state_checksum)
+            .unwrap_or_else(|| world.state_checksum());
+        StateChecksumResult {
+            checksum: format!("blake3-u64:{checksum:016x}"),
+            algorithm: "blake3-u64".to_string(),
+            scope: "world".to_string(),
+            tick,
+        }
+    }
+
+    pub fn swarm_get_deploy_status(
+        &self,
+        params: DeployStatusParams,
+    ) -> Result<DeployStatusResult, McpError> {
+        let module = self
+            .modules
+            .iter()
+            .find(|module| module.module_id == params.deploy_id)
+            .ok_or_else(|| McpError::invalid_params("deploy_id is not deployed"))?;
+        Ok(deploy_status_for_module(module))
+    }
+
+    pub fn swarm_list_deployments(&self, params: ListDeploymentsParams) -> ListDeploymentsResult {
+        ListDeploymentsResult {
+            deployments: self
+                .modules
+                .iter()
+                .filter(|module| {
+                    params.player_id.is_none() || params.player_id == Some(module.player_id)
+                })
+                .map(deployment_info_for_module)
+                .collect(),
+        }
+    }
 }
 
 fn mcp_tool_infos() -> Vec<ToolInfo> {
@@ -1586,12 +1924,24 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Explain the last tick's results for a player".to_string(),
         },
         ToolInfo {
-            name: "swarm_get_drone".to_string(),
-            description: "Inspect full state for an owned or visible entity".to_string(),
+            name: "swarm_get_tick_trace".to_string(),
+            description: "Get commands, state diff, rejections, and metrics for a tick".to_string(),
         },
         ToolInfo {
-            name: "swarm_get_room".to_string(),
-            description: "Inspect a room visible to the player: drone count, structures, controller".to_string(),
+            name: "swarm_get_engine_stats".to_string(),
+            description: "Get engine tick, memory, CPU, and sandbox cache statistics".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_state_checksum".to_string(),
+            description: "Get deterministic world state checksum for current or traced tick".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_sandbox_profile".to_string(),
+            description: "Get sandbox fuel, host call, memory, and execution profile for a drone".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_list_errors".to_string(),
+            description: "List command rejections collected from tick traces".to_string(),
         },
         ToolInfo { name: "swarm_get_drone".to_string(), description: "Get full state for an owned or visible drone".to_string() },
         ToolInfo { name: "swarm_get_room".to_string(), description: "Get a room visible to the player".to_string() },
@@ -1781,18 +2131,36 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_get_leaderboard"
         | "swarm_list_market_orders"
         | "swarm_sdk_fetch"
-        | "swarm_dry_run"
+        | "swarm_get_drone"
+        | "swarm_get_room"
+        | "swarm_get_tick_trace"
+        | "swarm_get_engine_stats"
+        | "swarm_get_state_checksum"
+        | "swarm_get_sandbox_profile"
+        | "swarm_list_errors"
+        | "swarm_inspect_entity"
+        | "swarm_inspect_room"
+        | "swarm_profile"
         | "swarm_get_docs"
         | "resources/list"
         | "resources/read"
         | "swarm_auth_revoke"
         | "swarm_tournament_status"
         | "swarm_match_result" => Some(CommandSource::McpQuery),
+
+        "swarm_match_result" | "swarm_oauth2_login" => Some(CommandSource::McpQuery),
+        "swarm_dry_run" => Some(CommandSource::DryRun),
+
         "swarm_simulate" => Some(CommandSource::Simulate),
         "swarm_list_modules"
         | "swarm_get_deploy_status"
         | "swarm_list_deployments"
         | "swarm_get_replay" => Some(CommandSource::McpQuery),
+
+        "swarm_get_replay" | "swarm_get_deploy_status" | "swarm_list_deployments" => {
+            Some(CommandSource::McpQuery)
+        }
+
         _ => None,
     }
 }
@@ -1926,6 +2294,54 @@ fn wasm_action_names() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+fn aggregate_tick_metrics(traces: &[TickTrace]) -> crate::tick::TickMetrics {
+    let mut metrics = crate::tick::TickMetrics::default();
+    for trace in traces {
+        metrics.add(&trace.metrics);
+    }
+    metrics
+}
+
+fn world_player_count(_world: &mut SwarmWorld) -> usize {
+    0
+}
+
+fn deploy_status_for_module(module: &StoredModule) -> DeployStatusResult {
+    DeployStatusResult {
+        deploy_id: module.module_id.clone(),
+        status: "pending_next_tick".to_string(),
+        errors: Vec::new(),
+        deployed_at: module.deployed_at.clone(),
+        fdb_version_counter: module.load_after_tick,
+        object_store_key: module_object_store_key(module),
+        module_hash: module.wasm_hash.clone(),
+        load_after_tick: module.load_after_tick,
+    }
+}
+
+fn deployment_info_for_module(module: &StoredModule) -> DeploymentInfo {
+    DeploymentInfo {
+        id: module.module_id.clone(),
+        drone_id: None,
+        room_id: module.room_id.0,
+        player_id: module.player_id,
+        status: "pending_next_tick".to_string(),
+        at: module.deployed_at.clone(),
+        fdb_version_counter: module.load_after_tick,
+        object_store_key: module_object_store_key(module),
+        hash: module.wasm_hash.clone(),
+        language: module.language.clone(),
+        size: module.wasm_bytes.len(),
+    }
+}
+
+fn module_object_store_key(module: &StoredModule) -> String {
+    format!(
+        "wasm/{}/{}/{}",
+        module.player_id, module.room_id.0, module.wasm_hash
+    )
 }
 
 pub fn swarm_get_available_actions(context: McpContext) -> AvailableActionsResult {
@@ -3645,6 +4061,89 @@ mod tests {
     }
 
     #[test]
+    fn debug_and_deploy_registry_tools_are_registered_and_sourced() {
+        let tools = mcp_tool_infos()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<BTreeSet<_>>();
+        for name in [
+            "swarm_dry_run",
+            "swarm_get_tick_trace",
+            "swarm_get_engine_stats",
+            "swarm_get_state_checksum",
+            "swarm_get_sandbox_profile",
+            "swarm_list_errors",
+            "swarm_get_deploy_status",
+            "swarm_list_deployments",
+        ] {
+            assert!(tools.contains(name), "missing ToolInfo for {name}");
+            assert!(mcp_tool_source(name).is_some(), "missing source for {name}");
+        }
+        assert_eq!(
+            mcp_tool_source("swarm_dry_run"),
+            Some(CommandSource::DryRun)
+        );
+        assert_eq!(
+            mcp_tool_source("swarm_get_deploy_status"),
+            Some(CommandSource::McpQuery)
+        );
+        assert_eq!(
+            mcp_tool_source("swarm_list_deployments"),
+            Some(CommandSource::McpQuery)
+        );
+    }
+
+    #[test]
+    fn debug_tools_call_through_json_rpc_dispatch() {
+        let mut world = create_world();
+        let mut server = McpServer::new();
+        let context = McpContext {
+            player_id: 1,
+            tick: 9,
+        };
+
+        let stats = server
+            .call_tool(
+                &mut world,
+                context.clone(),
+                "swarm_get_engine_stats",
+                Value::Null,
+            )
+            .unwrap();
+        assert_eq!(stats["memory"]["deployed_modules"], 0);
+
+        let checksum = server
+            .call_tool(
+                &mut world,
+                context.clone(),
+                "swarm_get_state_checksum",
+                Value::Null,
+            )
+            .unwrap();
+        assert_eq!(checksum["algorithm"], "blake3-u64");
+
+        let errors = server
+            .call_tool(
+                &mut world,
+                context.clone(),
+                "swarm_list_errors",
+                Value::Null,
+            )
+            .unwrap();
+        assert!(errors["errors"].as_array().unwrap().is_empty());
+
+        let profile = server
+            .call_tool(
+                &mut world,
+                context,
+                "swarm_get_sandbox_profile",
+                json!({ "drone_id": 1 }),
+            )
+            .unwrap();
+        assert_eq!(profile["fuel_used"], 0);
+    }
+
+    #[test]
     fn simulate_is_registered_as_simulate_source_tool() {
         assert_eq!(
             mcp_tool_source("swarm_simulate"),
@@ -4467,7 +4966,7 @@ mod tests {
         assert!(tool_names.contains(&"swarm_match_result"));
         assert!(!tool_names.iter().any(|name| matches!(
             *name,
-            "swarm_move" | "swarm_harvest" | "swarm_build"
+            "swarm_move" | "swarm_attack" | "swarm_build" | "swarm_spawn" | "swarm_harvest"
         )));
         let read = server.handle_json_rpc(
             &mut world,
