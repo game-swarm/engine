@@ -1071,19 +1071,6 @@ impl McpServer {
                 serde_json::to_value(get_leaderboard(world, params))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
-            "swarm_list_market_orders" => {
-                let params: MarketOrdersParams = if params.is_null() {
-                    MarketOrdersParams {
-                        resource: None,
-                        limit: 50,
-                    }
-                } else {
-                    serde_json::from_value(params)
-                        .map_err(|error| McpError::invalid_params(error.to_string()))?
-                };
-                serde_json::to_value(list_market_orders(params))
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
             "swarm_sdk_fetch" => {
                 let params: SdkFetchParams = if params.is_null() {
                     SdkFetchParams {
@@ -1981,10 +1968,6 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Return leaderboard entries from ranking state and live world counts".to_string(),
         },
         ToolInfo {
-            name: "swarm_list_market_orders".to_string(),
-            description: "List market orders when a market order book is installed".to_string(),
-        },
-        ToolInfo {
             name: "swarm_sdk_fetch".to_string(),
             description: "Fetch a minimal SDK starter package for bot development".to_string(),
         },
@@ -2129,7 +2112,6 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_get_economy_trend"
         | "swarm_get_drone_efficiency"
         | "swarm_get_leaderboard"
-        | "swarm_list_market_orders"
         | "swarm_sdk_fetch"
         | "swarm_get_drone"
         | "swarm_get_room"
@@ -2138,8 +2120,6 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_get_state_checksum"
         | "swarm_get_sandbox_profile"
         | "swarm_list_errors"
-        | "swarm_inspect_entity"
-        | "swarm_inspect_room"
         | "swarm_profile"
         | "swarm_get_docs"
         | "resources/list"
@@ -2148,7 +2128,7 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_tournament_status"
         | "swarm_match_result" => Some(CommandSource::McpQuery),
 
-        "swarm_match_result" | "swarm_oauth2_login" => Some(CommandSource::McpQuery),
+        "swarm_match_result" => Some(CommandSource::McpQuery),
         "swarm_dry_run" => Some(CommandSource::DryRun),
 
         "swarm_simulate" => Some(CommandSource::Simulate),
