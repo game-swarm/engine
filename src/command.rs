@@ -5,11 +5,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 
 use crate::components::*;
-use crate::onboarding::{OnboardingEvent, send_onboarding_event};
+use crate::onboarding::{send_onboarding_event, OnboardingEvent};
 use crate::resources::{
-    GlobalStorageConfig, GlobalTransferDirection,
-    PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
-    ResourceCost, ResourceRegistry,
+    GlobalStorageConfig, GlobalTransferDirection, PendingGlobalTransfer, PendingGlobalTransfers,
+    PlayerGlobalStorage, PlayerLocalStorage, ResourceCost, ResourceRegistry,
 };
 use crate::systems::{PendingControllerUpgrade, PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
 
@@ -435,12 +434,21 @@ pub struct ValidatedCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RejectionReason {
+    InvalidJson,
+    SchemaViolation,
+    CommandBufferFull,
+    TimeoutExceeded,
     SourceNotAllowed,
     AuthContextInvalid,
+    NotVisibleOrNotFound,
     ObjectNotFound,
+    TargetNotFound,
+    TargetNotVisible,
     NotOwner,
     NotMovable,
     Fatigued,
+    InvalidBodyPart,
+    NotEnoughBodyParts,
     MissingBodyPart {
         part: BodyPart,
     },
@@ -456,6 +464,8 @@ pub enum RejectionReason {
         required: u32,
         available: u32,
     },
+    InsufficientEnergy,
+    InsufficientResources,
     CarryFull,
     NotSource,
     SourceEmpty,
@@ -467,14 +477,19 @@ pub enum RejectionReason {
     TargetEmpty,
     NotYourRoom,
     TileOccupied,
+    PositionOccupied,
     InvalidTerrain,
+    InvalidStructureType,
+    InvalidResourceType,
     TooManyConstructionSites,
+    ConstructionLimitReached,
     NotStructure,
     NotController,
     AlreadyFullHealth,
     FriendlyTarget,
     NotYourSpawn,
     SpawnOnCooldown,
+    CooldownActive,
     BodyTooLarge,
     ExceedsRoomCapacity,
     RoomDroneCapReached,
@@ -490,6 +505,24 @@ pub enum RejectionReason {
     },
     PlayerNotFound,
     TargetFuelTooLow,
+    FuelExhausted,
+    SafeModeActive,
+    TargetFortifyCooldown,
+    TargetOverloadCooldown,
+    InternalError,
+    ServerOverloaded,
+    SnapshotOverBudget,
+    InvalidCertificate,
+    CertExpired,
+    TokenRevoked,
+    RefreshTokenInvalid,
+    NotAuthorized,
+    ScopeInsufficient,
+    SessionLimitReached,
+    DeviceNotRegistered,
+    MultiDeviceConflict,
+    UnknownCredential,
+    InternalAuthError,
     UnknownAction {
         action: String,
     },
@@ -829,8 +862,7 @@ fn action_triggers_combat(action: &CommandAction) -> bool {
 fn action_uses_global_storage(action: &CommandAction) -> bool {
     matches!(
         action,
-        CommandAction::TransferToGlobal { .. }
-            | CommandAction::TransferFromGlobal { .. }
+        CommandAction::TransferToGlobal { .. } | CommandAction::TransferFromGlobal { .. }
     )
 }
 
@@ -1006,7 +1038,7 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Custom { action_type, .. } => action_type,
     };
 
-    match rejection {
+    let detail = match rejection {
         RejectionReason::SourceEmpty => match &command.action {
             CommandAction::Harvest {
                 object_id,
@@ -1109,7 +1141,8 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
             "available": available,
         }),
         _ => default_rejection_detail(command, rejection, action),
-    }
+    };
+    add_canonical_rejection_detail(detail, rejection)
 }
 
 fn default_rejection_detail(
@@ -1118,12 +1151,175 @@ fn default_rejection_detail(
     action: &str,
 ) -> serde_json::Value {
     serde_json::json!({
-        "reason": rejection,
+        "reason": canonical_rejection_reason(rejection),
         "action": action,
         "player_id": command.player_id,
         "sequence": command.sequence,
         "source": command.source,
     })
+}
+
+fn add_canonical_rejection_detail(
+    detail: serde_json::Value,
+    rejection: &RejectionReason,
+) -> serde_json::Value {
+    let mut detail = detail;
+    let canonical_reason = canonical_rejection_reason(rejection);
+    if let serde_json::Value::Object(fields) = &mut detail {
+        fields
+            .entry("reason".to_string())
+            .or_insert_with(|| serde_json::Value::String(canonical_reason.to_string()));
+        if non_canonical_rejection_reason(rejection) {
+            fields.insert(
+                "canonical_reason".to_string(),
+                serde_json::Value::String(canonical_reason.to_string()),
+            );
+            fields.insert(
+                "internal_reason".to_string(),
+                serde_json::Value::String(format!("{rejection:?}")),
+            );
+            fields.insert(
+                "debug_detail".to_string(),
+                serde_json::Value::String(format!("{rejection:?} -> {canonical_reason}")),
+            );
+        }
+    }
+    detail
+}
+
+fn canonical_rejection_reason(rejection: &RejectionReason) -> &'static str {
+    match rejection {
+        RejectionReason::InvalidJson => "InvalidJson",
+        RejectionReason::SchemaViolation => "SchemaViolation",
+        RejectionReason::CommandBufferFull => "CommandBufferFull",
+        RejectionReason::TimeoutExceeded => "TimeoutExceeded",
+        RejectionReason::SourceNotAllowed => "SourceNotAllowed",
+        RejectionReason::AuthContextInvalid => "AuthContextInvalid",
+        RejectionReason::NotVisibleOrNotFound => "NotVisibleOrNotFound",
+        RejectionReason::ObjectNotFound | RejectionReason::TargetNotFound => "ObjectNotFound",
+        RejectionReason::TargetNotVisible => "TargetNotVisible",
+        RejectionReason::NotOwner
+        | RejectionReason::FriendlyTarget
+        | RejectionReason::NotFriendly
+        | RejectionReason::NotYourRoom
+        | RejectionReason::NotYourSpawn => "NotOwner",
+        RejectionReason::NotMovable
+        | RejectionReason::NotSource
+        | RejectionReason::OrderNotFound => "ObjectNotFound",
+        RejectionReason::Fatigued
+        | RejectionReason::StillSpawning
+        | RejectionReason::AlreadyFullHealth
+        | RejectionReason::AlreadyHacked
+        | RejectionReason::AlreadyDebilitated { .. }
+        | RejectionReason::TerminalRequired => "CooldownActive",
+        RejectionReason::InvalidBodyPart | RejectionReason::BodyTooLarge => "InvalidBodyPart",
+        RejectionReason::NotEnoughBodyParts
+        | RejectionReason::MissingBodyPart { .. }
+        | RejectionReason::InsufficientMoveParts => "NotEnoughBodyParts",
+        RejectionReason::TileBlocked
+        | RejectionReason::TileOccupied
+        | RejectionReason::PositionOccupied
+        | RejectionReason::InvalidTerrain
+        | RejectionReason::NoPath
+        | RejectionReason::PathTooLong
+        | RejectionReason::OutOfRoom => "PositionOccupied",
+        RejectionReason::InvalidDirection => "InvalidDirection",
+        RejectionReason::InsufficientResource { .. }
+        | RejectionReason::InsufficientEnergy
+        | RejectionReason::InsufficientResources
+        | RejectionReason::CarryFull
+        | RejectionReason::SourceEmpty
+        | RejectionReason::TargetFull
+        | RejectionReason::TargetEmpty
+        | RejectionReason::ExceedsRoomCapacity
+        | RejectionReason::TargetFuelTooLow => "InsufficientResource",
+        RejectionReason::OutOfRange { .. } => "OutOfRange",
+        RejectionReason::InvalidStructureType => "InvalidStructureType",
+        RejectionReason::InvalidResourceType | RejectionReason::InvalidDamageType => {
+            "InvalidResourceType"
+        }
+        RejectionReason::TooManyConstructionSites | RejectionReason::ConstructionLimitReached => {
+            "ConstructionLimitReached"
+        }
+        RejectionReason::NotStructure => "NotStructure",
+        RejectionReason::NotController => "NotController",
+        RejectionReason::SpawnOnCooldown => "SpawnOnCooldown",
+        RejectionReason::CooldownActive => "CooldownActive",
+        RejectionReason::RoomDroneCapReached => "RoomDroneCapReached",
+        RejectionReason::GlobalStorageDisabled => "GlobalStorageDisabled",
+        RejectionReason::TransferInProgress => "TransferInProgress",
+        RejectionReason::PlayerNotFound => "NotVisibleOrNotFound",
+        RejectionReason::FuelExhausted => "FuelExhausted",
+        RejectionReason::SafeModeActive => "SafeModeActive",
+        RejectionReason::TargetFortifyCooldown => "TargetFortifyCooldown",
+        RejectionReason::TargetOverloadCooldown => "TargetOverloadCooldown",
+        RejectionReason::InternalError => "InternalError",
+        RejectionReason::ServerOverloaded => "ServerOverloaded",
+        RejectionReason::SnapshotOverBudget => "SnapshotOverBudget",
+        RejectionReason::InvalidCertificate => "InvalidCertificate",
+        RejectionReason::CertExpired => "CertExpired",
+        RejectionReason::TokenRevoked => "TokenRevoked",
+        RejectionReason::RefreshTokenInvalid => "RefreshTokenInvalid",
+        RejectionReason::NotAuthorized => "NotAuthorized",
+        RejectionReason::ScopeInsufficient => "ScopeInsufficient",
+        RejectionReason::SessionLimitReached => "SessionLimitReached",
+        RejectionReason::DeviceNotRegistered => "DeviceNotRegistered",
+        RejectionReason::MultiDeviceConflict => "MultiDeviceConflict",
+        RejectionReason::UnknownCredential => "UnknownCredential",
+        RejectionReason::InternalAuthError => "InternalAuthError",
+        RejectionReason::UnknownAction { .. } => "UnknownAction",
+    }
+}
+
+fn non_canonical_rejection_reason(rejection: &RejectionReason) -> bool {
+    !matches!(
+        rejection,
+        RejectionReason::InvalidJson
+            | RejectionReason::SchemaViolation
+            | RejectionReason::CommandBufferFull
+            | RejectionReason::TimeoutExceeded
+            | RejectionReason::SourceNotAllowed
+            | RejectionReason::AuthContextInvalid
+            | RejectionReason::NotVisibleOrNotFound
+            | RejectionReason::ObjectNotFound
+            | RejectionReason::TargetNotVisible
+            | RejectionReason::NotOwner
+            | RejectionReason::InvalidBodyPart
+            | RejectionReason::NotEnoughBodyParts
+            | RejectionReason::PositionOccupied
+            | RejectionReason::InvalidDirection
+            | RejectionReason::InsufficientResource { .. }
+            | RejectionReason::OutOfRange { .. }
+            | RejectionReason::InvalidStructureType
+            | RejectionReason::InvalidResourceType
+            | RejectionReason::ConstructionLimitReached
+            | RejectionReason::NotStructure
+            | RejectionReason::NotController
+            | RejectionReason::SpawnOnCooldown
+            | RejectionReason::CooldownActive
+            | RejectionReason::RoomDroneCapReached
+            | RejectionReason::GlobalStorageDisabled
+            | RejectionReason::TransferInProgress
+            | RejectionReason::FuelExhausted
+            | RejectionReason::SafeModeActive
+            | RejectionReason::TargetFortifyCooldown
+            | RejectionReason::TargetOverloadCooldown
+            | RejectionReason::InternalError
+            | RejectionReason::ServerOverloaded
+            | RejectionReason::SnapshotOverBudget
+            | RejectionReason::InvalidCertificate
+            | RejectionReason::CertExpired
+            | RejectionReason::TokenRevoked
+            | RejectionReason::RefreshTokenInvalid
+            | RejectionReason::NotAuthorized
+            | RejectionReason::ScopeInsufficient
+            | RejectionReason::SessionLimitReached
+            | RejectionReason::DeviceNotRegistered
+            | RejectionReason::MultiDeviceConflict
+            | RejectionReason::UnknownCredential
+            | RejectionReason::InternalAuthError
+            | RejectionReason::UnknownAction { .. }
+    )
 }
 
 fn json_depth(value: &serde_json::Value) -> usize {
@@ -3362,14 +3558,12 @@ mod tests {
             target_ref.get::<EntityFlags>().unwrap().0.get("Disrupted"),
             Some(&true)
         );
-        assert!(
-            !world
-                .app
-                .world()
-                .resource::<CustomActionCooldowns>()
-                .0
-                .contains_key(&(target_id, "Hack".to_string()))
-        );
+        assert!(!world
+            .app
+            .world()
+            .resource::<CustomActionCooldowns>()
+            .0
+            .contains_key(&(target_id, "Hack".to_string())));
     }
 
     #[test]
