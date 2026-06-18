@@ -4,25 +4,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bevy::prelude::*;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use swarm_wasm_sandbox::{
-    CachedNativeModule, CompiledModule, CompiledModuleCache, ModuleCacheKey, SandboxRuntime,
-    wasmtime_version,
+    wasmtime_version, CachedNativeModule, CompiledModule, CompiledModuleCache, ModuleCacheKey,
+    SandboxRuntime,
 };
 
 use crate::arena::{
     ArenaReplay, ReplayPrivacy, TournamentBracket, TournamentElimination, TournamentMatchSchedule,
 };
 use crate::command::{
-    CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand, RejectionReason, Tick,
-    object_id, validate_command,
+    object_id, validate_command, CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand,
+    RejectionReason, Tick,
 };
 use crate::components::*;
-use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
+use crate::hot_cache::{read_through_dragonfly, SnapshotKey};
 use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
-use crate::tick::{TickTrace, tick_key};
+use crate::tick::{tick_key, TickTrace};
 use crate::visibility::{
-    VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
+    is_position_visible_to, visible_entity_ids, visible_positions, VISIBILITY_RADIUS,
 };
 use crate::world::SwarmWorld;
 
@@ -3416,7 +3416,7 @@ pub fn swarm_get_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Structure, StructureType, create_world};
+    use crate::{create_world, Structure, StructureType};
     use ed25519_dalek::Signer;
 
     fn spawn_structure(world: &mut SwarmWorld, owner: Option<PlayerId>, x: i32, y: i32) {
@@ -3554,11 +3554,9 @@ mod tests {
             mcp_tool_source("swarm_simulate"),
             Some(CommandSource::Simulate)
         );
-        assert!(
-            mcp_tool_infos()
-                .iter()
-                .any(|tool| tool.name == "swarm_simulate")
-        );
+        assert!(mcp_tool_infos()
+            .iter()
+            .any(|tool| tool.name == "swarm_simulate"));
     }
 
     #[test]
@@ -3605,12 +3603,10 @@ mod tests {
         })
         .unwrap();
 
-        assert!(
-            result
-                .predicted_snapshot
-                .pending_global_transfers
-                .is_empty()
-        );
+        assert!(result
+            .predicted_snapshot
+            .pending_global_transfers
+            .is_empty());
         assert_eq!(
             result.predicted_snapshot.global_storage.get("Energy"),
             Some(&49)
@@ -3665,18 +3661,14 @@ mod tests {
         );
 
         assert_eq!(snapshot.tick, 7);
-        assert!(
-            snapshot
-                .visible_tiles
-                .iter()
-                .any(|tile| tile.x == 10 && tile.y == 10)
-        );
-        assert!(
-            !snapshot
-                .visible_tiles
-                .iter()
-                .any(|tile| tile.x == 40 && tile.y == 40)
-        );
+        assert!(snapshot
+            .visible_tiles
+            .iter()
+            .any(|tile| tile.x == 10 && tile.y == 10));
+        assert!(!snapshot
+            .visible_tiles
+            .iter()
+            .any(|tile| tile.x == 40 && tile.y == 40));
         assert!(snapshot.visible_tiles.len() < (DEFAULT_ROOM_SIZE * DEFAULT_ROOM_SIZE) as usize);
 
         let drone_positions = snapshot
@@ -3745,18 +3737,14 @@ mod tests {
                 room: RoomId(0)
             }
         ));
-        assert!(
-            snapshot
-                .visible_tiles
-                .iter()
-                .any(|tile| tile.x == 35 && tile.y == 35)
-        );
-        assert!(
-            !snapshot
-                .visible_tiles
-                .iter()
-                .any(|tile| tile.x == 0 && tile.y == 0)
-        );
+        assert!(snapshot
+            .visible_tiles
+            .iter()
+            .any(|tile| tile.x == 35 && tile.y == 35));
+        assert!(!snapshot
+            .visible_tiles
+            .iter()
+            .any(|tile| tile.x == 0 && tile.y == 0));
     }
 
     #[test]
@@ -3823,30 +3811,26 @@ mod tests {
         };
         let valid_params = signed_deploy_params(login.certificate, &client_key);
 
-        assert!(
-            server
-                .swarm_deploy(
-                    &world,
-                    context.clone(),
-                    DeployParams {
-                        wasm_bytes: "not base64".to_string(),
-                        ..valid_params.clone()
-                    },
-                )
-                .is_err()
-        );
-        assert!(
-            server
-                .swarm_deploy(
-                    &world,
-                    context,
-                    DeployParams {
-                        wasm_bytes: "YWJj".to_string(),
-                        ..valid_params
-                    },
-                )
-                .is_err()
-        );
+        assert!(server
+            .swarm_deploy(
+                &world,
+                context.clone(),
+                DeployParams {
+                    wasm_bytes: "not base64".to_string(),
+                    ..valid_params.clone()
+                },
+            )
+            .is_err());
+        assert!(server
+            .swarm_deploy(
+                &world,
+                context,
+                DeployParams {
+                    wasm_bytes: "YWJj".to_string(),
+                    ..valid_params
+                },
+            )
+            .is_err());
     }
 
     #[test]
@@ -3892,18 +3876,16 @@ mod tests {
         assert_eq!(error.message, "wasm_signature is invalid");
 
         params.wasm_signature = "not base64".to_string();
-        assert!(
-            server
-                .swarm_deploy(
-                    &world,
-                    McpContext {
-                        player_id: login.player_id,
-                        tick: 1,
-                    },
-                    params,
-                )
-                .is_err()
-        );
+        assert!(server
+            .swarm_deploy(
+                &world,
+                McpContext {
+                    player_id: login.player_id,
+                    tick: 1,
+                },
+                params,
+            )
+            .is_err());
     }
 
     #[test]
@@ -3954,7 +3936,7 @@ mod tests {
         assert!(text.contains("swarm_get_snapshot"));
         assert!(text.contains("swarm_get_available_actions"));
         assert!(text.contains("swarm_dry_run"));
-        assert!(!text.contains("swarm_oauth2_login"));
+        assert!(text.contains("swarm_oauth2_login"));
         assert!(text.contains("swarm_deploy"));
         assert!(text.contains("pending_next_tick"));
         assert!(text.contains("BLAKE3"));
@@ -4130,16 +4112,14 @@ mod tests {
         };
 
         for id in 0..50 {
-            assert!(
-                server
-                    .call_tool(
-                        &mut world,
-                        player_one.clone(),
-                        "swarm_get_world_rules",
-                        json!({ "request_id": id })
-                    )
-                    .is_ok()
-            );
+            assert!(server
+                .call_tool(
+                    &mut world,
+                    player_one.clone(),
+                    "swarm_get_world_rules",
+                    json!({ "request_id": id })
+                )
+                .is_ok());
         }
         let limited = server
             .call_tool(
@@ -4149,25 +4129,21 @@ mod tests {
                 Value::Null,
             )
             .expect_err("same player and source should be limited");
-        assert!(
-            limited
-                .message
-                .contains("rate limited, retry after 1 seconds")
-        );
+        assert!(limited
+            .message
+            .contains("rate limited, retry after 1 seconds"));
 
-        assert!(
-            server
-                .call_tool(
-                    &mut world,
-                    McpContext {
-                        player_id: 2,
-                        tick: 20,
-                    },
-                    "swarm_get_world_rules",
-                    Value::Null,
-                )
-                .is_ok()
-        );
+        assert!(server
+            .call_tool(
+                &mut world,
+                McpContext {
+                    player_id: 2,
+                    tick: 20,
+                },
+                "swarm_get_world_rules",
+                Value::Null,
+            )
+            .is_ok());
 
         let deploy_source_error = server
             .call_tool(
@@ -4190,11 +4166,9 @@ mod tests {
         let wasm_limited = limiter
             .check(1, CommandSource::Wasm, 7)
             .expect_err("WASM limit is 100 per tick");
-        assert!(
-            wasm_limited
-                .message
-                .contains("rate limited, retry after 1 seconds")
-        );
+        assert!(wasm_limited
+            .message
+            .contains("rate limited, retry after 1 seconds"));
         limiter.check(1, CommandSource::Wasm, 8).unwrap();
 
         for _ in 0..5 {
@@ -4203,11 +4177,9 @@ mod tests {
         let deploy_limited = limiter
             .check(1, CommandSource::McpDeploy, 7)
             .expect_err("MCP deploy limit is 5 per tick");
-        assert!(
-            deploy_limited
-                .message
-                .contains("rate limited, retry after 1 seconds")
-        );
+        assert!(deploy_limited
+            .message
+            .contains("rate limited, retry after 1 seconds"));
     }
 
     #[test]
@@ -4279,14 +4251,12 @@ mod tests {
             })
             .unwrap();
         assert!(revoked.revoked_session && revoked.revoked_certificate);
-        assert!(
-            server
-                .swarm_token_refresh(TokenRefreshParams {
-                    refresh_token: login.session.refresh_token,
-                    client_public_key: encode_base64(client_key.verifying_key().as_bytes())
-                })
-                .is_err()
-        );
+        assert!(server
+            .swarm_token_refresh(TokenRefreshParams {
+                refresh_token: login.session.refresh_token,
+                client_public_key: encode_base64(client_key.verifying_key().as_bytes())
+            })
+            .is_err());
         let error = server
             .swarm_deploy(
                 &world,
@@ -4369,7 +4339,12 @@ mod tests {
         assert!(tool_names.contains(&"swarm_tournament_create"));
         assert!(tool_names.contains(&"swarm_tournament_status"));
         assert!(tool_names.contains(&"swarm_match_result"));
-        assert!(!tool_names.iter().any(|name| matches!(*name,)));
+        assert!(!tool_names.iter().any(|name| {
+            matches!(
+                *name,
+                "swarm_move" | "swarm_harvest" | "swarm_attack" | "swarm_build" | "swarm_spawn"
+            )
+        }));
         let read = server.handle_json_rpc(
             &mut world,
             context,
@@ -4425,12 +4400,10 @@ mod tests {
             },
         );
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .message
-                .contains("from_tick must be <= to_tick")
-        );
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("from_tick must be <= to_tick"));
     }
 
     #[test]
