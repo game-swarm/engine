@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use swarm_wasm_sandbox::{
@@ -17,6 +17,7 @@ use crate::command::{
     CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand, RejectionReason, Tick,
     object_id, validate_command,
 };
+use crate::auth::{CertificateIssuer, PlayerCertificate, PlayerCertificatePayload};
 use crate::components::*;
 use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
 use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
@@ -46,7 +47,7 @@ pub struct McpError {
 }
 
 impl McpError {
-    fn invalid_params(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid_params(message: impl Into<String>) -> Self {
         Self {
             code: -32602,
             message: message.into(),
@@ -304,26 +305,6 @@ pub struct TokenRefreshParams {
 pub struct RevokeAuthParams {
     pub refresh_token: Option<String>,
     pub certificate: Option<PlayerCertificate>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlayerCertificatePayload {
-    pub audience: String,
-    pub player_id: PlayerId,
-    pub provider: String,
-    pub subject: String,
-    pub client_public_key: String,
-    pub issued_at: u64,
-    pub expires_at: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlayerCertificate {
-    pub payload: PlayerCertificatePayload,
-    pub issuer_public_key: String,
-    pub signature: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -767,9 +748,7 @@ impl McpServer {
             sandbox_runtime: SandboxRuntime::default(),
             tournament_locks: BTreeMap::new(),
             tournaments: BTreeMap::new(),
-            issuer: CertificateIssuer {
-                signing_key: issuer,
-            },
+            issuer: CertificateIssuer::from_signing_key_for_tests(issuer),
             sessions: BTreeMap::new(),
             revoked_certificates: BTreeSet::new(),
             rate_limiter: RateLimiter::new(),
@@ -898,6 +877,18 @@ impl McpServer {
                 serde_json::to_value(self.swarm_auth_revoke(params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
+            "swarm_auth_login"
+            | "swarm_auth_logout"
+            | "swarm_auth_refresh"
+            | "swarm_auth_check"
+            | "swarm_auth_cert_issue"
+            | "swarm_auth_cert_list"
+            | "swarm_auth_cert_revoke"
+            | "swarm_auth_cert_rotate"
+            | "swarm_auth_device_list"
+            | "swarm_auth_device_register"
+            | "swarm_get_world_config" => serde_json::to_value(auth_stub_result(tool, context, params))
+                .map_err(|error| McpError::invalid_params(error.to_string())),
             "swarm_tournament_precommit" => {
                 let params: TournamentPrecommitParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -1478,50 +1469,6 @@ impl McpServer {
     }
 }
 
-#[derive(Debug, Clone)]
-struct CertificateIssuer {
-    signing_key: SigningKey,
-}
-
-impl Default for CertificateIssuer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CertificateIssuer {
-    fn new() -> Self {
-        let mut seed = [0_u8; 32];
-        getrandom::getrandom(&mut seed).expect("OS randomness is required for certificate issuer");
-        Self {
-            signing_key: SigningKey::from_bytes(&seed),
-        }
-    }
-
-    fn issue(&self, payload: PlayerCertificatePayload) -> Result<PlayerCertificate, McpError> {
-        let payload_bytes = certificate_payload_bytes(&payload)?;
-        let signature = self.signing_key.sign(&payload_bytes);
-        Ok(PlayerCertificate {
-            payload,
-            issuer_public_key: encode_base64(self.signing_key.verifying_key().as_bytes()),
-            signature: encode_base64(&signature.to_bytes()),
-        })
-    }
-
-    fn verify(&self, certificate: &PlayerCertificate) -> Result<(), McpError> {
-        let expected_issuer = encode_base64(self.signing_key.verifying_key().as_bytes());
-        if certificate.issuer_public_key != expected_issuer {
-            return Err(McpError::invalid_params("certificate issuer is invalid"));
-        }
-        let payload_bytes = certificate_payload_bytes(&certificate.payload)?;
-        let signature = decode_ed25519_signature(&certificate.signature, "certificate signature")?;
-        self.signing_key
-            .verifying_key()
-            .verify(&payload_bytes, &signature)
-            .map_err(|_| McpError::invalid_params("certificate signature is invalid"))
-    }
-}
-
 fn mcp_tool_infos() -> Vec<ToolInfo> {
     vec![
         ToolInfo {
@@ -1603,6 +1550,17 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             name: "swarm_auth_revoke".to_string(),
             description: "Revoke a session or certificate".to_string(),
         },
+        ToolInfo { name: "swarm_auth_login".to_string(), description: "Authenticate a user or agent against the Auth control plane".to_string() },
+        ToolInfo { name: "swarm_auth_logout".to_string(), description: "Terminate an Auth control-plane session".to_string() },
+        ToolInfo { name: "swarm_auth_refresh".to_string(), description: "Refresh Auth control-plane session credentials".to_string() },
+        ToolInfo { name: "swarm_auth_check".to_string(), description: "Check Auth control-plane session or certificate status".to_string() },
+        ToolInfo { name: "swarm_auth_cert_issue".to_string(), description: "Issue an application-layer client/code certificate bundle".to_string() },
+        ToolInfo { name: "swarm_auth_cert_list".to_string(), description: "List application-layer certificates for the caller".to_string() },
+        ToolInfo { name: "swarm_auth_cert_revoke".to_string(), description: "Revoke an application-layer certificate".to_string() },
+        ToolInfo { name: "swarm_auth_cert_rotate".to_string(), description: "Rotate Auth intermediate CA or caller certificate material".to_string() },
+        ToolInfo { name: "swarm_auth_device_list".to_string(), description: "List registered Auth devices for the caller".to_string() },
+        ToolInfo { name: "swarm_auth_device_register".to_string(), description: "Register an Auth device and key label".to_string() },
+        ToolInfo { name: "swarm_get_world_config".to_string(), description: "Get world-level Auth and rules configuration metadata".to_string() },
         ToolInfo {
             name: "swarm_list_modules".to_string(),
             description: "List all deployed WASM modules across all players".to_string(),
@@ -1759,6 +1717,17 @@ fn swarm_admin_force_gc(_params: &Value) -> Value {
 fn swarm_admin_get_audit_log(_params: &Value) -> Value {
     json!({
         "entries": [],
+    })
+}
+
+fn auth_stub_result(tool: &str, context: McpContext, params: Value) -> Value {
+    json!({
+        "tool": tool,
+        "status": "stubbed",
+        "auth_control_plane": true,
+        "player_id": context.player_id,
+        "tick": context.tick,
+        "params": params,
     })
 }
 
@@ -3129,10 +3098,6 @@ fn oauth_player_id(provider: &str, subject: &str) -> PlayerId {
     u32::from_le_bytes(id_bytes)
 }
 
-fn certificate_payload_bytes(payload: &PlayerCertificatePayload) -> Result<Vec<u8>, McpError> {
-    serde_json::to_vec(payload).map_err(|error| McpError::invalid_params(error.to_string()))
-}
-
 fn verify_wasm_signature(
     certificate: &PlayerCertificate,
     wasm_hash: &[u8],
@@ -3157,7 +3122,7 @@ fn decode_ed25519_public_key(input: &str, field: &str) -> Result<VerifyingKey, M
         .map_err(|_| McpError::invalid_params(format!("{field} is invalid")))
 }
 
-fn decode_ed25519_signature(input: &str, field: &str) -> Result<Signature, McpError> {
+pub(crate) fn decode_ed25519_signature(input: &str, field: &str) -> Result<Signature, McpError> {
     let bytes = decode_base64_with_message(input, field)?;
     let signature_bytes: [u8; 64] = bytes
         .try_into()
@@ -3170,7 +3135,7 @@ fn decode_base64_with_message(input: &str, field: &str) -> Result<Vec<u8>, McpEr
         .map_err(|_| McpError::invalid_params(format!("{field} is not valid base64")))
 }
 
-fn encode_base64(input: &[u8]) -> String {
+pub(crate) fn encode_base64(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
@@ -3954,7 +3919,6 @@ mod tests {
         assert!(text.contains("swarm_get_snapshot"));
         assert!(text.contains("swarm_get_available_actions"));
         assert!(text.contains("swarm_dry_run"));
-        assert!(!text.contains("swarm_oauth2_login"));
         assert!(text.contains("certificate issuance flow"));
         assert!(text.contains("swarm_deploy"));
         assert!(text.contains("pending_next_tick"));
@@ -4370,11 +4334,10 @@ mod tests {
         assert!(tool_names.contains(&"swarm_tournament_create"));
         assert!(tool_names.contains(&"swarm_tournament_status"));
         assert!(tool_names.contains(&"swarm_match_result"));
-        assert!(
-            !tool_names
-                .iter()
-                .any(|name| { matches!(*name, "swarm_harvest") })
-        );
+        assert!(!tool_names.iter().any(|name| matches!(
+            *name,
+            "swarm_move" | "swarm_harvest" | "swarm_build"
+        )));
         let read = server.handle_json_rpc(
             &mut world,
             context,
