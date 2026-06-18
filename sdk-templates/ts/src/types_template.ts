@@ -83,15 +83,6 @@ export interface TerrainTile {
 }
 export type TerrainType = "Plain" | "Wall" | "Swamp";
 
-export interface MarketOrder {
-  id: string;
-  room: RoomId;
-  player_id: PlayerId;
-  resource: ResourceName;
-  amount: ResourceAmount;
-  price: number;
-}
-
 export interface LeaderboardSnapshot {
   rank: number;
   gcl: number;
@@ -107,7 +98,6 @@ export interface WorldSnapshot {
   terrain: TerrainTile[];
   resources: ResourceCost;
   controller?: JsonObject;
-  market_orders?: MarketOrder[];
   leaderboard_snapshot?: LeaderboardSnapshot;
   world_rules?: WorldConfig;
 }
@@ -194,7 +184,6 @@ export interface WorldConfig {
     transfer_from_global_cost: Record<string, number>;
     transfer_to_global_time: number;
     transfer_from_global_time: number;
-    market_requires_terminal: boolean;
   };
   combat: { pvp_enabled: boolean; friendly_fire: boolean; damage_multiplier: number };
   visibility: { fog_of_war: boolean; player_view: PlayerView; public_spectate: boolean; spectate_delay: number; replay_privacy: ReplayPrivacy };

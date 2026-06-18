@@ -107,13 +107,6 @@ mod tests {
                 resource: "Energy".into(),
                 amount: 200,
             },
-            CommandAction::CreateMarketOrder {
-                resource: "Energy".into(),
-                amount: 1000,
-                price_resource: "X".into(),
-                price_amount: 500,
-            },
-            CommandAction::BuyMarketOrder { order_id: 42 },
         ];
 
         for action in &cases {

@@ -26,7 +26,7 @@ use crate::pve::{
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::replay_storage::ReplayStore;
 use crate::resources::{
-    CurrentTick, GlobalStorageConfig, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage,
+    CurrentTick, GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
 };
 use crate::rule_module::{
@@ -1063,8 +1063,6 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<PendingGlobalTransfers>();
     app.init_resource::<PveOutputTracker>();
     app.init_resource::<CurrentTick>();
-    app.init_resource::<crate::resources::MarketConfig>();
-    app.init_resource::<MarketOrders>();
     app.init_resource::<RhaiRuleModules>();
     app.init_resource::<FoundationDbStore>();
     app.init_resource::<DragonflyCache>();
@@ -1492,23 +1490,6 @@ pub fn state_checksum(world: &mut World) -> u64 {
         hasher.update(&transfer.remaining_ticks.to_le_bytes());
         hash_position(&mut hasher, transfer.start);
         hash_position(&mut hasher, transfer.end);
-    }
-
-    tag(&mut hasher, "market_orders");
-    let mut orders = world
-        .resource::<MarketOrders>()
-        .orders
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-    orders.sort_by_key(|order| order.id);
-    for order in orders {
-        hasher.update(&order.id.to_le_bytes());
-        hasher.update(&order.seller.to_le_bytes());
-        hash_bytes(&mut hasher, order.resource.as_bytes());
-        hasher.update(&order.amount.to_le_bytes());
-        hash_bytes(&mut hasher, order.price_resource.as_bytes());
-        hasher.update(&order.price_amount.to_le_bytes());
     }
 
     let digest = hasher.finalize();

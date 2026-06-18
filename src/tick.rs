@@ -11,7 +11,7 @@ use crate::command::{
 use crate::components::*;
 use crate::replay_storage::WorldDelta;
 use crate::resources::{
-    CurrentTick, MarketOrders, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
+    CurrentTick, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
     ResourceCost,
 };
 use crate::rule_module::{RhaiRuleModules, run_tick_start_scripts};
@@ -1459,7 +1459,6 @@ pub struct WorldSnapshot {
     local_storage: PlayerLocalStorage,
     global_storage: PlayerGlobalStorage,
     pending_global_transfers: PendingGlobalTransfers,
-    market_orders: MarketOrders,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1569,7 +1568,6 @@ impl WorldSnapshot {
             local_storage: world.resource::<PlayerLocalStorage>().clone(),
             global_storage: world.resource::<PlayerGlobalStorage>().clone(),
             pending_global_transfers: world.resource::<PendingGlobalTransfers>().clone(),
-            market_orders: world.resource::<MarketOrders>().clone(),
         }
     }
 
@@ -1608,7 +1606,6 @@ impl WorldSnapshot {
         *world.resource_mut::<PlayerLocalStorage>() = self.local_storage;
         *world.resource_mut::<PlayerGlobalStorage>() = self.global_storage;
         *world.resource_mut::<PendingGlobalTransfers>() = self.pending_global_transfers;
-        *world.resource_mut::<MarketOrders>() = self.market_orders;
         entity_map
     }
 

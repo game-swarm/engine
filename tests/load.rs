@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use swarm_engine::{
     BodyPart, CommandIntent, Drone, ExecutorError, InMemoryTickBroadcaster, InMemoryTickCommitter,
-    MarketOrders, MultiPlayerTickScheduler, PendingGlobalTransfers, PlayerExecutor,
+    MultiPlayerTickScheduler, PendingGlobalTransfers, PlayerExecutor,
     PlayerGlobalStorage, PlayerId, PlayerLocalStorage, Position, Structure, TickSnapshot,
     create_world,
 };
@@ -31,7 +31,6 @@ struct ResourceFootprint {
     local_storage_players: usize,
     global_storage_players: usize,
     pending_global_transfers: usize,
-    market_orders: usize,
 }
 
 #[derive(Debug)]
@@ -71,12 +70,11 @@ fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
     assert_eq!(second.before.drones, second.after.drones, "second run leaked drones");
     assert_eq!(first.before.drones, PLAYERS as usize);
 
-    // Non-drone resources must not leak (structures, storage, transfers, markets)
+    // Non-drone resources must not leak (structures, storage, transfers)
     assert_eq!(first.before.structures, first.after.structures);
     assert_eq!(first.before.local_storage_players, first.after.local_storage_players);
     assert_eq!(first.before.global_storage_players, first.after.global_storage_players);
     assert_eq!(first.before.pending_global_transfers, first.after.pending_global_transfers);
-    assert_eq!(first.before.market_orders, first.after.market_orders);
 
     // NPC spawning is deterministic — verify spawned count matches expectation
     let actual_npcs_first = first.after.npcs;
@@ -242,7 +240,6 @@ fn resource_footprint(world: &mut swarm_engine::SwarmWorld) -> ResourceFootprint
             .resource::<PendingGlobalTransfers>()
             .0
             .len(),
-        market_orders: world.app.world().resource::<MarketOrders>().orders.len(),
     }
 }
 

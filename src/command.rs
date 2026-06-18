@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use crate::components::*;
 use crate::onboarding::{OnboardingEvent, send_onboarding_event};
 use crate::resources::{
-    GlobalStorageConfig, GlobalTransferDirection, MarketConfig,
+    GlobalStorageConfig, GlobalTransferDirection,
     PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
     ResourceCost, ResourceRegistry,
 };
@@ -2984,23 +2984,6 @@ fn global_storage_committed(world: &World, player_id: PlayerId) -> u32 {
         .map(|transfer| transfer.deliver_amount)
         .sum();
     stored.saturating_add(pending)
-}
-
-fn ensure_market_enabled(world: &mut World, player_id: PlayerId) -> CommandResult {
-    if !world.resource::<GlobalStorageConfig>().enabled {
-        return Err(RejectionReason::GlobalStorageDisabled);
-    }
-    if world.resource::<MarketConfig>().market_requires_terminal && !owns_terminal(world, player_id)
-    {
-        return Err(RejectionReason::TerminalRequired);
-    }
-    Ok(())
-}
-
-fn owns_terminal(world: &mut World, player_id: PlayerId) -> bool {
-    world.query::<&Structure>().iter(world).any(|structure| {
-        structure.owner == Some(player_id) && structure.structure_type == StructureType::TERMINAL
-    })
 }
 
 fn room_controller_level(world: &mut World, room: RoomId, player_id: PlayerId) -> u8 {

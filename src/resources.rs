@@ -90,27 +90,6 @@ pub struct PlayerGlobalStorage(pub IndexMap<PlayerId, ResourceCost>);
 #[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingGlobalTransfers(pub Vec<PendingGlobalTransfer>);
 
-#[derive(BevyResource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MarketConfig {
-    pub market_requires_terminal: bool,
-}
-
-#[derive(BevyResource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MarketOrders {
-    pub next_order_id: u64,
-    pub orders: IndexMap<u64, MarketOrder>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MarketOrder {
-    pub id: u64,
-    pub seller: PlayerId,
-    pub resource: ResourceName,
-    pub amount: ResourceAmount,
-    pub price_resource: ResourceName,
-    pub price_amount: ResourceAmount,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingGlobalTransfer {
     pub player_id: PlayerId,
@@ -159,23 +138,6 @@ impl Default for GlobalStorageConfig {
                     rate_per_10_000: 20,
                 },
             ],
-        }
-    }
-}
-
-impl Default for MarketConfig {
-    fn default() -> Self {
-        Self {
-            market_requires_terminal: true,
-        }
-    }
-}
-
-impl Default for MarketOrders {
-    fn default() -> Self {
-        Self {
-            next_order_id: 1,
-            orders: IndexMap::new(),
         }
     }
 }

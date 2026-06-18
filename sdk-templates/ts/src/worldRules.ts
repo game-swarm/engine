@@ -27,7 +27,6 @@ export function createDefaultWorldConfig(mode: WorldMode = "persistent"): WorldC
       transfer_from_global_cost: { Energy: 0.05 },
       transfer_to_global_time: 10,
       transfer_from_global_time: 5,
-      market_requires_terminal: true
     },
     combat: { pvp_enabled: true, friendly_fire: false, damage_multiplier: 1 },
     visibility: { fog_of_war: !arena, player_view: "drone", public_spectate: arena, spectate_delay: arena ? 100 : 0, replay_privacy: arena ? "public" : "private" },
