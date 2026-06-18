@@ -821,12 +821,6 @@ impl McpServer {
                 serde_json::to_value(swarm_get_terrain(world, params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
-            "swarm_get_objects_in_range" => {
-                let params: ObjectsInRangeParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(swarm_get_objects_in_range(world, context, params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
             "swarm_get_world_rules" => serde_json::to_value(swarm_get_world_rules())
                 .map_err(|error| McpError::invalid_params(error.to_string())),
             "swarm_get_schema" => Ok(swarm_get_schema()),
@@ -838,26 +832,8 @@ impl McpServer {
                 serde_json::to_value(self.swarm_explain_last_tick(world, context))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
-            "swarm_inspect_room" => {
-                let params: InspectRoomParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(swarm_inspect_room(world, context, params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_inspect_entity" => {
-                let params: InspectEntityParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(swarm_inspect_entity(world, context, params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
             "swarm_profile" => serde_json::to_value(self.swarm_profile(world, context))
                 .map_err(|error| McpError::invalid_params(error.to_string())),
-            "swarm_dry_run_commands" => {
-                let params: DryRunCommandsParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(swarm_dry_run_commands(world, context, params))
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
             "swarm_simulate" => {
                 let params: SimulateParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -888,18 +864,6 @@ impl McpServer {
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
                 docs_resources_read(params)
             }
-            "swarm_oauth2_callback" => {
-                let params: OAuth2CallbackParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(self.swarm_oauth2_callback(params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_token_refresh" => {
-                let params: TokenRefreshParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(self.swarm_token_refresh(params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
             "swarm_auth_revoke" => {
                 let params: RevokeAuthParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -928,12 +892,6 @@ impl McpServer {
                 serde_json::to_value(self.swarm_match_result(params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
-            "swarm_oauth2_login" => {
-                let params: OAuth2LoginParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(self.swarm_oauth2_login(params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
             "swarm_list_modules" => {
                 let params: ListModulesParams = if params.is_null() {
                     ListModulesParams { player_id: None }
@@ -954,12 +912,6 @@ impl McpServer {
                 let params: ValidateModuleParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
                 serde_json::to_value(swarm_validate_module(params))
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_rollback" => {
-                let params: RollbackParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(self.swarm_rollback(context, params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             method => Err(McpError::method_not_found(method)),
