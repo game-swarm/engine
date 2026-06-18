@@ -22,7 +22,7 @@ pub fn tick(snapshot: Snapshot) -> TickResult {
     if spawn_energy(spawn, &snapshot) >= WORKER_COST && structure_cooldown(spawn) == 0 {
         commands.push(command(
             sequence,
-            CommandAction::SpawnDrone {
+            CommandAction::Spawn {
                 spawn_id: spawn.id,
                 body: WORKER_BODY.to_vec(),
             },
@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(result.commands.len(), 2);
         assert!(matches!(
             result.commands[0].action,
-            CommandAction::SpawnDrone { spawn_id: 10, .. }
+            CommandAction::Spawn { spawn_id: 10, .. }
         ));
         assert_eq!(
             result.commands[1].action,

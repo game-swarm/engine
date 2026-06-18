@@ -22,7 +22,7 @@ mod tests {
     fn spawn_serializes_with_spawn_type() {
         let command = Command {
             sequence: 7,
-            action: CommandAction::SpawnDrone {
+            action: CommandAction::Spawn {
                 spawn_id: 42,
                 body: vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
             },
@@ -95,7 +95,7 @@ mod tests {
                 y: 30,
                 structure: StructureType::Spawn,
             },
-            CommandAction::SpawnDrone {
+            CommandAction::Spawn {
                 spawn_id: 9,
                 body: vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
             },

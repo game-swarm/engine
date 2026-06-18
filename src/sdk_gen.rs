@@ -254,8 +254,8 @@ fn ts_command_factories(idl: &IdlDoc) -> String {
             })
             .collect();
 
-        // SpawnDrone uses rename="Spawn" on wire
-        let wire_type = if cmd.name == "SpawnDrone" {
+        // Spawn uses rename="Spawn" on wire
+        let wire_type = if cmd.name == "Spawn" {
             "Spawn"
         } else {
             &cmd.name
@@ -474,10 +474,14 @@ fn rust_structure_types(idl: &IdlDoc) -> String {
 
     // Custom Serialize / Deserialize (same pattern as engine's StructureType)
     out.push_str("impl Serialize for StructureType {\n");
-    out.push_str("    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {\n");
+    out.push_str(
+        "    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {\n",
+    );
     out.push_str("        s.serialize_str(self.0)\n    }\n}\n\n");
     out.push_str("impl<'de> Deserialize<'de> for StructureType {\n");
-    out.push_str("    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {\n");
+    out.push_str(
+        "    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {\n",
+    );
     out.push_str("        String::deserialize(d).map(Self::new)\n    }\n}\n\n");
     out.push_str("impl std::fmt::Display for StructureType {\n");
     out.push_str("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n");
@@ -642,18 +646,14 @@ fn merge_sdk_templates(lang: &str, out_dir: &std::path::Path) -> Result<(), Stri
             templates_dir.display()
         ));
     }
-    copy_dir(&templates_dir, out_dir)
-        .map_err(|e| format!("copy sdk-templates/{lang}: {e}"))?;
+    copy_dir(&templates_dir, out_dir).map_err(|e| format!("copy sdk-templates/{lang}: {e}"))?;
     Ok(())
 }
 
 /// Recursive directory copy. Overwrites existing files.
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst)
-        .map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
-    for entry in
-        std::fs::read_dir(src).map_err(|e| format!("readdir {}: {e}", src.display()))?
-    {
+    std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("readdir {}: {e}", src.display()))? {
         let entry = entry.map_err(|e| format!("entry: {e}"))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
@@ -718,8 +718,7 @@ pub fn cli_generate_sdk(world_toml_path: &str, out_base: &str) -> Result<(), Str
     let ts_sdk_dir = out_dir.join("sdk-ts");
     merge_sdk_templates("ts", &ts_sdk_dir)?;
     let ts_src = ts_sdk_dir.join("src");
-    std::fs::create_dir_all(&ts_src)
-        .map_err(|e| format!("create {}: {e}", ts_src.display()))?;
+    std::fs::create_dir_all(&ts_src).map_err(|e| format!("create {}: {e}", ts_src.display()))?;
     std::fs::write(ts_src.join("commands.ts"), ts_code)
         .map_err(|e| format!("write sdk-ts/commands.ts: {e}"))?;
 

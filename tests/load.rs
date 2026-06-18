@@ -3,9 +3,8 @@ use std::time::{Duration, Instant};
 
 use swarm_engine::{
     BodyPart, CommandIntent, Drone, ExecutorError, InMemoryTickBroadcaster, InMemoryTickCommitter,
-    MultiPlayerTickScheduler, PendingGlobalTransfers, PlayerExecutor,
-    PlayerGlobalStorage, PlayerId, PlayerLocalStorage, Position, Structure, TickSnapshot,
-    create_world,
+    MultiPlayerTickScheduler, PendingGlobalTransfers, PlayerExecutor, PlayerGlobalStorage,
+    PlayerId, PlayerLocalStorage, Position, Structure, TickSnapshot, create_world,
 };
 
 const PLAYERS: PlayerId = 100;
@@ -66,23 +65,43 @@ fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
     assert_eq!(first.final_checksum, second.final_checksum);
 
     // Drones must not leak
-    assert_eq!(first.before.drones, first.after.drones, "first run leaked drones");
-    assert_eq!(second.before.drones, second.after.drones, "second run leaked drones");
+    assert_eq!(
+        first.before.drones, first.after.drones,
+        "first run leaked drones"
+    );
+    assert_eq!(
+        second.before.drones, second.after.drones,
+        "second run leaked drones"
+    );
     assert_eq!(first.before.drones, PLAYERS as usize);
 
     // Non-drone resources must not leak (structures, storage, transfers)
     assert_eq!(first.before.structures, first.after.structures);
-    assert_eq!(first.before.local_storage_players, first.after.local_storage_players);
-    assert_eq!(first.before.global_storage_players, first.after.global_storage_players);
-    assert_eq!(first.before.pending_global_transfers, first.after.pending_global_transfers);
+    assert_eq!(
+        first.before.local_storage_players,
+        first.after.local_storage_players
+    );
+    assert_eq!(
+        first.before.global_storage_players,
+        first.after.global_storage_players
+    );
+    assert_eq!(
+        first.before.pending_global_transfers,
+        first.after.pending_global_transfers
+    );
 
     // NPC spawning is deterministic — verify spawned count matches expectation
     let actual_npcs_first = first.after.npcs;
     let actual_npcs_second = second.after.npcs;
-    assert_eq!(actual_npcs_first, actual_npcs_second,
-        "NPC spawn count differs between runs: {} vs {}", actual_npcs_first, actual_npcs_second);
-    assert_eq!(actual_npcs_first, expected_npcs,
-        "NPC spawn count mismatch: expected {expected_npcs}, got {actual_npcs_first}");
+    assert_eq!(
+        actual_npcs_first, actual_npcs_second,
+        "NPC spawn count differs between runs: {} vs {}",
+        actual_npcs_first, actual_npcs_second
+    );
+    assert_eq!(
+        actual_npcs_first, expected_npcs,
+        "NPC spawn count mismatch: expected {expected_npcs}, got {actual_npcs_first}"
+    );
     assert_eq!(first.before.npcs, 0, "NPCs present before tick loop");
 
     // Total entity drift should equal NPC count only
@@ -90,8 +109,16 @@ fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
         .saturating_sub(first.before.entities - first.before.npcs);
     let non_npc_growth_second = (second.after.entities - second.after.npcs)
         .saturating_sub(second.before.entities - second.before.npcs);
-    assert_eq!(non_npc_growth_first, 0, "first run: {} unexpected non-NPC entities leaked", non_npc_growth_first);
-    assert_eq!(non_npc_growth_second, 0, "second run: {} unexpected non-NPC entities leaked", non_npc_growth_second);
+    assert_eq!(
+        non_npc_growth_first, 0,
+        "first run: {} unexpected non-NPC entities leaked",
+        non_npc_growth_first
+    );
+    assert_eq!(
+        non_npc_growth_second, 0,
+        "second run: {} unexpected non-NPC entities leaked",
+        non_npc_growth_second
+    );
 }
 
 fn run_load() -> LoadRun {

@@ -11,8 +11,7 @@ use crate::command::{
 use crate::components::*;
 use crate::replay_storage::WorldDelta;
 use crate::resources::{
-    CurrentTick, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
-    ResourceCost,
+    CurrentTick, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
 };
 use crate::rule_module::{RhaiRuleModules, run_tick_start_scripts};
 use crate::security::{SecurityAlert, SecurityAuditor};
@@ -1336,7 +1335,7 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
             remap_object_id(object_id, entity_map);
             remap_object_id(controller_id, entity_map);
         }
-        CommandAction::SpawnDrone { spawn_id, .. } => remap_object_id(spawn_id, entity_map),
+        CommandAction::Spawn { spawn_id, .. } => remap_object_id(spawn_id, entity_map),
         CommandAction::Recycle {
             object_id,
             spawn_id,
@@ -1354,8 +1353,7 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
                 remap_object_id(target_id, entity_map);
             }
         }
-        CommandAction::TransferToGlobal { .. }
-        | CommandAction::TransferFromGlobal { .. } => {}
+        CommandAction::TransferToGlobal { .. } | CommandAction::TransferFromGlobal { .. } => {}
     }
 }
 
@@ -2654,7 +2652,7 @@ mod tests {
         let executor = StaticExecutor {
             result: Ok(vec![CommandIntent {
                 sequence: 1,
-                action: CommandAction::SpawnDrone {
+                action: CommandAction::Spawn {
                     spawn_id: object_id(spawn),
                     body: vec![BodyPart::Move],
                 },

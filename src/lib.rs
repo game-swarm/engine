@@ -929,7 +929,7 @@ mod tests {
                 &mut world,
                 1,
                 1,
-                CommandAction::SpawnDrone {
+                CommandAction::Spawn {
                     spawn_id: object_id(spawn),
                     body: vec![BodyPart::Move],
                 },
@@ -1852,7 +1852,7 @@ mod tests {
                 &mut world,
                 1,
                 1,
-                CommandAction::SpawnDrone {
+                CommandAction::Spawn {
                     spawn_id: object_id(spawn),
                     body: vec![BodyPart::Move]
                 }
@@ -1872,7 +1872,7 @@ mod tests {
                 &mut world,
                 2,
                 2,
-                CommandAction::SpawnDrone {
+                CommandAction::Spawn {
                     spawn_id: object_id(spawn),
                     body: vec![BodyPart::Move]
                 }
@@ -1885,7 +1885,7 @@ mod tests {
                 &mut world,
                 1,
                 3,
-                CommandAction::SpawnDrone {
+                CommandAction::Spawn {
                     spawn_id: object_id(spawn),
                     body: vec![BodyPart::Tough; 51]
                 }
@@ -1899,7 +1899,7 @@ mod tests {
                 &mut world,
                 1,
                 4,
-                CommandAction::SpawnDrone {
+                CommandAction::Spawn {
                     spawn_id: object_id(spawn),
                     body: vec![BodyPart::Move]
                 }
@@ -1913,7 +1913,7 @@ mod tests {
                 &mut world,
                 1,
                 5,
-                CommandAction::SpawnDrone {
+                CommandAction::Spawn {
                     spawn_id: object_id(spawn),
                     body: vec![BodyPart::Move, BodyPart::Carry]
                 }

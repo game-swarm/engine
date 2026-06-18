@@ -6,7 +6,10 @@ pub mod strongholds;
 
 use bevy::prelude::*;
 
-pub use ai::{DEFAULT_NPC_AGGRO_RANGE, DEFAULT_NPC_ATTACK_RANGE, DEFAULT_NPC_DAMAGE, Npc, NpcMode, npc_ai_system, npc_combat_system};
+pub use ai::{
+    DEFAULT_NPC_AGGRO_RANGE, DEFAULT_NPC_ATTACK_RANGE, DEFAULT_NPC_DAMAGE, Npc, NpcMode,
+    npc_ai_system, npc_combat_system,
+};
 pub use components::*;
 
 use crate::components::{Position, RoomId, RoomTerrains};

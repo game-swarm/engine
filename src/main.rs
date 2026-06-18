@@ -3,17 +3,16 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
 
 use swarm_engine::{
-    create_world_with_mode,
+    BodyPart, WorldMode, create_world_with_mode,
     sim::{create_local_simulation_world, summarize_local_simulation},
-    BodyPart, WorldMode,
 };
 
 const DEFAULT_HEALTH_ADDR: &str = "0.0.0.0:8080";
@@ -407,9 +406,5 @@ fn tcp_check(endpoint: &Endpoint) -> bool {
 }
 
 fn status(ok: bool) -> &'static str {
-    if ok {
-        "ok"
-    } else {
-        "degraded"
-    }
+    if ok { "ok" } else { "degraded" }
 }

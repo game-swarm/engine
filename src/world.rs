@@ -11,11 +11,11 @@ use crate::dragonfly::DragonflyCache;
 use crate::fdb::FoundationDbStore;
 use crate::npc::events::{EventConfig, EventState, event_effect_system, world_event_system};
 use crate::npc::loot::{BlueprintRegistry, NpcLootTables};
-use crate::npc::{NpcSpawnState, npc_ai_system, npc_combat_system, npc_spawn_system};
 use crate::npc::strongholds::{
     SpawnedStrongholdRooms, StrongholdSpawnConfig, stronghold_production_system,
     stronghold_spawn_system,
 };
+use crate::npc::{NpcSpawnState, npc_ai_system, npc_combat_system, npc_spawn_system};
 use crate::onboarding::{
     OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
     send_onboarding_event,
@@ -731,9 +731,7 @@ impl WorldConfig {
         );
         app.add_systems(
             Update,
-            npc_combat_system
-                .after(npc_ai_system)
-                .before(combat_system),
+            npc_combat_system.after(npc_ai_system).before(combat_system),
         );
         app.add_systems(
             Update,
@@ -1153,7 +1151,10 @@ fn generate_sdk_on_startup(world_toml_path: &str) {
         return; // already cached
     }
     // Generate in background — don't block world startup
-    println!("[SDK] world.toml changed (hash={}), regenerating SDK...", &hash[..12]);
+    println!(
+        "[SDK] world.toml changed (hash={}), regenerating SDK...",
+        &hash[..12]
+    );
     if let Err(e) = crate::sdk_gen::cli_generate_sdk(world_toml_path, "/data/swarm/sdk-cache") {
         eprintln!("[SDK] generation failed: {e}");
     } else {

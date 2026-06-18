@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 
 use crate::components::*;
-use crate::onboarding::{send_onboarding_event, OnboardingEvent};
+use crate::onboarding::{OnboardingEvent, send_onboarding_event};
 use crate::resources::{
     GlobalStorageConfig, GlobalTransferDirection, PendingGlobalTransfer, PendingGlobalTransfers,
     PlayerGlobalStorage, PlayerLocalStorage, ResourceCost, ResourceRegistry,
@@ -100,7 +100,7 @@ pub enum CommandAction {
         object_id: ObjectId,
         controller_id: ObjectId,
     },
-    SpawnDrone {
+    Spawn {
         spawn_id: ObjectId,
         body: Vec<BodyPart>,
     },
@@ -204,7 +204,7 @@ impl<'de> Deserialize<'de> for CommandAction {
                 object_id: required!(wire.object_id, "object_id"),
                 controller_id: required!(wire.controller_id, "controller_id"),
             },
-            "Spawn" => Self::SpawnDrone {
+            "Spawn" => Self::Spawn {
                 spawn_id: required!(wire.spawn_id, "spawn_id"),
                 body: required!(wire.body, "body"),
             },
@@ -305,7 +305,7 @@ impl Serialize for CommandAction {
                 map.serialize_entry("object_id", object_id)?;
                 map.serialize_entry("controller_id", controller_id)?;
             }
-            Self::SpawnDrone { spawn_id, body } => {
+            Self::Spawn { spawn_id, body } => {
                 map.serialize_entry("type", "Spawn")?;
                 map.serialize_entry("spawn_id", spawn_id)?;
                 map.serialize_entry("body", body)?;
@@ -696,7 +696,7 @@ pub fn validate_command(
             object_id,
             controller_id,
         } => validate_claim_controller(world, raw.player_id, *object_id, *controller_id),
-        CommandAction::SpawnDrone { spawn_id, body } => {
+        CommandAction::Spawn { spawn_id, body } => {
             validate_spawn_drone(world, raw.player_id, *spawn_id, body)
         }
         CommandAction::Recycle {
@@ -1030,7 +1030,7 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::RangedAttack { .. } => "RangedAttack",
         CommandAction::Heal { .. } => "Heal",
         CommandAction::ClaimController { .. } => "ClaimController",
-        CommandAction::SpawnDrone { .. } => "Spawn",
+        CommandAction::Spawn { .. } => "Spawn",
         CommandAction::Recycle { .. } => "Recycle",
         CommandAction::Build { .. } => "Build",
         CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
@@ -1070,7 +1070,7 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
                 "position": { "x": x, "y": y },
                 "structure": structure,
             }),
-            CommandAction::SpawnDrone { spawn_id, body } => serde_json::json!({
+            CommandAction::Spawn { spawn_id, body } => serde_json::json!({
                 "reason": "TileOccupied",
                 "action": action,
                 "conflict": "first_come_first_served",
@@ -1397,7 +1397,7 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             actor_id = Some(object_id);
             apply_claim_controller(world, player_id, controller_id)
         }
-        CommandAction::SpawnDrone { spawn_id, body } => {
+        CommandAction::Spawn { spawn_id, body } => {
             apply_spawn_drone(world, player_id, spawn_id, body)
         }
         CommandAction::Recycle {
@@ -3558,12 +3558,14 @@ mod tests {
             target_ref.get::<EntityFlags>().unwrap().0.get("Disrupted"),
             Some(&true)
         );
-        assert!(!world
-            .app
-            .world()
-            .resource::<CustomActionCooldowns>()
-            .0
-            .contains_key(&(target_id, "Hack".to_string())));
+        assert!(
+            !world
+                .app
+                .world()
+                .resource::<CustomActionCooldowns>()
+                .0
+                .contains_key(&(target_id, "Hack".to_string()))
+        );
     }
 
     #[test]
