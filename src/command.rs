@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use crate::components::*;
 use crate::onboarding::{OnboardingEvent, send_onboarding_event};
 use crate::resources::{
-    GlobalStorageConfig, GlobalTransferDirection, MarketConfig, MarketOrder, MarketOrders,
+    GlobalStorageConfig, GlobalTransferDirection, MarketConfig,
     PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
     ResourceCost, ResourceRegistry,
 };
@@ -123,15 +123,6 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
-    CreateMarketOrder {
-        resource: String,
-        amount: u32,
-        price_resource: String,
-        price_amount: u32,
-    },
-    BuyMarketOrder {
-        order_id: u64,
-    },
     Custom {
         action_type: String,
         object_id: ObjectId,
@@ -235,15 +226,6 @@ impl<'de> Deserialize<'de> for CommandAction {
             "TransferFromGlobal" => Self::TransferFromGlobal {
                 resource: required!(wire.resource, "resource"),
                 amount: required!(wire.amount, "amount"),
-            },
-            "CreateMarketOrder" => Self::CreateMarketOrder {
-                resource: required!(wire.resource, "resource"),
-                amount: required!(wire.amount, "amount"),
-                price_resource: required!(wire.price_resource, "price_resource"),
-                price_amount: required!(wire.price_amount, "price_amount"),
-            },
-            "BuyMarketOrder" => Self::BuyMarketOrder {
-                order_id: required!(wire.order_id, "order_id"),
             },
             custom => Self::Custom {
                 action_type: custom.to_string(),
@@ -358,22 +340,6 @@ impl Serialize for CommandAction {
                 map.serialize_entry("type", "TransferFromGlobal")?;
                 map.serialize_entry("resource", resource)?;
                 map.serialize_entry("amount", amount)?;
-            }
-            Self::CreateMarketOrder {
-                resource,
-                amount,
-                price_resource,
-                price_amount,
-            } => {
-                map.serialize_entry("type", "CreateMarketOrder")?;
-                map.serialize_entry("resource", resource)?;
-                map.serialize_entry("amount", amount)?;
-                map.serialize_entry("price_resource", price_resource)?;
-                map.serialize_entry("price_amount", price_amount)?;
-            }
-            Self::BuyMarketOrder { order_id } => {
-                map.serialize_entry("type", "BuyMarketOrder")?;
-                map.serialize_entry("order_id", order_id)?;
             }
             Self::Custom {
                 action_type,
@@ -716,22 +682,6 @@ pub fn validate_command(
         CommandAction::TransferFromGlobal { resource, amount } => {
             validate_transfer_from_global(world, raw.player_id, resource, *amount)
         }
-        CommandAction::CreateMarketOrder {
-            resource,
-            amount,
-            price_resource,
-            price_amount,
-        } => validate_create_market_order(
-            world,
-            raw.player_id,
-            resource,
-            *amount,
-            price_resource,
-            *price_amount,
-        ),
-        CommandAction::BuyMarketOrder { order_id } => {
-            validate_buy_market_order(world, raw.player_id, *order_id)
-        }
         CommandAction::Custom {
             action_type,
             object_id,
@@ -881,8 +831,6 @@ fn action_uses_global_storage(action: &CommandAction) -> bool {
         action,
         CommandAction::TransferToGlobal { .. }
             | CommandAction::TransferFromGlobal { .. }
-            | CommandAction::CreateMarketOrder { .. }
-            | CommandAction::BuyMarketOrder { .. }
     )
 }
 
@@ -961,12 +909,6 @@ pub fn available_action_metadata(world: &World) -> Vec<CommandActionMetadata> {
             "Transfer global resources to local storage",
             &["resource", "amount"],
         ),
-        builtin_action_metadata(
-            "CreateMarketOrder",
-            "Create a market order",
-            &["resource", "amount", "price_resource", "price_amount"],
-        ),
-        builtin_action_metadata("BuyMarketOrder", "Buy a market order", &["order_id"]),
     ];
     if let Some(registry) = world.get_resource::<CustomActionRegistry>() {
         actions.extend(
@@ -1061,8 +1003,6 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Build { .. } => "Build",
         CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
         CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
-        CommandAction::CreateMarketOrder { .. } => "CreateMarketOrder",
-        CommandAction::BuyMarketOrder { .. } => "BuyMarketOrder",
         CommandAction::Custom { action_type, .. } => action_type,
     };
 
@@ -1282,22 +1222,6 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         }
         CommandAction::TransferFromGlobal { resource, amount } => {
             apply_transfer_from_global(world, player_id, &resource, amount)
-        }
-        CommandAction::CreateMarketOrder {
-            resource,
-            amount,
-            price_resource,
-            price_amount,
-        } => apply_create_market_order(
-            world,
-            player_id,
-            &resource,
-            amount,
-            &price_resource,
-            price_amount,
-        ),
-        CommandAction::BuyMarketOrder { order_id } => {
-            apply_buy_market_order(world, player_id, order_id)
         }
         CommandAction::Custom {
             action_type,
@@ -1800,60 +1724,6 @@ fn validate_transfer_from_global(
             required: amount,
             available,
         });
-    }
-    Ok(())
-}
-
-fn validate_create_market_order(
-    world: &mut World,
-    player_id: PlayerId,
-    resource: &str,
-    amount: u32,
-    _price_resource: &str,
-    _price_amount: u32,
-) -> CommandResult {
-    ensure_market_enabled(world, player_id)?;
-    let available = player_global_amount(world, player_id, resource);
-    if available < amount {
-        return Err(RejectionReason::InsufficientResource {
-            resource: resource.to_string(),
-            required: amount,
-            available,
-        });
-    }
-    Ok(())
-}
-
-fn validate_buy_market_order(
-    world: &mut World,
-    player_id: PlayerId,
-    order_id: u64,
-) -> CommandResult {
-    ensure_market_enabled(world, player_id)?;
-    let order = world
-        .resource::<MarketOrders>()
-        .orders
-        .get(&order_id)
-        .cloned()
-        .ok_or(RejectionReason::OrderNotFound)?;
-
-    let available = player_global_amount(world, player_id, &order.price_resource);
-    if available < order.price_amount {
-        return Err(RejectionReason::InsufficientResource {
-            resource: order.price_resource,
-            required: order.price_amount,
-            available,
-        });
-    }
-
-    let config = world.resource::<GlobalStorageConfig>();
-    if global_storage_committed(world, player_id).saturating_add(order.amount) > config.capacity {
-        return Err(RejectionReason::TargetFull);
-    }
-    if global_storage_committed(world, order.seller).saturating_add(order.price_amount)
-        > config.capacity
-    {
-        return Err(RejectionReason::TargetFull);
     }
     Ok(())
 }
@@ -2756,67 +2626,6 @@ fn global_storage_position(player_id: PlayerId) -> Position {
 
 fn player_lane_x(player_id: PlayerId) -> i32 {
     (player_id % 50) as i32
-}
-
-fn apply_create_market_order(
-    world: &mut World,
-    player_id: PlayerId,
-    resource: &str,
-    amount: u32,
-    price_resource: &str,
-    price_amount: u32,
-) -> CommandResult {
-    subtract_player_resource(
-        world
-            .resource_mut::<PlayerGlobalStorage>()
-            .0
-            .entry(player_id)
-            .or_default(),
-        resource,
-        amount,
-    );
-
-    let mut orders = world.resource_mut::<MarketOrders>();
-    let id = orders.next_order_id;
-    orders.next_order_id += 1;
-    orders.orders.insert(
-        id,
-        MarketOrder {
-            id,
-            seller: player_id,
-            resource: resource.to_string(),
-            amount,
-            price_resource: price_resource.to_string(),
-            price_amount,
-        },
-    );
-    Ok(())
-}
-
-fn apply_buy_market_order(world: &mut World, player_id: PlayerId, order_id: u64) -> CommandResult {
-    let order = world
-        .resource_mut::<MarketOrders>()
-        .orders
-        .shift_remove(&order_id)
-        .ok_or(RejectionReason::OrderNotFound)?;
-
-    subtract_player_resource(
-        world
-            .resource_mut::<PlayerGlobalStorage>()
-            .0
-            .entry(player_id)
-            .or_default(),
-        &order.price_resource,
-        order.price_amount,
-    );
-    add_player_resource(world, player_id, &order.resource, order.amount);
-    add_player_resource(
-        world,
-        order.seller,
-        &order.price_resource,
-        order.price_amount,
-    );
-    Ok(())
 }
 
 fn drone_snapshot(

@@ -1852,16 +1852,6 @@ fn command_action_schemas() -> Vec<Value> {
             &["resource", "amount"],
             json!({"resource": {"type": "string"}, "amount": amount_schema()}),
         ),
-        command_action_schema(
-            "CreateMarketOrder",
-            &["resource", "amount", "price_resource", "price_amount"],
-            json!({"resource": {"type": "string"}, "amount": amount_schema(), "price_resource": {"type": "string"}, "price_amount": amount_schema()}),
-        ),
-        command_action_schema(
-            "BuyMarketOrder",
-            &["order_id"],
-            json!({"order_id": {"type": "integer", "minimum": 0}}),
-        ),
         json!({"type": "object", "additionalProperties": false, "required": ["type", "object_id"], "properties": {"type": {"type": "string", "not": {"enum": wasm_action_names()}}, "object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema(), "structure": structure_type_schema()}}),
     ]
 }

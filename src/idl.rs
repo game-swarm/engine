@@ -212,16 +212,6 @@ fn core_commands() -> Vec<CommandDef> {
             "TransferFromGlobal",
             &[("resource", "ResourceName"), ("amount", "ResourceAmount")],
         ),
-        def(
-            "CreateMarketOrder",
-            &[
-                ("resource", "ResourceName"),
-                ("amount", "ResourceAmount"),
-                ("price_resource", "ResourceName"),
-                ("price_amount", "ResourceAmount"),
-            ],
-        ),
-        def("BuyMarketOrder", &[("order_id", "u64")]),
     ]
 }
 

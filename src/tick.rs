@@ -1355,9 +1355,7 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
             }
         }
         CommandAction::TransferToGlobal { .. }
-        | CommandAction::TransferFromGlobal { .. }
-        | CommandAction::CreateMarketOrder { .. }
-        | CommandAction::BuyMarketOrder { .. } => {}
+        | CommandAction::TransferFromGlobal { .. } => {}
     }
 }
 
