@@ -19,6 +19,7 @@ use crate::command::{
 };
 use crate::auth::{CertificateIssuer, PlayerCertificate, PlayerCertificatePayload};
 use crate::components::*;
+use crate::economy::*;
 use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
 use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use crate::tick::{TickTrace, tick_key};
@@ -841,6 +842,79 @@ impl McpServer {
             "swarm_get_messages" => Ok(world_view_messages(params)?),
             "swarm_profile" => serde_json::to_value(self.swarm_profile(world, context))
                 .map_err(|error| McpError::invalid_params(error.to_string())),
+            "swarm_get_economy" => {
+                let params: EconomyParams = if params.is_null() {
+                    EconomyParams { player_id: None }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(get_economy(world, context.player_id, params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_economy_trend" => {
+                let params: EconomyTrendParams = if params.is_null() {
+                    EconomyTrendParams {
+                        player_id: None,
+                        ticks: 10,
+                    }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(get_economy_trend(
+                    world,
+                    context.player_id,
+                    context.tick,
+                    params,
+                ))
+                .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_drone_efficiency" => {
+                let params: DroneEfficiencyParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(get_drone_efficiency(world, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_leaderboard" => {
+                let params: LeaderboardParams = if params.is_null() {
+                    LeaderboardParams {
+                        scope: "global".to_string(),
+                        limit: 10,
+                    }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(get_leaderboard(world, params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_list_market_orders" => {
+                let params: MarketOrdersParams = if params.is_null() {
+                    MarketOrdersParams {
+                        resource: None,
+                        limit: 50,
+                    }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(list_market_orders(params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_sdk_fetch" => {
+                let params: SdkFetchParams = if params.is_null() {
+                    SdkFetchParams {
+                        language: "typescript".to_string(),
+                        package: None,
+                    }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(sdk_fetch(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_simulate" => {
                 let params: SimulateParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -925,6 +999,22 @@ impl McpServer {
                 let params: DeployParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
                 serde_json::to_value(self.swarm_deploy(world, context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_deploy_status" => {
+                let params: DeployStatusParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(get_deploy_status(&self.modules, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_list_deployments" => {
+                let params: ListDeploymentsParams = if params.is_null() {
+                    ListDeploymentsParams { player_id: None }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(list_deployments(&self.modules, params))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_validate_module" => {
@@ -1523,6 +1613,32 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Profile a player's current world state".to_string(),
         },
         ToolInfo {
+            name: "swarm_get_economy".to_string(),
+            description:
+                "Summarize player economy income, expenses, storage tax, and maintenance"
+                    .to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_economy_trend".to_string(),
+            description: "Return deterministic economy trend points for recent ticks".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_drone_efficiency".to_string(),
+            description: "Estimate a drone efficiency percentage from fatigue, health, spawning, and carry state".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_leaderboard".to_string(),
+            description: "Return leaderboard entries from ranking state and live world counts".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_list_market_orders".to_string(),
+            description: "List market orders when a market order book is installed".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_sdk_fetch".to_string(),
+            description: "Fetch a minimal SDK starter package for bot development".to_string(),
+        },
+        ToolInfo {
             name: "swarm_dry_run".to_string(),
             description: "Dry-run commands without mutating the world".to_string(),
         },
@@ -1568,6 +1684,14 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
         ToolInfo {
             name: "swarm_deploy".to_string(),
             description: "Deploy a WASM module for a player".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_get_deploy_status".to_string(),
+            description: "Inspect status and object-store pointer for a deployed module".to_string(),
+        },
+        ToolInfo {
+            name: "swarm_list_deployments".to_string(),
+            description: "List deployments, optionally filtered by player".to_string(),
         },
         ToolInfo {
             name: "swarm_validate_module".to_string(),
@@ -1650,9 +1774,13 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_get_schema"
         | "swarm_get_available_actions"
         | "swarm_explain_last_tick"
-        | "swarm_get_drone"
-        | "swarm_get_room"
         | "swarm_profile"
+        | "swarm_get_economy"
+        | "swarm_get_economy_trend"
+        | "swarm_get_drone_efficiency"
+        | "swarm_get_leaderboard"
+        | "swarm_list_market_orders"
+        | "swarm_sdk_fetch"
         | "swarm_dry_run"
         | "swarm_get_docs"
         | "resources/list"
@@ -1661,7 +1789,10 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_tournament_status"
         | "swarm_match_result" => Some(CommandSource::McpQuery),
         "swarm_simulate" => Some(CommandSource::Simulate),
-        "swarm_list_modules" | "swarm_get_replay" => Some(CommandSource::McpQuery),
+        "swarm_list_modules"
+        | "swarm_get_deploy_status"
+        | "swarm_list_deployments"
+        | "swarm_get_replay" => Some(CommandSource::McpQuery),
         _ => None,
     }
 }
