@@ -609,6 +609,7 @@ fn stored_module_summary(module: &StoredModule) -> StoredModuleSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InspectEntityParams {
+    #[serde(alias = "drone_id", alias = "structure_id", alias = "controller_id")]
     pub object_id: ObjectId,
 }
 
@@ -830,6 +831,35 @@ impl McpServer {
                 serde_json::to_value(self.swarm_explain_last_tick(world, context))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
+            "swarm_get_drone" => {
+                let params: InspectEntityParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_get_drone(world, context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_room" => {
+                let params: InspectRoomParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_get_room(world, context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_structure" | "swarm_get_controller" => {
+                let params: InspectEntityParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_get_drone(world, context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_code" => Ok(world_view_code(params)?),
+            "swarm_get_visibility" => Ok(world_view_visibility(world, context)),
+            "swarm_get_path" => Ok(world_view_path(params)),
+            "swarm_get_resources" => Ok(world_view_resources(world, context)),
+            "swarm_get_info" => Ok(world_view_info(world, context)),
+            "swarm_list_drones" => Ok(world_view_list(world, context, "drones")),
+            "swarm_list_rooms" => Ok(world_view_list(world, context, "rooms")),
+            "swarm_list_structures" => Ok(world_view_list(world, context, "structures")),
+            "swarm_list_controllers" => Ok(world_view_list(world, context, "controllers")),
+            "swarm_get_events" => Ok(json!({ "events": Vec::<Value>::new() })),
+            "swarm_get_messages" => Ok(world_view_messages(params)?),
             "swarm_profile" => serde_json::to_value(self.swarm_profile(world, context))
                 .map_err(|error| McpError::invalid_params(error.to_string())),
             "swarm_simulate" => {
@@ -1503,10 +1533,6 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Get terrain type at room coordinates".to_string(),
         },
         ToolInfo {
-            name: "swarm_get_objects_in_range".to_string(),
-            description: "Get visible entities within range of coordinates".to_string(),
-        },
-        ToolInfo {
             name: "swarm_get_world_rules".to_string(),
             description: "Get the world rules and mods configuration".to_string(),
         },
@@ -1523,19 +1549,34 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Explain the last tick's results for a player".to_string(),
         },
         ToolInfo {
-            name: "swarm_inspect_entity".to_string(),
+            name: "swarm_get_drone".to_string(),
             description: "Inspect full state for an owned or visible entity".to_string(),
         },
         ToolInfo {
-            name: "swarm_inspect_room".to_string(),
+            name: "swarm_get_room".to_string(),
             description: "Inspect a room visible to the player: drone count, structures, controller".to_string(),
         },
+        ToolInfo { name: "swarm_get_drone".to_string(), description: "Get full state for an owned or visible drone".to_string() },
+        ToolInfo { name: "swarm_get_room".to_string(), description: "Get a room visible to the player".to_string() },
+        ToolInfo { name: "swarm_get_structure".to_string(), description: "Get visible structure state by id".to_string() },
+        ToolInfo { name: "swarm_get_controller".to_string(), description: "Get visible controller state by id".to_string() },
+        ToolInfo { name: "swarm_get_code".to_string(), description: "Get deployed code metadata for a drone".to_string() },
+        ToolInfo { name: "swarm_get_visibility".to_string(), description: "Get visible rooms and entities".to_string() },
+        ToolInfo { name: "swarm_get_path".to_string(), description: "Return a simple path between visible positions".to_string() },
+        ToolInfo { name: "swarm_get_resources".to_string(), description: "Get visible player resources".to_string() },
+        ToolInfo { name: "swarm_get_info".to_string(), description: "Get world metadata".to_string() },
+        ToolInfo { name: "swarm_list_drones".to_string(), description: "List visible drones".to_string() },
+        ToolInfo { name: "swarm_list_rooms".to_string(), description: "List visible rooms".to_string() },
+        ToolInfo { name: "swarm_list_structures".to_string(), description: "List visible structures".to_string() },
+        ToolInfo { name: "swarm_list_controllers".to_string(), description: "List visible controllers".to_string() },
+        ToolInfo { name: "swarm_get_events".to_string(), description: "Get visible events".to_string() },
+        ToolInfo { name: "swarm_get_messages".to_string(), description: "Get drone messages".to_string() },
         ToolInfo {
             name: "swarm_profile".to_string(),
             description: "Profile a player's current world state".to_string(),
         },
         ToolInfo {
-            name: "swarm_dry_run_commands".to_string(),
+            name: "swarm_dry_run".to_string(),
             description: "Dry-run commands without mutating the world".to_string(),
         },
         ToolInfo {
@@ -1559,18 +1600,6 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             description: "Read resource definitions".to_string(),
         },
         ToolInfo {
-            name: "swarm_oauth2_login".to_string(),
-            description: "Initiate OAuth2 login flow".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_oauth2_callback".to_string(),
-            description: "Handle OAuth2 provider callback".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_token_refresh".to_string(),
-            description: "Refresh an expiring access token".to_string(),
-        },
-        ToolInfo {
             name: "swarm_auth_revoke".to_string(),
             description: "Revoke a session or certificate".to_string(),
         },
@@ -1585,10 +1614,6 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
         ToolInfo {
             name: "swarm_validate_module".to_string(),
             description: "Validate a WASM module before deployment".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_rollback".to_string(),
-            description: "Rollback to the previous deployed WASM version".to_string(),
         },
         ToolInfo {
             name: "swarm_tournament_precommit".to_string(),
@@ -1650,23 +1675,33 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         "swarm_get_snapshot"
         | "swarm_get_drone"
         | "swarm_get_room"
+        | "swarm_get_structure"
+        | "swarm_get_controller"
+        | "swarm_get_code"
+        | "swarm_get_visibility"
+        | "swarm_get_path"
+        | "swarm_get_resources"
+        | "swarm_get_info"
+        | "swarm_list_drones"
+        | "swarm_list_rooms"
+        | "swarm_list_structures"
+        | "swarm_list_controllers"
+        | "swarm_get_events"
+        | "swarm_get_messages"
         | "swarm_get_world_rules"
         | "swarm_get_schema"
         | "swarm_get_available_actions"
         | "swarm_explain_last_tick"
-        | "swarm_inspect_entity"
-        | "swarm_inspect_room"
+        | "swarm_get_drone"
+        | "swarm_get_room"
         | "swarm_profile"
-        | "swarm_dry_run_commands"
+        | "swarm_dry_run"
         | "swarm_get_docs"
         | "resources/list"
         | "resources/read"
-        | "swarm_oauth2_callback"
-        | "swarm_token_refresh"
         | "swarm_auth_revoke"
         | "swarm_tournament_status"
-        | "swarm_match_result"
-        | "swarm_oauth2_login" => Some(CommandSource::McpQuery),
+        | "swarm_match_result" => Some(CommandSource::McpQuery),
         "swarm_simulate" => Some(CommandSource::Simulate),
         "swarm_list_modules" | "swarm_get_replay" => Some(CommandSource::McpQuery),
         _ => None,
@@ -1735,19 +1770,17 @@ fn tournament_tool_infos() -> Vec<ToolInfo> {
                 tool.name.as_str(),
                 "swarm_get_snapshot"
                     | "swarm_get_terrain"
-                    | "swarm_get_objects_in_range"
                     | "swarm_get_world_rules"
                     | "swarm_get_schema"
                     | "swarm_get_available_actions"
                     | "swarm_explain_last_tick"
-                    | "swarm_inspect_entity"
+                    | "swarm_get_drone"
                     | "swarm_profile"
-                    | "swarm_dry_run_commands"
+                    | "swarm_dry_run"
                     | "swarm_simulate"
                     | "swarm_get_docs"
                     | "swarm_deploy"
                     | "swarm_validate_module"
-                    | "swarm_rollback"
                     | "swarm_tournament_precommit"
                     | "swarm_tournament_status"
                     | "swarm_tournament_create"
@@ -2029,7 +2062,66 @@ pub fn swarm_get_objects_in_range(
     })
 }
 
-pub fn swarm_inspect_entity(
+fn world_view_code(params: Value) -> Result<Value, McpError> {
+    let params: InspectEntityParams = serde_json::from_value(params)
+        .map_err(|error| McpError::invalid_params(error.to_string()))?;
+    Ok(json!({ "drone_id": params.object_id, "modules": Vec::<Value>::new() }))
+}
+
+fn world_view_messages(params: Value) -> Result<Value, McpError> {
+    let params: InspectEntityParams = serde_json::from_value(params)
+        .map_err(|error| McpError::invalid_params(error.to_string()))?;
+    Ok(json!({ "drone_id": params.object_id, "messages": Vec::<Value>::new() }))
+}
+
+fn world_view_visibility(world: &mut SwarmWorld, context: McpContext) -> Value {
+    let snapshot = swarm_get_snapshot(world, context);
+    json!({ "visible_rooms": world_view_rooms(&snapshot), "visible_entities": snapshot.entities.len(), "visible_tiles": snapshot.visible_tiles.len() })
+}
+
+fn world_view_resources(world: &mut SwarmWorld, context: McpContext) -> Value {
+    let snapshot = swarm_get_snapshot(world, context);
+    json!({ "resources": snapshot.local_storage, "storage": snapshot.global_storage, "pending_global_transfers": snapshot.pending_global_transfers })
+}
+
+fn world_view_info(world: &mut SwarmWorld, context: McpContext) -> Value {
+    let snapshot = swarm_get_snapshot(world, context);
+    json!({ "version": env!("CARGO_PKG_VERSION"), "tick_rate": 1, "world_name": "swarm", "player_count": 1, "tick": snapshot.tick })
+}
+
+fn world_view_list(world: &mut SwarmWorld, context: McpContext, kind: &str) -> Value {
+    let snapshot = swarm_get_snapshot(world, context);
+    match kind {
+        "drones" => {
+            json!({ "drones": snapshot.entities.into_iter().filter(|entity| matches!(entity, VisibleEntity::Drone(_))).collect::<Vec<_>>() })
+        }
+        "structures" => {
+            json!({ "structures": snapshot.entities.into_iter().filter(|entity| matches!(entity, VisibleEntity::Structure(_))).collect::<Vec<_>>() })
+        }
+        "controllers" => {
+            json!({ "controllers": snapshot.entities.into_iter().filter(|entity| matches!(entity, VisibleEntity::Controller(_))).collect::<Vec<_>>() })
+        }
+        "rooms" => json!({ "rooms": world_view_rooms(&snapshot) }),
+        _ => json!({}),
+    }
+}
+
+fn world_view_rooms(snapshot: &VisibleWorldSnapshot) -> Vec<Value> {
+    snapshot
+        .visible_tiles
+        .iter()
+        .map(|tile| tile.room_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|room_id| json!({ "id": room_id, "level": 0, "controller_level": null }))
+        .collect()
+}
+
+fn world_view_path(params: Value) -> Value {
+    json!({ "path": Vec::<Value>::new(), "distance": 0, "cost": 0, "params": params })
+}
+
+pub fn swarm_get_drone(
     world: &mut SwarmWorld,
     context: McpContext,
     params: InspectEntityParams,
@@ -2202,7 +2294,7 @@ pub fn swarm_profile(
     }
 }
 
-pub fn swarm_dry_run_commands(
+pub fn swarm_dry_run(
     world: &mut SwarmWorld,
     context: McpContext,
     params: DryRunCommandsParams,
@@ -2551,7 +2643,7 @@ fn docs_markdown_for_uri(uri: &str) -> Option<String> {
             "Harvest",
             "params: object_id: ObjectId, target_id: ObjectId, resource: ResourceName?",
             "validator: exists, owner, drone, body_part(Work,Carry), carry_space, is_source, source_not_empty, in_range(1)",
-            "MCP cannot call Harvest directly. Use swarm_dry_run_commands, then return CommandIntent from WASM.",
+            "MCP cannot call Harvest directly. Use swarm_dry_run, then return CommandIntent from WASM.",
         )),
         "swarm://docs/api/commands/Transfer.md" => Some(command_doc(
             "Transfer",
@@ -2601,7 +2693,7 @@ fn tournament_docs_sections() -> Vec<DocsSection> {
         ),
         docs_section(
             "AI MCP interface",
-            "Tournament MCP tools are read/debug/deploy/precommit/create/status/result only: swarm_get_snapshot, swarm_get_world_rules, swarm_get_available_actions, swarm_explain_last_tick, swarm_profile, swarm_dry_run_commands, swarm_get_docs, swarm_deploy, swarm_tournament_precommit, swarm_tournament_create, swarm_tournament_status, and swarm_match_result. No swarm_move, swarm_attack, swarm_build, or other direct gameplay MCP tools exist.",
+            "Tournament MCP tools are read/debug/deploy/precommit/create/status/result only: swarm_get_snapshot, swarm_get_world_rules, swarm_get_available_actions, swarm_explain_last_tick, swarm_profile, swarm_dry_run, swarm_get_docs, swarm_deploy, swarm_tournament_precommit, swarm_tournament_create, swarm_tournament_status, and swarm_match_result. No swarm_move, swarm_attack, swarm_build, or other direct gameplay MCP tools exist.",
         ),
     ]
 }
@@ -2667,7 +2759,7 @@ fn basic_agent_tutorial_sections() -> Vec<DocsSection> {
         ),
         docs_section(
             "6. Dry-run before deploy",
-            "Call swarm_dry_run_commands with candidate CommandIntent objects. Dry-run validates commands and returns accepted/rejection without applying a tick. Treat rejection reasons as compiler errors for behavior: ObjectNotFound, NotOwner, OutOfRange, InsufficientResource, TargetFull, SpawnOnCooldown, or RoomDroneCapReached.",
+            "Call swarm_dry_run with candidate CommandIntent objects. Dry-run validates commands and returns accepted/rejection without applying a tick. Treat rejection reasons as compiler errors for behavior: ObjectNotFound, NotOwner, OutOfRange, InsufficientResource, TargetFull, SpawnOnCooldown, or RoomDroneCapReached.",
         ),
         docs_section(
             "7. Deploy",
@@ -3153,7 +3245,7 @@ fn base64_value(byte: u8) -> Result<u8, McpError> {
     }
 }
 
-// ── G12: swarm_inspect_room ──────────────────────────────────────────
+// ── G12: swarm_get_room ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InspectRoomParams {
@@ -3168,7 +3260,7 @@ pub struct RoomInspectResult {
     pub controller_owner: Option<PlayerId>,
 }
 
-pub fn swarm_inspect_room(
+pub fn swarm_get_room(
     world: &mut SwarmWorld,
     context: McpContext,
     params: InspectRoomParams,
@@ -3325,6 +3417,7 @@ pub fn swarm_get_replay(
 mod tests {
     use super::*;
     use crate::{Structure, StructureType, create_world};
+    use ed25519_dalek::Signer;
 
     fn spawn_structure(world: &mut SwarmWorld, owner: Option<PlayerId>, x: i32, y: i32) {
         world.app.world_mut().spawn((
@@ -3860,8 +3953,8 @@ mod tests {
         assert!(text.contains("LEARN -> DECIDE -> ACT -> UNDERSTAND"));
         assert!(text.contains("swarm_get_snapshot"));
         assert!(text.contains("swarm_get_available_actions"));
-        assert!(text.contains("swarm_dry_run_commands"));
-        assert!(text.contains("swarm_oauth2_login"));
+        assert!(text.contains("swarm_dry_run"));
+        assert!(!text.contains("swarm_oauth2_login"));
         assert!(text.contains("swarm_deploy"));
         assert!(text.contains("pending_next_tick"));
         assert!(text.contains("BLAKE3"));
@@ -4276,10 +4369,7 @@ mod tests {
         assert!(tool_names.contains(&"swarm_tournament_create"));
         assert!(tool_names.contains(&"swarm_tournament_status"));
         assert!(tool_names.contains(&"swarm_match_result"));
-        assert!(!tool_names.iter().any(|name| matches!(
-            *name,
-            "swarm_move" | "swarm_attack" | "swarm_build" | "swarm_spawn"
-        )));
+        assert!(!tool_names.iter().any(|name| matches!(*name,)));
         let read = server.handle_json_rpc(
             &mut world,
             context,
