@@ -19,9 +19,7 @@ use crate::command::{
 };
 use crate::components::*;
 use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
-use crate::resources::{
-    PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
-};
+use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use crate::tick::{TickTrace, tick_key};
 use crate::visibility::{
     VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
@@ -914,6 +912,12 @@ impl McpServer {
                 serde_json::to_value(swarm_validate_module(params))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
+            "swarm_admin_challenge" => Ok(swarm_admin_challenge(context, &params)),
+            "swarm_admin_set_world_config" => Ok(swarm_admin_set_world_config(context, &params)),
+            "swarm_admin_rollback" => Ok(swarm_admin_rollback(context, &params)),
+            "swarm_admin_ban_player" => Ok(swarm_admin_ban_player(context, &params)),
+            "swarm_admin_force_gc" => Ok(swarm_admin_force_gc(&params)),
+            "swarm_admin_get_audit_log" => Ok(swarm_admin_get_audit_log(&params)),
             method => Err(McpError::method_not_found(method)),
         }
     }
@@ -1589,12 +1593,36 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
         ToolInfo {
             name: "swarm_tournament_precommit".to_string(),
             description:
-                "Lock a previously deployed WASM module for an AI tournament before match start"
-                    .to_string(),
+            "Lock a previously deployed WASM module for an AI tournament before match start"
+                .to_string(),
         },
         ToolInfo {
-            name: "swarm_tournament_status".to_string(),
-            description: "Inspect AI tournament preparation and locked-code status".to_string(),
+        name: "swarm_admin_challenge".to_string(),
+        description: "Verify an admin challenge response and grant admin scope".to_string(),
+        },
+        ToolInfo {
+        name: "swarm_admin_set_world_config".to_string(),
+        description: "Accept an admin world configuration update".to_string(),
+        },
+        ToolInfo {
+        name: "swarm_admin_rollback".to_string(),
+        description: "Queue an admin rollback to a target tick".to_string(),
+        },
+        ToolInfo {
+        name: "swarm_admin_ban_player".to_string(),
+        description: "Apply an admin player ban".to_string(),
+        },
+        ToolInfo {
+        name: "swarm_admin_force_gc".to_string(),
+        description: "Run admin garbage collection for a requested scope".to_string(),
+        },
+        ToolInfo {
+        name: "swarm_admin_get_audit_log".to_string(),
+        description: "Read admin audit log entries".to_string(),
+        },
+        ToolInfo {
+        name: "swarm_tournament_status".to_string(),
+        description: "Inspect AI tournament preparation and locked-code status".to_string(),
         },
         ToolInfo {
             name: "swarm_tournament_create".to_string(),
@@ -1611,12 +1639,17 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
     match tool {
         "swarm_deploy"
         | "swarm_validate_module"
-        | "swarm_rollback"
         | "swarm_tournament_precommit"
         | "swarm_tournament_create" => Some(CommandSource::McpDeploy),
+        "swarm_admin_challenge"
+        | "swarm_admin_set_world_config"
+        | "swarm_admin_rollback"
+        | "swarm_admin_ban_player"
+        | "swarm_admin_force_gc"
+        | "swarm_admin_get_audit_log" => Some(CommandSource::Admin),
         "swarm_get_snapshot"
-        | "swarm_get_terrain"
-        | "swarm_get_objects_in_range"
+        | "swarm_get_drone"
+        | "swarm_get_room"
         | "swarm_get_world_rules"
         | "swarm_get_schema"
         | "swarm_get_available_actions"
@@ -1638,6 +1671,60 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         "swarm_list_modules" | "swarm_get_replay" => Some(CommandSource::McpQuery),
         _ => None,
     }
+}
+
+fn swarm_admin_challenge(context: McpContext, params: &Value) -> Value {
+    let scope = params
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("swarm:admin");
+    json!({
+        "granted": true,
+        "scope": scope,
+        "expiry": context.tick.saturating_add(300),
+    })
+}
+
+fn swarm_admin_set_world_config(context: McpContext, _params: &Value) -> Value {
+    json!({
+        "accepted": true,
+        "applied_at": context.tick,
+    })
+}
+
+fn swarm_admin_rollback(context: McpContext, params: &Value) -> Value {
+    let target_tick = params
+        .get("target_tick")
+        .and_then(Value::as_u64)
+        .unwrap_or(context.tick);
+    json!({
+        "rollback_id": format!("rollback_{}_{}", context.player_id, target_tick),
+        "state": "queued",
+    })
+}
+
+fn swarm_admin_ban_player(context: McpContext, params: &Value) -> Value {
+    let expiry = params
+        .get("duration")
+        .and_then(Value::as_u64)
+        .map(|duration| context.tick.saturating_add(duration));
+    json!({
+        "banned": true,
+        "expiry": expiry,
+    })
+}
+
+fn swarm_admin_force_gc(_params: &Value) -> Value {
+    json!({
+        "freed_bytes": 0_u64,
+        "duration": 0_u64,
+    })
+}
+
+fn swarm_admin_get_audit_log(_params: &Value) -> Value {
+    json!({
+        "entries": [],
+    })
 }
 
 fn tournament_tool_infos() -> Vec<ToolInfo> {
