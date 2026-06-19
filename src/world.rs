@@ -33,6 +33,7 @@ use crate::rule_module::{
     RhaiRuleModules, rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system,
     run_init_scripts,
 };
+use crate::scheduler::SystemSchedulerManifest;
 use crate::systems::*;
 
 #[path = "shard.rs"]
@@ -687,6 +688,7 @@ impl WorldConfig {
         app.insert_resource(NpcSpawnState::default());
         app.insert_resource(StrongholdSpawnConfig::default());
         app.insert_resource(SpawnedStrongholdRooms::default());
+        app.insert_resource(SystemSchedulerManifest::default());
     }
     fn register_systems(&self, app: &mut App) {
         if self.propagation_system_enabled() {

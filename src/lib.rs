@@ -18,6 +18,7 @@ pub mod realtime;
 pub mod replay_storage;
 pub mod resources;
 pub mod rule_module;
+pub mod scheduler;
 pub mod sdk_gen;
 pub mod security;
 pub mod sim;
