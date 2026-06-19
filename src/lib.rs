@@ -219,6 +219,24 @@ mod tests {
         (body_cost, refund)
     }
 
+    fn clear_spawning_grace(world: &mut crate::SwarmWorld, entity: bevy::prelude::Entity) {
+        world.app.world_mut().entity_mut(entity).remove::<SpawningGrace>();
+    }
+
+    fn set_hits(world: &mut crate::SwarmWorld, entity: bevy::prelude::Entity, hits: u32) {
+        world
+            .app
+            .world_mut()
+            .entity_mut(entity)
+            .get_mut::<Drone>()
+            .unwrap()
+            .hits = hits;
+    }
+
+    fn hits_of(world: &crate::SwarmWorld, entity: bevy::prelude::Entity) -> u32 {
+        world.app.world().entity(entity).get::<Drone>().unwrap().hits
+    }
+
     #[test]
     fn recycle_refunds_half_body_cost_in_default_world() {
         let (body_cost, refund) = recycle_refund_for_mode(WorldMode::Default);
@@ -1907,6 +1925,149 @@ mod tests {
                 }
             ),
             Err(RejectionReason::NotFriendly)
+        );
+    }
+
+    // ---- tick-level combat system tests (attack_system / heal_system / ranged_attack_system / projectile_system) ----
+
+    #[test]
+    fn attack_system_hits_enemy_in_same_room() {
+        let mut world = create_world();
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
+        let target = world.spawn_drone(2, 10, 11, vec![BodyPart::Move]);
+        clear_spawning_grace(&mut world, attacker);
+        clear_spawning_grace(&mut world, target);
+        world.run_tick();
+        assert!(hits_of(&world, target) < 100, "attack should reduce target hits");
+    }
+
+    #[test]
+    fn attack_system_skips_ally_same_owner() {
+        let mut world = create_world();
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
+        let ally = world.spawn_drone(1, 10, 11, vec![BodyPart::Move]);
+        clear_spawning_grace(&mut world, attacker);
+        clear_spawning_grace(&mut world, ally);
+        let pre_hits = hits_of(&world, ally);
+        world.run_tick();
+        assert_eq!(hits_of(&world, ally), pre_hits, "should not attack same-owner ally");
+    }
+
+    #[test]
+    fn attack_system_hits_nearby_and_skips_far() {
+        let mut world = create_world();
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
+        let near = world.spawn_drone(2, 10, 11, vec![BodyPart::Move]);
+        let far = world.spawn_drone(2, 50, 50, vec![BodyPart::Move]);
+        clear_spawning_grace(&mut world, attacker);
+        clear_spawning_grace(&mut world, near);
+        clear_spawning_grace(&mut world, far);
+        let near_pre = hits_of(&world, near);
+        let far_pre = hits_of(&world, far);
+        world.run_tick();
+        // near drone at distance 1 should be hit
+        assert!(hits_of(&world, near) < near_pre, "near drone should be attacked");
+        // far drone (different room or out of range) should be untouched
+        assert_eq!(hits_of(&world, far), far_pre, "far drone should not be attacked");
+    }
+
+    #[test]
+    fn attack_system_skips_spawning_grace() {
+        let mut world = create_world();
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
+        let target = world.spawn_drone(2, 10, 11, vec![BodyPart::Move]);
+        clear_spawning_grace(&mut world, attacker);
+        // target still has SpawningGrace
+        let pre_hits = hits_of(&world, target);
+        world.run_tick();
+        assert_eq!(hits_of(&world, target), pre_hits, "should skip drone with SpawningGrace");
+    }
+
+    #[test]
+    fn heal_system_heals_ally_in_range() {
+        let mut world = create_world();
+        let healer = world.spawn_drone(1, 10, 10, vec![BodyPart::Heal]);
+        let ally = world.spawn_drone(1, 10, 11, vec![BodyPart::Move]);
+        clear_spawning_grace(&mut world, healer);
+        clear_spawning_grace(&mut world, ally);
+        set_hits(&mut world, ally, 50);
+        world.run_tick();
+        assert!(hits_of(&world, ally) > 50, "heal should increase hits");
+    }
+
+    #[test]
+    fn heal_system_skips_enemy() {
+        let mut world = create_world();
+        let healer = world.spawn_drone(1, 10, 10, vec![BodyPart::Heal]);
+        let enemy = world.spawn_drone(2, 10, 11, vec![BodyPart::Move]);
+        clear_spawning_grace(&mut world, healer);
+        clear_spawning_grace(&mut world, enemy);
+        set_hits(&mut world, enemy, 50);
+        let pre_hits = hits_of(&world, enemy);
+        world.run_tick();
+        assert_eq!(hits_of(&world, enemy), pre_hits, "should not heal enemy");
+    }
+
+    #[test]
+    fn heal_system_caps_at_max_hits() {
+        let mut world = create_world();
+        let healer = world.spawn_drone(1, 10, 10, vec![BodyPart::Heal, BodyPart::Heal]);
+        let ally = world.spawn_drone(1, 10, 11, vec![BodyPart::Move]);
+        clear_spawning_grace(&mut world, healer);
+        clear_spawning_grace(&mut world, ally);
+        let max = world.app.world().entity(ally).get::<Drone>().unwrap().hits_max;
+        set_hits(&mut world, ally, max - 1);
+        world.run_tick();
+        assert_eq!(hits_of(&world, ally), max, "should not exceed hits_max");
+    }
+
+    #[test]
+    fn heal_system_skips_full_health() {
+        let mut world = create_world();
+        let healer = world.spawn_drone(1, 10, 10, vec![BodyPart::Heal]);
+        let ally = world.spawn_drone(1, 10, 11, vec![BodyPart::Move]);
+        clear_spawning_grace(&mut world, healer);
+        clear_spawning_grace(&mut world, ally);
+        let max = world.app.world().entity(ally).get::<Drone>().unwrap().hits_max;
+        set_hits(&mut world, ally, max);
+        world.run_tick();
+        assert_eq!(hits_of(&world, ally), max, "should skip full-health ally");
+    }
+
+    #[test]
+    fn ranged_attack_creates_projectile() {
+        let mut world = create_world();
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::RangedAttack]);
+        let target = world.spawn_drone(2, 10, 13, vec![BodyPart::Move]);
+        clear_spawning_grace(&mut world, attacker);
+        clear_spawning_grace(&mut world, target);
+        world.run_tick();
+        let projectile_count = world
+            .app
+            .world_mut()
+            .query::<&Projectile>()
+            .iter(world.app.world())
+            .count();
+        assert!(
+            projectile_count > 0,
+            "ranged attack should create projectile, found {projectile_count}"
+        );
+    }
+
+    #[test]
+    fn projectile_impacts_after_ticks() {
+        let mut world = create_world();
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::RangedAttack]);
+        let target = world.spawn_drone(2, 10, 13, vec![BodyPart::Move]);
+        clear_spawning_grace(&mut world, attacker);
+        clear_spawning_grace(&mut world, target);
+        let pre_hits = hits_of(&world, target);
+        for _ in 0..6 {
+            world.run_tick();
+        }
+        assert!(
+            hits_of(&world, target) < pre_hits,
+            "projectile should impact and deal damage after travel ticks"
         );
     }
 

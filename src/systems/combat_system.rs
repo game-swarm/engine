@@ -3,8 +3,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{
-    Attributes, BodyPart, BodyPartRegistry, DamageTypeRegistry, Drone, EntityFlags,
-    ResistanceRegistry, SpawningGrace, Structure,
+    Attributes, BodyPart, BodyPartRegistry, DamageTypeRegistry, Drone, EntityFlags, Owner,
+    Position, ResistanceRegistry, SpawningGrace, Structure,
 };
 
 pub const DEFAULT_ATTACK_DAMAGE: u32 = 30;
@@ -90,6 +90,16 @@ pub struct PendingCombat {
     pub heal: Vec<(u64, u32)>,
 }
 
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Projectile {
+    pub source: u64,
+    pub target: u64,
+    pub damage_type: String,
+    pub damage: u32,
+    pub speed: u32,
+    pub ticks_remaining: u32,
+}
+
 impl PendingCombat {
     pub fn queue_damage(&mut self, target: Entity, amount: u32) {
         self.damage.push((target.to_bits(), amount));
@@ -132,6 +142,192 @@ pub fn ranged_attack_damage(parts: usize, rules: CombatRules) -> u32 {
 
 pub fn heal_amount(parts: usize) -> u32 {
     parts as u32 * DEFAULT_HEAL_AMOUNT
+}
+
+fn body_part_count(drone: &Drone, part: BodyPart) -> usize {
+    drone.body.iter().filter(|candidate| **candidate == part).count()
+}
+
+fn same_room_range(source: &Position, target: &Position) -> Option<u32> {
+    if source.room != target.room {
+        return None;
+    }
+    Some(source.x.abs_diff(target.x).max(source.y.abs_diff(target.y)))
+}
+
+fn projectile_travel_ticks(distance: u32, speed: u32) -> u32 {
+    let speed = speed.max(1);
+    distance.max(1).div_ceil(speed)
+}
+
+pub fn attack_system(
+    mut combat: ResMut<PendingCombat>,
+    body_registry: Res<BodyPartRegistry>,
+    rules: Res<CombatRules>,
+    attackers: Query<(Entity, &Position, &Owner, &Drone), Without<SpawningGrace>>,
+    targets: Query<(Entity, &Position, Option<&Owner>, &Drone), Without<SpawningGrace>>,
+) {
+    let mut intents = Vec::new();
+    for (attacker_entity, attacker_position, attacker_owner, attacker) in &attackers {
+        if attacker.hits == 0 {
+            continue;
+        }
+        let attack_parts = body_part_count(attacker, BodyPart::Attack);
+        if attack_parts == 0 {
+            continue;
+        }
+        let (damage_type, damage) = body_part_damage(
+            attack_parts,
+            BodyPart::Attack,
+            body_registry.as_ref(),
+            *rules,
+        );
+        if damage == 0 {
+            continue;
+        }
+        let mut candidates = targets
+            .iter()
+            .filter(|(target_entity, target_position, target_owner, target)| {
+                *target_entity != attacker_entity
+                    && target.hits > 0
+                    && target_owner.map(|owner| owner.0) != Some(attacker_owner.0)
+                    && same_room_range(attacker_position, target_position) == Some(1)
+            })
+            .map(|(target_entity, _, _, _)| target_entity)
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|e| e.to_bits());
+        if let Some(target) = candidates.first() {
+            intents.push((*target, damage_type.clone(), damage));
+        }
+    }
+    intents.sort_by_key(|(target, _, _)| target.to_bits());
+    for (target, damage_type, damage) in intents {
+        combat.queue_typed_damage(target, damage_type, damage);
+    }
+}
+
+pub fn ranged_attack_system(
+    mut commands: Commands,
+    body_registry: Res<BodyPartRegistry>,
+    rules: Res<CombatRules>,
+    attackers: Query<(Entity, &Position, &Owner, &Drone), Without<SpawningGrace>>,
+    targets: Query<(Entity, &Position, Option<&Owner>, &Drone), Without<SpawningGrace>>,
+) {
+    let mut launches = Vec::new();
+    for (attacker_entity, attacker_position, attacker_owner, attacker) in &attackers {
+        if attacker.hits == 0 {
+            continue;
+        }
+        let ranged_parts = body_part_count(attacker, BodyPart::RangedAttack);
+        if ranged_parts == 0 {
+            continue;
+        }
+        let (damage_type, damage) = body_part_damage(
+            ranged_parts,
+            BodyPart::RangedAttack,
+            body_registry.as_ref(),
+            *rules,
+        );
+        if damage == 0 {
+            continue;
+        }
+        let range = ranged_parts as u32 * 3;
+        let speed = ranged_parts as u32;
+        let mut candidates = targets
+            .iter()
+            .filter_map(|(target_entity, target_position, target_owner, target)| {
+                if target_entity == attacker_entity
+                    || target.hits == 0
+                    || target_owner.map(|owner| owner.0) == Some(attacker_owner.0)
+                {
+                    return None;
+                }
+                let distance = same_room_range(attacker_position, target_position)?;
+                (distance > 1 && distance <= range).then_some((target_entity, distance))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(target, distance)| (*distance, target.to_bits()));
+        if let Some((target, distance)) = candidates.first() {
+            launches.push(Projectile {
+                source: attacker_entity.to_bits(),
+                target: target.to_bits(),
+                damage_type: damage_type.clone(),
+                damage,
+                speed,
+                ticks_remaining: projectile_travel_ticks(*distance, speed),
+            });
+        }
+    }
+    for projectile in launches {
+        commands.spawn(projectile);
+    }
+}
+
+pub fn projectile_system(
+    mut commands: Commands,
+    mut combat: ResMut<PendingCombat>,
+    mut projectiles: Query<(Entity, &mut Projectile)>,
+    targets: Query<&Drone, Without<SpawningGrace>>,
+) {
+    let mut impacts = Vec::new();
+    for (projectile_entity, mut projectile) in &mut projectiles {
+        projectile.ticks_remaining = projectile.ticks_remaining.saturating_sub(1);
+        if projectile.ticks_remaining > 0 {
+            continue;
+        }
+        let target = Entity::from_bits(projectile.target);
+        if targets.get(target).map(|drone| drone.hits > 0).unwrap_or(false) {
+            impacts.push((target, projectile.damage_type.clone(), projectile.damage));
+        }
+        commands.entity(projectile_entity).despawn();
+    }
+    impacts.sort_by_key(|(target, _, _)| target.to_bits());
+    for (target, damage_type, damage) in impacts {
+        combat.queue_typed_damage(target, damage_type, damage);
+    }
+}
+
+pub fn heal_system(
+    mut combat: ResMut<PendingCombat>,
+    body_registry: Res<BodyPartRegistry>,
+    healers: Query<(Entity, &Position, &Owner, &Drone), Without<SpawningGrace>>,
+    targets: Query<(Entity, &Position, &Owner, &Drone), Without<SpawningGrace>>,
+) {
+    let mut intents = Vec::new();
+    for (healer_entity, healer_position, healer_owner, healer) in &healers {
+        if healer.hits == 0 {
+            continue;
+        }
+        let heal_parts = body_part_count(healer, BodyPart::Heal);
+        if heal_parts == 0 {
+            continue;
+        }
+        let amount = heal_parts as u32 * body_registry.heal_amount(BodyPart::Heal);
+        if amount == 0 {
+            continue;
+        }
+        let mut candidates = targets
+            .iter()
+            .filter(|(target_entity, target_position, target_owner, target)| {
+                *target_entity != healer_entity
+                    && target.hits > 0
+                    && target.hits < target.hits_max
+                    && target_owner.0 == healer_owner.0
+                    && same_room_range(healer_position, target_position)
+                        .map(|distance| distance <= 3)
+                        .unwrap_or(false)
+            })
+            .map(|(target_entity, _, _, _)| target_entity)
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|e| e.to_bits());
+        if let Some(target) = candidates.first() {
+            intents.push((*target, amount));
+        }
+    }
+    intents.sort_by_key(|(target, _)| target.to_bits());
+    for (target, amount) in intents {
+        combat.queue_heal(target, amount);
+    }
 }
 
 pub fn final_damage_multiplier(
