@@ -1550,6 +1550,8 @@ pub struct WorldSnapshot {
     local_storage: PlayerLocalStorage,
     global_storage: PlayerGlobalStorage,
     pending_global_transfers: PendingGlobalTransfers,
+    starting_resources_granted: crate::systems::StartingResourcesGranted,
+    player_first_spawn_tick: crate::systems::PlayerFirstSpawnTick,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1659,6 +1661,8 @@ impl WorldSnapshot {
             local_storage: world.resource::<PlayerLocalStorage>().clone(),
             global_storage: world.resource::<PlayerGlobalStorage>().clone(),
             pending_global_transfers: world.resource::<PendingGlobalTransfers>().clone(),
+            starting_resources_granted: world.resource::<crate::systems::StartingResourcesGranted>().clone(),
+            player_first_spawn_tick: world.resource::<crate::systems::PlayerFirstSpawnTick>().clone(),
         }
     }
 
@@ -1697,6 +1701,8 @@ impl WorldSnapshot {
         *world.resource_mut::<PlayerLocalStorage>() = self.local_storage;
         *world.resource_mut::<PlayerGlobalStorage>() = self.global_storage;
         *world.resource_mut::<PendingGlobalTransfers>() = self.pending_global_transfers;
+        *world.resource_mut::<crate::systems::StartingResourcesGranted>() = self.starting_resources_granted;
+        *world.resource_mut::<crate::systems::PlayerFirstSpawnTick>() = self.player_first_spawn_tick;
         entity_map
     }
 

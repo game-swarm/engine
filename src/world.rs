@@ -51,6 +51,7 @@ pub struct WorldConfig {
     pub code: CodeConfig,
     pub drone: DroneConfig,
     pub empire_upkeep: EmpireUpkeepConfig,
+    pub starting_resources: StartingResourcesConfig,
     pub visibility: VisibilityConfig,
     pub events: EventConfig,
     pub pve: WorldPveConfig,
@@ -195,9 +196,15 @@ impl EmpireUpkeepConfig {
     }
 }
 
-/// ═══════════════════════════════════════════════════════════════
-/// EmpireUpkeepConfig
-/// ═══════════════════════════════════════════════════════════════
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartingResourcesConfig {
+    pub starting_resources: crate::resources::ResourceCost,
+    pub free_upkeep_controllers: u32,
+    pub free_upkeep_drones: u32,
+    pub free_upkeep_ticks: Tick,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PlayerViewMode {
@@ -248,6 +255,7 @@ impl Default for WorldConfig {
             code: CodeConfig::default(),
             drone: DroneConfig::default(),
             empire_upkeep: EmpireUpkeepConfig::default(),
+            starting_resources: StartingResourcesConfig::default(),
             visibility: VisibilityConfig::default(),
             events: EventConfig::default(),
             pve: WorldPveConfig::default(),
@@ -664,6 +672,20 @@ impl Default for EmpireUpkeepConfig {
     }
 }
 
+impl Default for StartingResourcesConfig {
+    fn default() -> Self {
+        let mut resources = crate::resources::ResourceCost::new();
+        resources.insert("Energy".to_string(), 5000);
+        resources.insert("Minerals".to_string(), 2000);
+        Self {
+            starting_resources: resources,
+            free_upkeep_controllers: 1,
+            free_upkeep_drones: 3,
+            free_upkeep_ticks: 2000,
+        }
+    }
+}
+
 impl Default for PlayerViewMode {
     fn default() -> Self {
         Self::Drone
@@ -837,6 +859,7 @@ impl WorldConfig {
                 death_mark_system,
                 pvp_block_system,
                 spawn_system,
+                starting_resources_system,
                 regeneration_system,
                 seed_rotation_system,
                 cargo_in_transit_system,
@@ -1170,6 +1193,8 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<DragonflyCache>();
     app.init_resource::<RankingState>();
     app.init_resource::<ShardConfig>();
+    app.init_resource::<crate::systems::StartingResourcesGranted>();
+    app.init_resource::<crate::systems::PlayerFirstSpawnTick>();
     app.init_resource::<SeedRotationState>();
     app.init_resource::<RoomStates>();
     app.init_resource::<EventState>();

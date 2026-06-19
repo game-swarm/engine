@@ -2143,4 +2143,80 @@ mod tests {
         assert_eq!(upkeep.recycle_refund_amount(1_000, 900, 1_000, 499, true), 1_000);
         assert_eq!(upkeep.recycle_refund_amount(1_000, 900, 1_000, 500, true), 100);
     }
+
+    // ── P2-5 Starting Resources tests ──
+
+    #[test]
+    fn starting_resources_config_has_expected_defaults() {
+        let config = crate::world::StartingResourcesConfig::default();
+        assert_eq!(config.starting_resources.get("Energy"), Some(&5000));
+        assert_eq!(config.starting_resources.get("Minerals"), Some(&2000));
+        assert_eq!(config.free_upkeep_controllers, 1);
+        assert_eq!(config.free_upkeep_drones, 3);
+        assert_eq!(config.free_upkeep_ticks, 2000);
+    }
+
+    #[test]
+    fn starting_resources_granted_on_first_drone_spawn_and_tick() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        world.run_tick_for(1);
+        let storage = world
+            .app
+            .world()
+            .resource::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .get(&1)
+            .cloned()
+            .unwrap_or_default();
+        assert!(storage.get("Energy").copied().unwrap_or(0) >= 5000);
+        assert!(storage.get("Minerals").copied().unwrap_or(0) >= 2000);
+    }
+
+    #[test]
+    fn starting_resources_not_granted_twice() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        world.run_tick_for(1);
+        world.run_tick_for(2);
+        let storage = world
+            .app
+            .world()
+            .resource::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .get(&1)
+            .cloned()
+            .unwrap_or_default();
+        // Should be ~5000 (not 10000) since granted only once
+        assert_eq!(storage.get("Energy").copied().unwrap_or(0), 5000);
+        assert_eq!(storage.get("Minerals").copied().unwrap_or(0), 2000);
+    }
+
+    #[test]
+    fn free_upkeep_exempts_first_controller_within_free_ticks() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        // Seed global storage so upkeep can be deducted
+        world
+            .app
+            .world_mut()
+            .resource_mut::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 10000);
+        // First tick — upkeep should be 0 (free_upkeep_controllers=1, 1 room)
+        world.run_tick_for(1);
+        let after_storage = world
+            .app
+            .world()
+            .resource::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .get(&1)
+            .cloned()
+            .unwrap_or_default();
+        // Standard upkeep for 1 room = 55, but free upkeep exempts it
+        // Energy should remain ~10000 + 5000 (starting) = 15000
+        assert_eq!(after_storage.get("Energy").copied().unwrap_or(0), 15000);
+    }
 }

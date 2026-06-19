@@ -4,6 +4,7 @@ use indexmap::{IndexMap, IndexSet};
 
 use crate::components::{Drone, PlayerId, Position};
 use crate::resources::PlayerGlobalStorage;
+use crate::systems::starting_resources_system::{PlayerFirstSpawnTick, StartingResourcesGranted};
 use crate::world::WorldConfig;
 
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
@@ -11,6 +12,8 @@ pub struct EmpireUpkeepDeficits(pub IndexMap<PlayerId, u32>);
 
 pub fn memory_upkeep_system(
     config: Res<WorldConfig>,
+    current_tick: Res<crate::resources::CurrentTick>,
+    first_spawn: Res<PlayerFirstSpawnTick>,
     mut drones: Query<(&mut Drone, &Position)>,
     mut global_storage: ResMut<PlayerGlobalStorage>,
     mut deficits: Local<EmpireUpkeepDeficits>,
@@ -18,6 +21,8 @@ pub fn memory_upkeep_system(
     if !config.empire_upkeep.enabled {
         return;
     }
+
+    let tick = current_tick.0;
 
     let mut rooms_by_player: IndexMap<PlayerId, IndexSet<u32>> = IndexMap::new();
     for (drone, position) in drones.iter() {
@@ -28,7 +33,21 @@ pub fn memory_upkeep_system(
     }
 
     for (player_id, rooms) in rooms_by_player {
-        let cost = config.empire_upkeep.upkeep_cost(rooms.len() as u32);
+        let total_rooms = rooms.len() as u32;
+
+        // Free upkeep exemption: first N controllers (rooms) are free for free_upkeep_ticks
+        let effective_rooms = if let Some(spawn_tick) = first_spawn.0.get(&player_id) {
+            let elapsed = tick.saturating_sub(*spawn_tick);
+            if elapsed < config.starting_resources.free_upkeep_ticks {
+                total_rooms.saturating_sub(config.starting_resources.free_upkeep_controllers)
+            } else {
+                total_rooms
+            }
+        } else {
+            total_rooms
+        };
+
+        let cost = config.empire_upkeep.upkeep_cost(effective_rooms);
         if cost == 0 {
             deficits.0.shift_remove(&player_id);
             continue;
