@@ -1,0 +1,21 @@
+[submodule "mods/empire-upkeep"]
+	path = mods/empire-upkeep
+	url = git@git.kagurazakalan.com:swarm/mod-empire-upkeep.git
+[submodule "mods/fog-of-war"]
+	path = mods/fog-of-war
+	url = git@git.kagurazakalan.com:swarm/mod-fog-of-war.git
+[submodule "mods/resource-decay"]
+	path = mods/resource-decay
+	url = git@git.kagurazakalan.com:swarm/mod-resource-decay.git
+[submodule "mods/pve-spawning"]
+	path = mods/pve-spawning
+	url = git@git.kagurazakalan.com:swarm/mod-pve-spawning.git
+[submodule "mods/combat-core"]
+	path = mods/combat-core
+	url = git@git.kagurazakalan.com:swarm/mod-combat-core.git
+[submodule "mods/special-attacks"]
+	path = mods/special-attacks
+	url = git@git.kagurazakalan.com:swarm/mod-special-attacks.git
+[submodule "mods/depot-storage"]
+	path = mods/depot-storage
+	url = git@git.kagurazakalan.com:swarm/mod-depot-storage.git
