@@ -3,25 +3,26 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::command::{
-    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
-    validate_command,
+    apply_command, source_gate, validate_command, CommandIntent, CommandResult, CommandSource,
+    RawCommand, Tick,
 };
 use crate::components::*;
 use crate::dragonfly::DragonflyCache;
 use crate::fdb::FoundationDbStore;
-use crate::npc::events::{EventConfig, EventState, event_effect_system, world_event_system};
+use crate::npc::events::{event_effect_system, world_event_system, EventConfig, EventState};
 use crate::npc::loot::{BlueprintRegistry, NpcLootTables};
 use crate::npc::strongholds::{
-    SpawnedStrongholdRooms, StrongholdSpawnConfig, stronghold_production_system,
-    stronghold_spawn_system,
+    stronghold_production_system, stronghold_spawn_system, SpawnedStrongholdRooms,
+    StrongholdSpawnConfig,
 };
-use crate::npc::{NpcSpawnState, npc_ai_system, npc_combat_system, npc_spawn_system};
+use crate::npc::{npc_ai_system, npc_combat_system, npc_spawn_system, NpcSpawnState};
 use crate::onboarding::{
-    OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
-    send_onboarding_event,
+    onboarding_system, send_onboarding_event, OnboardingConfig, OnboardingEvent,
+    OnboardingProgress, OnboardingSwarmEvent,
 };
 use crate::pve::{
-    DifficultyZone, WorldPveConfig, ZoneDefinition, zone_definition_for_room, zone_for_room,
+    zone_definition_for_room, zone_for_room, DifficultyZone, PveBudget, PveBudgetConfig,
+    WorldPveConfig, ZoneDefinition,
 };
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::replay_storage::ReplayStore;
@@ -30,8 +31,8 @@ use crate::resources::{
     PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
 };
 use crate::rule_module::{
-    RhaiRuleModules, rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system,
-    run_init_scripts,
+    rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system, run_init_scripts,
+    RhaiRuleModules,
 };
 use crate::scheduler::SystemSchedulerManifest;
 use crate::systems::*;
@@ -52,6 +53,7 @@ pub struct WorldConfig {
     pub visibility: VisibilityConfig,
     pub events: EventConfig,
     pub pve: WorldPveConfig,
+    pub pve_budget: PveBudgetConfig,
     pub resources: WorldResourceConfig,
     pub combat: WorldCombatConfig,
     pub damage_types: Vec<crate::components::DamageTypeDef>,
@@ -181,6 +183,7 @@ impl Default for WorldConfig {
             visibility: VisibilityConfig::default(),
             events: EventConfig::default(),
             pve: WorldPveConfig::default(),
+            pve_budget: PveBudgetConfig::default(),
             resources: WorldResourceConfig::default(),
             combat: WorldCombatConfig::default(),
             damage_types: default_damage_types(),
@@ -678,6 +681,7 @@ impl WorldConfig {
         app.insert_resource(PveOutputTracker::new(
             self.resources.max_pve_output_per_tick,
         ));
+        app.insert_resource(PveBudget::new(self.pve_budget.clone()));
         app.insert_resource(LatestCodeVersions::default());
         app.insert_resource(RepairTracker {
             per_player: Default::default(),
@@ -1074,6 +1078,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<PlayerGlobalStorage>();
     app.init_resource::<PendingGlobalTransfers>();
     app.init_resource::<PveOutputTracker>();
+    app.init_resource::<PveBudget>();
     app.init_resource::<CurrentTick>();
     app.init_resource::<RhaiRuleModules>();
     app.init_resource::<FoundationDbStore>();
@@ -1922,22 +1927,18 @@ cost = { Energy = 33 }
                 .update_cooldown,
             5
         );
-        assert!(
-            world
-                .app
-                .world()
-                .resource::<SpecialEffectRegistry>()
-                .get("hack")
-                .is_some()
-        );
-        assert!(
-            world
-                .app
-                .world()
-                .resource::<CustomActionRegistry>()
-                .get("Hack")
-                .is_some()
-        );
+        assert!(world
+            .app
+            .world()
+            .resource::<SpecialEffectRegistry>()
+            .get("hack")
+            .is_some());
+        assert!(world
+            .app
+            .world()
+            .resource::<CustomActionRegistry>()
+            .get("Hack")
+            .is_some());
     }
 
     fn test_command(player_id: PlayerId) -> RawCommand {
