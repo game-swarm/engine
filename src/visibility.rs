@@ -148,6 +148,102 @@ fn is_owned_by(world: &World, entity: Entity, player_id: PlayerId) -> bool {
             .is_some_and(|owner| owner.0 == player_id)
 }
 
+// ── Hint Ladder (§10.3) ──
+
+/// Error detail level for the Hint Ladder defence-in-depth oracle protection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintLevel {
+    /// Safe: only expose what the player already knows (own state, no target info).
+    Safe,
+    /// FixHint: expose actionable feedback (e.g. "target too far", "not enough energy").
+    FixHint,
+    /// FullDebug: admin-only full detail (never exposed to players).
+    FullDebug,
+}
+
+/// Map a rejection reason to its appropriate Hint Ladder level per §10.4.
+pub fn hint_ladder(reason: &crate::command::RejectionReason) -> HintLevel {
+    use crate::command::RejectionReason;
+    match reason {
+        // Self-state codes — player already knows these
+        RejectionReason::Fatigued
+        | RejectionReason::CooldownActive
+        | RejectionReason::InsufficientEnergy
+        | RejectionReason::AlreadyFullHealth
+        | RejectionReason::SpawnOnCooldown
+        | RejectionReason::RoomDroneCapReached => HintLevel::Safe,
+
+        // Oracle-protected codes — target info must be cloaked
+        RejectionReason::NotVisibleOrNotFound
+        | RejectionReason::PlayerNotFound
+        | RejectionReason::FriendlyTarget
+        | RejectionReason::NotFriendly
+        | RejectionReason::OutOfRange { .. }
+        | RejectionReason::ObjectNotFound
+        | RejectionReason::TargetNotFound
+        | RejectionReason::TargetNotVisible
+        | RejectionReason::NoPath => HintLevel::FixHint,
+
+        // Everything else defaults to FixHint (safe-fail)
+        _ => HintLevel::FixHint,
+    }
+}
+
+/// Format a rejection detail message at the given Hint Ladder level.
+/// Safe returns an empty string; FixHint returns a generic hint; FullDebug returns full detail.
+pub fn format_hint(reason: &crate::command::RejectionReason, level: HintLevel) -> String {
+    match level {
+        HintLevel::Safe => String::new(),
+        HintLevel::FixHint => {
+            use crate::command::RejectionReason;
+            match reason {
+                RejectionReason::NotVisibleOrNotFound => "target not found or not visible".into(),
+                RejectionReason::OutOfRange { .. } => "target is out of range".into(),
+                RejectionReason::InsufficientEnergy => "not enough energy".into(),
+                RejectionReason::Fatigued => "drone is fatigued".into(),
+                RejectionReason::CooldownActive => "action on cooldown".into(),
+                _ => "action rejected".into(),
+            }
+        }
+        HintLevel::FullDebug => format!("{reason:?}"),
+    }
+}
+
+// ── Oracle defence: omitted_count bucketing (§10.2) ──
+
+/// Bucket an exact omitted entity count into a fuzzy category to prevent
+/// attackers from inferring hidden entity counts through snapshot truncation.
+pub fn omitted_count_bucket(exact: usize) -> &'static str {
+    match exact {
+        0 => "0",
+        1..=10 => "few",
+        11..=50 => "some",
+        51..=200 => "many",
+        _ => "extreme",
+    }
+}
+
+// ── Spectate helpers (§3.5) ──
+
+/// Return the set of entities visible to a spectator, respecting spectate_delay
+/// and replay_privacy. Spectators see world-level physical state only.
+pub fn spectate_visible_entities(
+    world: &mut World,
+    tick: Tick,
+    public_spectate: bool,
+    spectate_delay: u32,
+) -> BTreeSet<Entity> {
+    if !public_spectate || tick < spectate_delay as u64 {
+        return BTreeSet::new();
+    }
+    let _effective_tick = tick - spectate_delay as u64;
+    let mut query = world.query::<(Entity, &Position)>();
+    query
+        .iter(world)
+        .map(|(entity, _)| entity)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +359,106 @@ mod tests {
 
         assert!(is_visible_to(world.app.world_mut(), near_enemy, 1, 7));
         assert!(!is_visible_to(world.app.world_mut(), far_enemy, 1, 7));
+    }
+
+    // ── Hint Ladder tests (§10.3) ──
+
+    #[test]
+    fn hint_ladder_safe_for_self_state_codes() {
+        use crate::command::RejectionReason;
+        assert_eq!(hint_ladder(&RejectionReason::Fatigued), HintLevel::Safe);
+        assert_eq!(hint_ladder(&RejectionReason::CooldownActive), HintLevel::Safe);
+        assert_eq!(hint_ladder(&RejectionReason::InsufficientEnergy), HintLevel::Safe);
+        assert_eq!(hint_ladder(&RejectionReason::AlreadyFullHealth), HintLevel::Safe);
+        assert_eq!(hint_ladder(&RejectionReason::SpawnOnCooldown), HintLevel::Safe);
+        assert_eq!(hint_ladder(&RejectionReason::RoomDroneCapReached), HintLevel::Safe);
+    }
+
+    #[test]
+    fn hint_ladder_fixhint_for_oracle_codes() {
+        use crate::command::RejectionReason;
+        assert_eq!(hint_ladder(&RejectionReason::NotVisibleOrNotFound), HintLevel::FixHint);
+        assert_eq!(hint_ladder(&RejectionReason::PlayerNotFound), HintLevel::FixHint);
+        assert_eq!(hint_ladder(&RejectionReason::FriendlyTarget), HintLevel::FixHint);
+        assert_eq!(hint_ladder(&RejectionReason::NotFriendly), HintLevel::FixHint);
+        assert_eq!(hint_ladder(&RejectionReason::OutOfRange { distance: 5, max: 3 }), HintLevel::FixHint);
+        assert_eq!(hint_ladder(&RejectionReason::ObjectNotFound), HintLevel::FixHint);
+        assert_eq!(hint_ladder(&RejectionReason::TargetNotFound), HintLevel::FixHint);
+        assert_eq!(hint_ladder(&RejectionReason::TargetNotVisible), HintLevel::FixHint);
+        assert_eq!(hint_ladder(&RejectionReason::NoPath), HintLevel::FixHint);
+    }
+
+    #[test]
+    fn hint_ladder_defaults_to_fixhint() {
+        use crate::command::RejectionReason;
+        assert_eq!(hint_ladder(&RejectionReason::InternalError), HintLevel::FixHint);
+        assert_eq!(hint_ladder(&RejectionReason::ServerOverloaded), HintLevel::FixHint);
+    }
+
+    #[test]
+    fn format_hint_safe_empty() {
+        use crate::command::RejectionReason;
+        let msg = format_hint(&RejectionReason::NotVisibleOrNotFound, HintLevel::Safe);
+        assert!(msg.is_empty(), "Safe should return empty string, got '{msg}'");
+    }
+
+    #[test]
+    fn format_hint_fixhint_generic() {
+        use crate::command::RejectionReason;
+        let msg = format_hint(&RejectionReason::NotVisibleOrNotFound, HintLevel::FixHint);
+        assert!(!msg.is_empty(), "FixHint should return a hint message");
+        assert!(msg.contains("not visible"), "FixHint should be generic, got '{msg}'");
+
+        let msg = format_hint(&RejectionReason::OutOfRange { distance: 5, max: 3 }, HintLevel::FixHint);
+        assert!(msg.contains("out of range"), "FixHint should be generic, got '{msg}'");
+    }
+
+    #[test]
+    fn format_hint_fulldebug_detailed() {
+        use crate::command::RejectionReason;
+        let msg = format_hint(&RejectionReason::NotVisibleOrNotFound, HintLevel::FullDebug);
+        assert!(msg.contains("NotVisibleOrNotFound"), "FullDebug should include variant name, got '{msg}'");
+    }
+
+    // ── Oracle defence: omitted_count bucketing (§10.2) ──
+
+    #[test]
+    fn omitted_count_bucket_boundaries() {
+        assert_eq!(omitted_count_bucket(0), "0");
+        assert_eq!(omitted_count_bucket(1), "few");
+        assert_eq!(omitted_count_bucket(10), "few");
+        assert_eq!(omitted_count_bucket(11), "some");
+        assert_eq!(omitted_count_bucket(50), "some");
+        assert_eq!(omitted_count_bucket(51), "many");
+        assert_eq!(omitted_count_bucket(200), "many");
+        assert_eq!(omitted_count_bucket(201), "extreme");
+        assert_eq!(omitted_count_bucket(1000), "extreme");
+    }
+
+    // ── Spectate tests (§3.5) ──
+
+    #[test]
+    fn spectate_disabled_returns_empty() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let visible = spectate_visible_entities(world.app.world_mut(), 100, false, 50);
+        assert!(visible.is_empty(), "public_spectate=false should return empty");
+    }
+
+    #[test]
+    fn spectate_delay_not_met_returns_empty() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let visible = spectate_visible_entities(world.app.world_mut(), 30, true, 50);
+        assert!(visible.is_empty(), "tick < spectate_delay should return empty");
+    }
+
+    #[test]
+    fn spectate_enabled_returns_entities_after_delay() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        world.spawn_drone(2, 40, 40, vec![BodyPart::Move]);
+        let visible = spectate_visible_entities(world.app.world_mut(), 100, true, 50);
+        assert!(!visible.is_empty(), "spectators should see entities after delay");
     }
 }
