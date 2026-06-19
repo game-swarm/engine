@@ -839,9 +839,21 @@ pub struct SwarmWorld {
 }
 
 impl SwarmWorld {
+    pub fn tick_head(&self) -> Tick {
+        self.app.world().resource::<CurrentTick>().0
+    }
+
     pub fn run_tick(&mut self) {
+        let tick = self.tick_head();
+        self.run_tick_for(tick);
+    }
+
+    pub fn run_tick_for(&mut self, tick: Tick) {
+        let current = self.tick_head();
+        assert!(tick >= current, "tick_head cannot move backwards");
+        self.app.world_mut().resource_mut::<CurrentTick>().0 = tick;
         self.app.update();
-        self.app.world_mut().resource_mut::<CurrentTick>().0 += 1;
+        self.app.world_mut().resource_mut::<CurrentTick>().0 = tick + 1;
     }
 
     pub fn submit_intent(
