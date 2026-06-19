@@ -18,6 +18,46 @@ use crate::security::{SecurityAlert, SecurityAuditor};
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
 use crate::world::{SwarmWorld, WorldConfig};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TickPhase {
+    Collect,
+    Execute,
+    Apply,
+    Persist,
+}
+
+pub const MAIN_TICK_PHASES: [TickPhase; 4] = [
+    TickPhase::Collect,
+    TickPhase::Execute,
+    TickPhase::Apply,
+    TickPhase::Persist,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TickLoop {
+    tick: Tick,
+    phases: Vec<TickPhase>,
+}
+
+impl TickLoop {
+    fn new(tick: Tick) -> Self {
+        Self {
+            tick,
+            phases: Vec::with_capacity(MAIN_TICK_PHASES.len()),
+        }
+    }
+
+    fn enter(&mut self, phase: TickPhase) {
+        let expected = MAIN_TICK_PHASES[self.phases.len()];
+        assert_eq!(phase, expected, "tick phase order violation");
+        self.phases.push(phase);
+    }
+
+    fn finish(&self) {
+        assert_eq!(self.phases, MAIN_TICK_PHASES);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickSnapshot {
     pub tick: Tick,
@@ -694,6 +734,7 @@ where
 
     pub fn tick(&mut self) -> TickReport {
         let tick = self.tick_counter;
+        let mut tick_loop = TickLoop::new(tick);
         let started_at = Instant::now();
         let state_checksum = self.world.state_checksum();
 
@@ -706,6 +747,7 @@ where
             .filter(|cache| cache.matches(tick, state_checksum));
 
         let collect_started_at = Instant::now();
+        tick_loop.enter(TickPhase::Collect);
         let raw_commands = if let Some(cache) = cache_hit {
             debug_assert!(
                 cache.fuel_metrics.fuel_consumed <= MAX_FUEL,
@@ -781,7 +823,8 @@ where
             };
             let attempt_commands = remap_commands(raw_commands.clone(), &entity_map);
             let execute_started_at = Instant::now();
-            let execution = execute_deterministic(&mut self.world, attempt_commands);
+            let execution =
+                execute_deterministic_with_loop(&mut self.world, attempt_commands, &mut tick_loop);
             let execute_duration_ms = execute_started_at.elapsed().as_millis() as u64;
             self.metrics.execute_duration_ms = execute_duration_ms;
             if execute_duration_ms > EXECUTE_TIMEOUT_MS {
@@ -815,6 +858,7 @@ where
             last_accepted = accepted;
             last_rejections = rejections;
             last_security_alerts = trace.security_alerts.clone();
+            tick_loop.enter(TickPhase::Persist);
             if self
                 .committer
                 .commit_with_environment(trace.clone(), environment)
@@ -826,6 +870,9 @@ where
             self.metrics = metrics_before_execution;
             self.metrics.commit_failures += 1;
             world_snapshot.clone().restore(self.world.app.world_mut());
+            self.world.app.world_mut().resource_mut::<CurrentTick>().0 = tick;
+            tick_loop = TickLoop::new(tick);
+            tick_loop.enter(TickPhase::Collect);
         }
 
         let Some(trace) = committed_trace else {
@@ -842,6 +889,7 @@ where
         };
 
         self.tick_counter += 1;
+        tick_loop.finish();
         self.collect_cache = None;
         self.degraded_mode.record_committed_tick();
         let broadcast = TickBroadcast {
@@ -910,6 +958,7 @@ where
 
     pub fn tick(&mut self) -> TickReport {
         let tick = self.tick_counter;
+        let mut tick_loop = TickLoop::new(tick);
         let started_at = Instant::now();
         let snapshot = TickSnapshot {
             tick,
@@ -917,6 +966,7 @@ where
             state_checksum: self.world.state_checksum(),
         };
         let collect_started_at = Instant::now();
+        tick_loop.enter(TickPhase::Collect);
         let intents = match self.executor.collect(snapshot) {
             Ok(intents) => intents,
             Err(ExecutorError::Timeout) => {
@@ -955,7 +1005,8 @@ where
             };
             let attempt_commands = remap_commands(raw_commands.clone(), &entity_map);
             let execute_started_at = Instant::now();
-            let execution = execute_deterministic(&mut self.world, attempt_commands);
+            let execution =
+                execute_deterministic_with_loop(&mut self.world, attempt_commands, &mut tick_loop);
             let execute_duration_ms = execute_started_at.elapsed().as_millis() as u64;
             self.metrics.execute_duration_ms = execute_duration_ms;
             if execute_duration_ms > EXECUTE_TIMEOUT_MS {
@@ -988,6 +1039,7 @@ where
             last_accepted = accepted;
             last_rejections = rejections;
             last_security_alerts = trace.security_alerts.clone();
+            tick_loop.enter(TickPhase::Persist);
             if self
                 .committer
                 .commit_with_environment(trace.clone(), environment)
@@ -999,6 +1051,9 @@ where
             self.metrics = metrics_before_execution;
             self.metrics.commit_failures += 1;
             world_snapshot.clone().restore(self.world.app.world_mut());
+            self.world.app.world_mut().resource_mut::<CurrentTick>().0 = tick;
+            tick_loop = TickLoop::new(tick);
+            tick_loop.enter(TickPhase::Collect);
         }
 
         let Some(trace) = committed_trace else {
@@ -1015,6 +1070,7 @@ where
         };
 
         self.tick_counter += 1;
+        tick_loop.finish();
         self.degraded_mode.record_committed_tick();
         let broadcast = TickBroadcast {
             tick,
@@ -1060,6 +1116,9 @@ impl TickCommitter for InMemoryTickCommitter {
         if self.fail_count > 0 {
             self.fail_count -= 1;
             return Err(CommitError::Failed("in-memory commit failed".to_string()));
+        }
+        if self.records.iter().any(|record| record.tick == trace.tick) {
+            return Err(CommitError::Failed("duplicate tick commit".to_string()));
         }
 
         self.records.push(trace);
@@ -1197,12 +1256,28 @@ pub fn execute_deterministic(
     world: &mut SwarmWorld,
     commands: Vec<RawCommand>,
 ) -> DeterministicExecution {
+    let tick = commands
+        .first()
+        .map(|command| command.tick)
+        .unwrap_or_else(|| world.tick_head());
+    let mut tick_loop = TickLoop::new(tick);
+    tick_loop.enter(TickPhase::Collect);
+    execute_deterministic_with_loop(world, commands, &mut tick_loop)
+}
+
+fn execute_deterministic_with_loop(
+    world: &mut SwarmWorld,
+    commands: Vec<RawCommand>,
+    tick_loop: &mut TickLoop,
+) -> DeterministicExecution {
+    tick_loop.enter(TickPhase::Execute);
     run_tick_start_scripts(world.app.world_mut());
     let mut accepted = Vec::new();
     let mut rejections = Vec::new();
     let mut refunds = RefundAccumulator::default();
     for raw in commands {
-        world.app.world_mut().resource_mut::<CurrentTick>().0 = raw.tick;
+        let current_tick = world.tick_head();
+        world.app.world_mut().resource_mut::<CurrentTick>().0 = current_tick.max(raw.tick);
         match validate_command(world.app.world_mut(), raw.clone()) {
             Ok(validated) => match apply_command(world.app.world_mut(), validated) {
                 Ok(()) => accepted.push(raw),
@@ -1220,7 +1295,8 @@ pub fn execute_deterministic(
         }
     }
 
-    world.run_tick();
+    tick_loop.enter(TickPhase::Apply);
+    world.run_tick_for(tick_loop.tick);
     let state_checksum = world.state_checksum();
     let state = TickState::capture(world.app.world_mut());
     DeterministicExecution {
@@ -1251,7 +1327,9 @@ pub fn replay_tick(
     let mut world = crate::world::create_world();
     let entity_map = previous_state.clone().restore(world.app.world_mut());
     let replay_commands = remap_commands(trace.commands.clone(), &entity_map);
-    let mut replayed = execute_deterministic(&mut world, replay_commands);
+    let mut tick_loop = TickLoop::new(trace.tick);
+    tick_loop.enter(TickPhase::Collect);
+    let mut replayed = execute_deterministic_with_loop(&mut world, replay_commands, &mut tick_loop);
     replayed.state = replayed.state.remap_keys(&entity_map.inverse());
     if replayed.state != trace.state {
         return Err(ReplayError::StateMismatch {
@@ -2275,6 +2353,106 @@ mod tests {
                 .unwrap()
                 .age,
             2
+        );
+    }
+
+    #[test]
+    fn main_tick_loop_declares_collect_execute_apply_persist_order() {
+        let mut tick_loop = TickLoop::new(3);
+
+        for phase in MAIN_TICK_PHASES {
+            tick_loop.enter(phase);
+        }
+
+        tick_loop.finish();
+        assert_eq!(tick_loop.phases[0], TickPhase::Collect);
+        assert_eq!(tick_loop.phases[1], TickPhase::Execute);
+        assert_eq!(tick_loop.phases[2], TickPhase::Apply);
+        assert_eq!(tick_loop.phases[3], TickPhase::Persist);
+    }
+
+    #[test]
+    fn tick_head_increments_monotonically_with_committed_ticks() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let executor = StaticExecutor {
+            result: Ok(vec![CommandIntent {
+                sequence: 1,
+                action: CommandAction::Move {
+                    object_id: object_id(drone),
+                    direction: Direction::Top,
+                },
+            }]),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        assert_eq!(scheduler.world.tick_head(), 0);
+        scheduler.tick();
+        assert_eq!(scheduler.tick_counter, 1);
+        assert_eq!(scheduler.world.tick_head(), 1);
+        scheduler.executor.result = Ok(Vec::new());
+        scheduler.tick();
+
+        assert_eq!(scheduler.tick_counter, 2);
+        assert_eq!(scheduler.world.tick_head(), 2);
+        assert_eq!(scheduler.committer.records[0].tick, 0);
+        assert_eq!(scheduler.committer.records[1].tick, 1);
+    }
+
+    #[test]
+    fn single_command_failure_is_rejected_without_stopping_following_commands() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let executor = StaticExecutor {
+            result: Ok(vec![
+                CommandIntent {
+                    sequence: 1,
+                    action: CommandAction::Harvest {
+                        object_id: object_id(drone),
+                        target_id: 0,
+                        resource: None,
+                    },
+                },
+                CommandIntent {
+                    sequence: 2,
+                    action: CommandAction::Move {
+                        object_id: object_id(drone),
+                        direction: Direction::Top,
+                    },
+                },
+            ]),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(report.committed);
+        assert_eq!(report.rejections.len(), 1);
+        assert_eq!(report.accepted.len(), 1);
+        assert_eq!(report.metrics.rejected_commands, 1);
+        assert_eq!(report.metrics.accepted_commands, 1);
+        assert_eq!(
+            scheduler
+                .world
+                .app
+                .world()
+                .entity(drone)
+                .get::<Position>()
+                .unwrap()
+                .y,
+            9
         );
     }
 
