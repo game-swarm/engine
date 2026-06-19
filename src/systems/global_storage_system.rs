@@ -4,6 +4,7 @@ use crate::components::{Drone, Owner, Position};
 use crate::resources::{
     GlobalStorageConfig, GlobalTransferDirection, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, ResourceCost, ResourceName,
+    PendingAlliedTransfers,
 };
 
 pub fn global_storage_system(
@@ -185,5 +186,34 @@ mod tests {
         assert_eq!(progressive_tax(60_000, 100_000, &tiers), 3);
         assert_eq!(progressive_tax(85_000, 100_000, &tiers), 15);
         assert_eq!(progressive_tax(100_000, 100_000, &tiers), 45);
+    }
+}
+
+// ── Associated Functions ──
+
+/// Process pending allied transfers — decrement timers and deliver when ready.
+pub fn allied_transfer_system(
+    mut pending: ResMut<PendingAlliedTransfers>,
+    mut global_storage: ResMut<PlayerGlobalStorage>,
+) {
+    let mut delivered = Vec::new();
+    let mut remaining = Vec::new();
+
+    for mut transfer in std::mem::take(&mut pending.0) {
+        transfer.remaining_ticks = transfer.remaining_ticks.saturating_sub(1);
+        if transfer.remaining_ticks == 0 {
+            delivered.push(transfer);
+        } else {
+            remaining.push(transfer);
+        }
+    }
+    pending.0 = remaining;
+
+    for transfer in delivered {
+        let target = global_storage
+            .0
+            .entry(transfer.to_player)
+            .or_default();
+        add_resource(target, transfer.resource, transfer.deliver_amount);
     }
 }

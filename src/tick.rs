@@ -1446,7 +1446,9 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
                 remap_object_id(target_id, entity_map);
             }
         }
-        CommandAction::TransferToGlobal { .. } | CommandAction::TransferFromGlobal { .. } => {}
+        CommandAction::TransferToGlobal { .. }
+        | CommandAction::TransferFromGlobal { .. }
+        | CommandAction::AlliedTransfer { .. } => {}
     }
 }
 

@@ -15,6 +15,11 @@ pub const TRANSFER_TO_GLOBAL_FEE_PER_10_000: u32 = 100;
 pub const TRANSFER_FROM_GLOBAL_FEE_PER_10_000: u32 = 500;
 pub const GLOBAL_STORAGE_INTERCEPT_RANGE: u32 = 3;
 pub const DEFAULT_MAX_PVE_OUTPUT_PER_TICK: ResourceAmount = ResourceAmount::MAX;
+pub const ALLIED_TRANSFER_FEE_BP: u32 = 200;
+pub const ALLIED_TRANSFER_DELAY: Tick = 200;
+pub const ALLIED_TRANSFER_COOLDOWN: Tick = 500;
+pub const ALLIED_DAILY_CAP: u32 = 10_000;
+pub const NEW_PLAYER_TRANSFER_LOCK: Tick = 500;
 
 #[derive(BevyResource, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentTick(pub Tick);
@@ -107,6 +112,33 @@ pub enum GlobalTransferDirection {
     ToGlobal,
     FromGlobal,
 }
+
+// ── Allied Transfer tracking ──
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAlliedTransfer {
+    pub from_player: PlayerId,
+    pub to_player: PlayerId,
+    pub resource: ResourceName,
+    pub amount: ResourceAmount,
+    pub deliver_amount: ResourceAmount,
+    pub remaining_ticks: Tick,
+}
+
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAlliedTransfers(pub Vec<PendingAlliedTransfer>);
+
+/// Cooldowns: (from_player, to_player) → next_allowed_tick
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlliedTransferCooldowns(pub IndexMap<(PlayerId, PlayerId), Tick>);
+
+/// Daily usage tracking per sender: sum of all allied transfers per "day" (1440 ticks = 24h at 1 tick/min)
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlliedTransferDailyUsage(pub IndexMap<PlayerId, u32>);
+
+/// Tracks which ticks have been counted for daily usage (avoids double-counting replays)
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlliedTransferDailyTick(pub Tick);
 
 impl Default for GlobalStorageConfig {
     fn default() -> Self {

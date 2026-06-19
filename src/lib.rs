@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn command_action_and_rejection_registries_match_api_surface() {
-        assert_eq!(CORE_COMMAND_ACTIONS.len(), 21);
+        assert_eq!(CORE_COMMAND_ACTIONS.len(), 22);
         assert_eq!(CANONICAL_REJECTION_REASONS.len(), 47);
 
         let action: CommandAction =
@@ -733,7 +733,7 @@ mod tests {
             &CustomActionRegistry::default(),
         );
 
-        assert_eq!(idl.core.commands.len(), 21);
+        assert_eq!(idl.core.commands.len(), 22);
         assert!(
             idl.core
                 .commands
@@ -2218,5 +2218,232 @@ mod tests {
         // Standard upkeep for 1 room = 55, but free upkeep exempts it
         // Energy should remain ~10000 + 5000 (starting) = 15000
         assert_eq!(after_storage.get("Energy").copied().unwrap_or(0), 15000);
+    }
+
+    // ── P2-8 Allied Transfer tests ──
+
+    #[test]
+    fn allied_transfer_deducts_from_sender_global_storage() {
+        let mut world = create_world();
+        // Seed sender with resources
+        world
+            .app
+            .world_mut()
+            .resource_mut::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 10000);
+        // Seed target with first spawn record (to pass transfer lock)
+        world.spawn_drone(2, 20, 20, vec![BodyPart::Move]);
+        world.run_tick_for(1); // register spawn at tick 1
+        world.run_tick_for(510); // 510 > NEW_PLAYER_TRANSFER_LOCK (500)
+
+        // Execute allied transfer
+        let result = world.submit_raw_command(RawCommand {
+            player_id: 1,
+            tick: 511,
+            source: crate::command::CommandSource::TestHarness,
+            auth: crate::command::CommandAuth {
+                source: crate::command::CommandSource::TestHarness,
+                player_id: 1,
+                tick_submitted: 511,
+                tick_target: 511,
+            },
+            sequence: 0,
+            action: CommandAction::AlliedTransfer {
+                target_player: 2,
+                resource: "Energy".to_string(),
+                amount: 1000,
+            },
+        });
+        assert!(result.is_ok(), "transfer should succeed: {:?}", result.err());
+
+        // Verify sender deducted: 10000 - 1000 = 9000
+        let sender_storage = world
+            .app
+            .world()
+            .resource::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .get(&1)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(sender_storage.get("Energy").copied().unwrap_or(0), 9000);
+    }
+
+    #[test]
+    fn allied_transfer_rejects_self_transfer() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        world.run_tick_for(1);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 5000);
+
+        let result = world.submit_raw_command(RawCommand {
+            player_id: 1,
+            tick: 2,
+            source: crate::command::CommandSource::TestHarness,
+            auth: crate::command::CommandAuth {
+                source: crate::command::CommandSource::TestHarness,
+                player_id: 1,
+                tick_submitted: 2,
+                tick_target: 2,
+            },
+            sequence: 0,
+            action: CommandAction::AlliedTransfer {
+                target_player: 1,
+                resource: "Energy".to_string(),
+                amount: 100,
+            },
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn allied_transfer_rejects_new_player_target() {
+        let mut world = create_world();
+        // Player 1 has spawn record
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        world.run_tick_for(1);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 5000);
+        // Player 2 has no spawn — should be rejected
+        let result = world.submit_raw_command(RawCommand {
+            player_id: 1,
+            tick: 2,
+            source: crate::command::CommandSource::TestHarness,
+            auth: crate::command::CommandAuth {
+                source: crate::command::CommandSource::TestHarness,
+                player_id: 1,
+                tick_submitted: 2,
+                tick_target: 2,
+            },
+            sequence: 0,
+            action: CommandAction::AlliedTransfer {
+                target_player: 2,
+                resource: "Energy".to_string(),
+                amount: 100,
+            },
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn allied_transfer_applies_200bp_fee() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        world.spawn_drone(2, 20, 20, vec![BodyPart::Move]);
+        world.run_tick_for(1);  // register spawns at tick 1
+        world.run_tick_for(510);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 10000);
+
+        world.submit_raw_command(RawCommand {
+            player_id: 1,
+            tick: 511,
+            source: crate::command::CommandSource::TestHarness,
+            auth: crate::command::CommandAuth {
+                source: crate::command::CommandSource::TestHarness,
+                player_id: 1,
+                tick_submitted: 511,
+                tick_target: 511,
+            },
+            sequence: 0,
+            action: CommandAction::AlliedTransfer {
+                target_player: 2,
+                resource: "Energy".to_string(),
+                amount: 1000,
+            },
+        }).unwrap();
+
+        // After 200 ticks, delivery should complete with 1000 - 20 (2% fee) = 980
+        for t in 511..=710 {
+            world.run_tick_for(t);
+        }
+
+        let target_storage = world
+            .app
+            .world()
+            .resource::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .get(&2)
+            .cloned()
+            .unwrap_or_default();
+        // Player 2 received: 5000 (starting) + 980 (transfer after 200bp fee)
+        assert_eq!(target_storage.get("Energy").copied().unwrap_or(0), 5000 + 980);
+    }
+
+    #[test]
+    fn allied_transfer_respects_cooldown() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        world.spawn_drone(2, 20, 20, vec![BodyPart::Move]);
+        world.run_tick_for(1);  // register spawns at tick 1
+        world.run_tick_for(510);
+        world
+            .app
+            .world_mut()
+            .resource_mut::<crate::resources::PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 10000);
+
+        // First transfer succeeds
+        assert!(world.submit_raw_command(RawCommand {
+            player_id: 1,
+            tick: 511,
+            source: crate::command::CommandSource::TestHarness,
+            auth: crate::command::CommandAuth {
+                source: crate::command::CommandSource::TestHarness,
+                player_id: 1,
+                tick_submitted: 511,
+                tick_target: 511,
+            },
+            sequence: 0,
+            action: CommandAction::AlliedTransfer {
+                target_player: 2,
+                resource: "Energy".to_string(),
+                amount: 100,
+            },
+        }).is_ok());
+
+        // Second transfer within cooldown should fail
+        let result2 = world.submit_raw_command(RawCommand {
+            player_id: 1,
+            tick: 512,
+            source: crate::command::CommandSource::TestHarness,
+            auth: crate::command::CommandAuth {
+                source: crate::command::CommandSource::TestHarness,
+                player_id: 1,
+                tick_submitted: 512,
+                tick_target: 512,
+            },
+            sequence: 0,
+            action: CommandAction::AlliedTransfer {
+                target_player: 2,
+                resource: "Energy".to_string(),
+                amount: 100,
+            },
+        });
+        assert!(result2.is_err());
     }
 }

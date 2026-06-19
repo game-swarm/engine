@@ -9,6 +9,9 @@ use crate::onboarding::{OnboardingEvent, send_onboarding_event};
 use crate::resources::{
     GlobalStorageConfig, GlobalTransferDirection, PendingGlobalTransfer, PendingGlobalTransfers,
     PlayerGlobalStorage, PlayerLocalStorage, ResourceCost, ResourceRegistry,
+    ALLIED_TRANSFER_COOLDOWN, ALLIED_TRANSFER_DELAY, ALLIED_TRANSFER_FEE_BP,
+    ALLIED_DAILY_CAP, NEW_PLAYER_TRANSFER_LOCK, PendingAlliedTransfer, PendingAlliedTransfers,
+    AlliedTransferCooldowns, AlliedTransferDailyUsage, CurrentTick,
 };
 use crate::systems::{PendingControllerUpgrade, PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
 
@@ -122,6 +125,11 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
+    AlliedTransfer {
+        target_player: PlayerId,
+        resource: String,
+        amount: u32,
+    },
     Custom {
         action_type: String,
         object_id: ObjectId,
@@ -146,6 +154,7 @@ pub const CORE_COMMAND_ACTIONS: &[&str] = &[
     "Build",
     "TransferToGlobal",
     "TransferFromGlobal",
+    "AlliedTransfer",
     "Hack",
     "Drain",
     "Overload",
@@ -187,6 +196,7 @@ struct CommandActionWire {
     price_resource: Option<String>,
     price_amount: Option<u32>,
     order_id: Option<u64>,
+    target_player: Option<PlayerId>,
 }
 
 impl<'de> Deserialize<'de> for CommandAction {
@@ -258,6 +268,11 @@ impl<'de> Deserialize<'de> for CommandAction {
                 amount: required!(wire.amount, "amount"),
             },
             "TransferFromGlobal" => Self::TransferFromGlobal {
+                resource: required!(wire.resource, "resource"),
+                amount: required!(wire.amount, "amount"),
+            },
+            "AlliedTransfer" => Self::AlliedTransfer {
+                target_player: required!(wire.target_player, "target_player"),
                 resource: required!(wire.resource, "resource"),
                 amount: required!(wire.amount, "amount"),
             },
@@ -380,6 +395,16 @@ impl Serialize for CommandAction {
             }
             Self::TransferFromGlobal { resource, amount } => {
                 map.serialize_entry("type", "TransferFromGlobal")?;
+                map.serialize_entry("resource", resource)?;
+                map.serialize_entry("amount", amount)?;
+            }
+            Self::AlliedTransfer {
+                target_player,
+                resource,
+                amount,
+            } => {
+                map.serialize_entry("type", "AlliedTransfer")?;
+                map.serialize_entry("target_player", target_player)?;
                 map.serialize_entry("resource", resource)?;
                 map.serialize_entry("amount", amount)?;
             }
@@ -547,6 +572,8 @@ pub enum RejectionReason {
         damage_type: String,
     },
     PlayerNotFound,
+    TargetTransferLocked,
+    DailyTransferCapExceeded,
     TargetFuelTooLow,
     FuelExhausted,
     SafeModeActive,
@@ -874,6 +901,11 @@ pub fn validate_command(
         CommandAction::TransferFromGlobal { resource, amount } => {
             validate_transfer_from_global(world, raw.player_id, resource, *amount)
         }
+        CommandAction::AlliedTransfer {
+            target_player,
+            resource,
+            amount,
+        } => validate_allied_transfer(world, raw.player_id, *target_player, resource, *amount),
         CommandAction::Custom {
             action_type,
             object_id,
@@ -1021,7 +1053,9 @@ fn action_triggers_combat(action: &CommandAction) -> bool {
 fn action_uses_global_storage(action: &CommandAction) -> bool {
     matches!(
         action,
-        CommandAction::TransferToGlobal { .. } | CommandAction::TransferFromGlobal { .. }
+        CommandAction::TransferToGlobal { .. }
+            | CommandAction::TransferFromGlobal { .. }
+            | CommandAction::AlliedTransfer { .. }
     )
 }
 
@@ -1099,6 +1133,11 @@ pub fn available_action_metadata(world: &World) -> Vec<CommandActionMetadata> {
             "TransferFromGlobal",
             "Transfer global resources to local storage",
             &["resource", "amount"],
+        ),
+        builtin_action_metadata(
+            "AlliedTransfer",
+            "Transfer resources to an allied player (200bp fee, 200 tick delay)",
+            &["target_player", "resource", "amount"],
         ),
     ];
     if let Some(registry) = world.get_resource::<CustomActionRegistry>() {
@@ -1194,6 +1233,7 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Build { .. } => "Build",
         CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
         CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
+        CommandAction::AlliedTransfer { .. } => "AlliedTransfer",
         CommandAction::Custom { action_type, .. } => action_type,
     };
 
@@ -1407,6 +1447,8 @@ fn canonical_rejection_reason(rejection: &RejectionReason) -> &'static str {
         RejectionReason::RoomDroneCapReached => "RoomDroneCapReached",
         RejectionReason::GlobalStorageDisabled => "GlobalStorageDisabled",
         RejectionReason::TransferInProgress => "TransferInProgress",
+        RejectionReason::TargetTransferLocked => "TargetTransferLocked",
+        RejectionReason::DailyTransferCapExceeded => "DailyTransferCapExceeded",
         RejectionReason::PlayerNotFound => "NotVisibleOrNotFound",
         RejectionReason::FuelExhausted => "FuelExhausted",
         RejectionReason::SafeModeActive => "SafeModeActive",
@@ -1578,6 +1620,11 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         CommandAction::TransferFromGlobal { resource, amount } => {
             apply_transfer_from_global(world, player_id, &resource, amount)
         }
+        CommandAction::AlliedTransfer {
+            target_player,
+            resource,
+            amount,
+        } => apply_allied_transfer(world, player_id, target_player, &resource, amount),
         CommandAction::Custom {
             action_type,
             object_id,
@@ -2891,6 +2938,119 @@ fn heal_drone(world: &mut World, object_id: ObjectId, amount: u32) {
             drone.hits = (drone.hits + amount).min(drone.hits_max);
         }
     }
+}
+
+// ── P2-8 Allied Transfer ──
+
+fn validate_allied_transfer(
+    world: &mut World,
+    from_player: PlayerId,
+    to_player: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    if from_player == to_player {
+        return Err(RejectionReason::NotFriendly);
+    }
+
+    // Check new player transfer lock: target must have been in world ≥ NEW_PLAYER_TRANSFER_LOCK ticks
+    let first_spawn = world
+        .resource::<crate::systems::PlayerFirstSpawnTick>();
+    let current_tick = world.resource::<CurrentTick>().0;
+    if let Some(spawn_tick) = first_spawn.0.get(&to_player) {
+        let elapsed = current_tick.saturating_sub(*spawn_tick);
+        if elapsed < NEW_PLAYER_TRANSFER_LOCK {
+            return Err(RejectionReason::TargetTransferLocked);
+        }
+    } else {
+        // Target player has no spawn record — cannot receive transfers
+        return Err(RejectionReason::PlayerNotFound);
+    }
+
+    // Check cooldown
+    let cooldowns = world.resource::<AlliedTransferCooldowns>();
+    if let Some(next_allowed) = cooldowns.0.get(&(from_player, to_player)) {
+        if current_tick < *next_allowed {
+            return Err(RejectionReason::CooldownActive);
+        }
+    }
+
+    // Check daily cap
+    let daily_usage = world.resource::<AlliedTransferDailyUsage>();
+    let used = daily_usage.0.get(&from_player).copied().unwrap_or_default();
+    if used.saturating_add(amount) > ALLIED_DAILY_CAP {
+        return Err(RejectionReason::DailyTransferCapExceeded);
+    }
+
+    // Check sender has enough in global storage
+    let available = world
+        .resource::<PlayerGlobalStorage>()
+        .0
+        .get(&from_player)
+        .and_then(|storage| storage.get(resource))
+        .copied()
+        .unwrap_or_default();
+    if available < amount {
+        return Err(RejectionReason::InsufficientResource {
+            resource: resource.to_string(),
+            required: amount,
+            available,
+        });
+    }
+
+    Ok(())
+}
+
+fn apply_allied_transfer(
+    world: &mut World,
+    from_player: PlayerId,
+    to_player: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    let fee = amount.saturating_mul(ALLIED_TRANSFER_FEE_BP) / 10_000;
+    let deliver_amount = amount.saturating_sub(fee);
+
+    // Deduct from sender's global storage
+    subtract_player_resource(
+        world
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(from_player)
+            .or_default(),
+        resource,
+        amount,
+    );
+
+    // Apply cooldown
+    let current_tick = world.resource::<CurrentTick>().0;
+    world
+        .resource_mut::<AlliedTransferCooldowns>()
+        .0
+        .insert((from_player, to_player), current_tick + ALLIED_TRANSFER_COOLDOWN);
+
+    // Track daily usage
+    world
+        .resource_mut::<AlliedTransferDailyUsage>()
+        .0
+        .entry(from_player)
+        .and_modify(|used| *used = used.saturating_add(amount))
+        .or_insert(amount);
+
+    // Queue pending delivery
+    world
+        .resource_mut::<PendingAlliedTransfers>()
+        .0
+        .push(PendingAlliedTransfer {
+            from_player,
+            to_player,
+            resource: resource.to_string(),
+            amount,
+            deliver_amount,
+            remaining_ticks: ALLIED_TRANSFER_DELAY,
+        });
+
+    Ok(())
 }
 
 fn apply_transfer_to_global(

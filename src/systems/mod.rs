@@ -34,7 +34,7 @@ pub use depot_repair_system::depot_repair_system;
 pub use drone_env_var_system::{
     DroneEnvVarError, DroneEnvVars, drone_env_var_system, read_drone_env_var, write_drone_env_var,
 };
-pub use global_storage_system::global_storage_system;
+pub use global_storage_system::{allied_transfer_system, global_storage_system};
 pub use memory_upkeep_system::{EmpireUpkeepDeficits, memory_upkeep_system};
 pub use pvp_block_system::pvp_block_system;
 pub use regeneration_system::regeneration_system;

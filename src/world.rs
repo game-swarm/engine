@@ -864,6 +864,13 @@ impl WorldConfig {
                 seed_rotation_system,
                 cargo_in_transit_system,
                 global_storage_system,
+                allied_transfer_system,
+            )
+                .chain(),
+        );
+        app.add_systems(
+            Update,
+            (
                 controller_system,
                 controller_repair_system,
                 depot_repair_system,
@@ -876,7 +883,8 @@ impl WorldConfig {
                 death_cleanup_system,
                 onboarding_system,
             )
-                .chain(),
+                .chain()
+                .after(global_storage_system),
         );
     }
 }
@@ -1195,6 +1203,9 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<ShardConfig>();
     app.init_resource::<crate::systems::StartingResourcesGranted>();
     app.init_resource::<crate::systems::PlayerFirstSpawnTick>();
+    app.init_resource::<crate::resources::PendingAlliedTransfers>();
+    app.init_resource::<crate::resources::AlliedTransferCooldowns>();
+    app.init_resource::<crate::resources::AlliedTransferDailyUsage>();
     app.init_resource::<SeedRotationState>();
     app.init_resource::<RoomStates>();
     app.init_resource::<EventState>();
