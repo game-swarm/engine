@@ -178,7 +178,7 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         "spawn_grace",
         SystemPhase::Phase2bDeferred,
         None,
-        &["Drone", "Room"],
+        &["SpawningGrace"],
         &["SpawningGrace"],
     ),
     system(
@@ -187,8 +187,8 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         "regen",
         SystemPhase::Phase2bDeferred,
         None,
-        &["Entity", "Room"],
-        &["HitPoints"],
+        &["Drone"],
+        &["Drone"],
     ),
     system(
         11,
@@ -327,8 +327,8 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         "decay",
         SystemPhase::Phase2bDeferred,
         Some(ParallelSet::WorldMaintenance),
-        &["Structure", "Drone", "Room"],
-        &["HitPoints", "Fatigue", "Cooldown"],
+        &["Structure", "Drone"],
+        &["Fatigue", "Cooldown"],
     ),
     system(
         25,
@@ -345,8 +345,8 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         "pvp_block",
         SystemPhase::Phase2bDeferred,
         None,
-        &["Room", "PlayerState"],
-        &["PvpBlock", "EventLog"],
+        &["WorldConfig", "Room"],
+        &["PendingCombat"],
     ),
     system(
         27,

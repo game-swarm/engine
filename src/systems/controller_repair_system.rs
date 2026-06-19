@@ -4,7 +4,7 @@ use crate::components::{Controller, Drone, Position, RepairTracker};
 use crate::resources::{PlayerGlobalStorage, ResourceRegistry};
 use crate::world::WorldConfig;
 
-/// Drone age repair system — handles Controller repair only.
+/// Drone body hits repair system — handles Controller repair only.
 /// Depot repair is handled separately in depot_repair_system.
 /// Both systems share RepairTracker to enforce the combined hard cap.
 /// Runs after command execution, before decay.

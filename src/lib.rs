@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn decay_reduces_fatigue_and_cooldown_and_increments_age() {
+    fn decay_reduces_fatigue_and_cooldown() {
         let mut world = create_world();
         let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         let structure = world
@@ -509,7 +509,8 @@ mod tests {
             .get::<Structure>()
             .unwrap();
         assert_eq!(drone_ref.fatigue, 1);
-        assert_eq!(drone_ref.age, 8);
+        // Age is no longer modified by decay_system (moved to aging_system in W13)
+        assert_eq!(drone_ref.age, 7);
         assert_eq!(structure_ref.cooldown, 2);
     }
 
