@@ -16,6 +16,7 @@ use crate::resources::{
 };
 use crate::rule_module::{RhaiRuleModules, run_tick_start_scripts};
 use crate::security::{SecurityAlert, SecurityAuditor};
+use crate::sim::{SnapshotConfig, collect_snapshots};
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
 use crate::world::{SwarmWorld, WorldConfig};
 
@@ -1255,6 +1256,27 @@ pub fn execute_deterministic(
         .unwrap_or_else(|| world.tick_head());
     let mut tick_loop = TickLoop::new(tick);
     tick_loop.enter(TickPhase::Collect);
+
+    // P0-6: Build per-drone snapshots during COLLECT phase
+    let fog_of_war = world
+        .app
+        .world()
+        .resource::<WorldConfig>()
+        .visibility
+        .fog_of_war;
+    let snapshot_config = SnapshotConfig {
+        fog_of_war,
+        ..Default::default()
+    };
+    // Collect player IDs from commands
+    let player_ids: Vec<PlayerId> = commands
+        .iter()
+        .map(|c| c.player_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let _snapshots = collect_snapshots(world.app.world_mut(), &player_ids, tick, &snapshot_config);
+
     execute_deterministic_with_loop(world, commands, &mut tick_loop)
 }
 
