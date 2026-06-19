@@ -16,6 +16,7 @@ pub mod pve;
 pub mod ranking;
 pub mod realtime;
 pub mod replay_storage;
+pub mod resource_ledger;
 pub mod resources;
 pub mod rule_module;
 pub mod scheduler;
