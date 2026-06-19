@@ -50,6 +50,7 @@ pub struct WorldConfig {
     pub spawn: SpawnConfig,
     pub code: CodeConfig,
     pub drone: DroneConfig,
+    pub empire_upkeep: EmpireUpkeepConfig,
     pub visibility: VisibilityConfig,
     pub events: EventConfig,
     pub pve: WorldPveConfig,
@@ -131,6 +132,72 @@ pub struct DroneConfig {
     pub max_body_parts: usize,
     pub max_drones_per_player: u32,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmpireUpkeepConfig {
+    pub enabled: bool,
+    pub base_upkeep: u32,
+    pub room_soft_cap: u32,
+    pub resource: String,
+    pub repair_cap: u32,
+    pub distance_decay_bp: u32,
+    pub recycle_refund_base: u32,
+    pub recycle_refund_min: u32,
+    pub tutorial_recycle_refund_full_ticks: Tick,
+}
+
+impl EmpireUpkeepConfig {
+    pub fn standard() -> Self {
+        Self { base_upkeep: 50, room_soft_cap: 10, ..Self::default() }
+    }
+
+    pub fn vanilla() -> Self {
+        Self { base_upkeep: 30, room_soft_cap: 15, ..Self::default() }
+    }
+
+    pub fn tutorial() -> Self {
+        Self { base_upkeep: 10, room_soft_cap: 20, ..Self::default() }
+    }
+
+    pub fn upkeep_cost(&self, rooms: u32) -> u32 {
+        if !self.enabled || rooms == 0 || self.room_soft_cap == 0 { return 0; }
+        let rooms = u64::from(rooms);
+        let soft_cap = u64::from(self.room_soft_cap);
+        let cost = u64::from(self.base_upkeep)
+            .saturating_mul(rooms)
+            .saturating_mul(soft_cap.saturating_add(rooms)) / soft_cap;
+        cost.min(u64::from(u32::MAX)) as u32
+    }
+
+    pub fn repair_cost(&self, body_cost: u32, distance: u32) -> u32 {
+        let unrepaired_bp = 10_000_u32.saturating_sub(self.repair_cap.min(10_000));
+        let distance_bp = 10_000_u64
+            .saturating_add(u64::from(distance).saturating_mul(u64::from(self.distance_decay_bp)));
+        let cost = u64::from(body_cost)
+            .saturating_mul(u64::from(unrepaired_bp))
+            .saturating_mul(distance_bp) / 100_000_000;
+        cost.min(u64::from(u32::MAX)) as u32
+    }
+
+    pub fn recycle_refund_rate_bp(&self, age: u32, lifespan: u32, tick: Tick, tutorial: bool) -> u32 {
+        if tutorial && tick < self.tutorial_recycle_refund_full_ticks { return 10_000; }
+        if lifespan == 0 { return self.recycle_refund_min.min(self.recycle_refund_base); }
+        let remaining = lifespan.saturating_sub(age);
+        let rate = u64::from(remaining).saturating_mul(u64::from(self.recycle_refund_base))
+            / u64::from(lifespan);
+        rate.max(u64::from(self.recycle_refund_min)).min(u64::from(self.recycle_refund_base)).min(10_000) as u32
+    }
+
+    pub fn recycle_refund_amount(&self, body_cost: u32, age: u32, lifespan: u32, tick: Tick, tutorial: bool) -> u32 {
+        let rate = self.recycle_refund_rate_bp(age, lifespan, tick, tutorial);
+        (u64::from(body_cost).saturating_mul(u64::from(rate)) / 10_000).min(u64::from(u32::MAX)) as u32
+    }
+}
+
+/// ═══════════════════════════════════════════════════════════════
+/// EmpireUpkeepConfig
+/// ═══════════════════════════════════════════════════════════════
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PlayerViewMode {
@@ -180,6 +247,7 @@ impl Default for WorldConfig {
             spawn: SpawnConfig::default(),
             code: CodeConfig::default(),
             drone: DroneConfig::default(),
+            empire_upkeep: EmpireUpkeepConfig::default(),
             visibility: VisibilityConfig::default(),
             events: EventConfig::default(),
             pve: WorldPveConfig::default(),
@@ -579,6 +647,23 @@ impl Default for DroneConfig {
         }
     }
 }
+
+impl Default for EmpireUpkeepConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_upkeep: 50,
+            room_soft_cap: 10,
+            resource: "Energy".to_string(),
+            repair_cap: 3_500,
+            distance_decay_bp: 500,
+            recycle_refund_base: 5_000,
+            recycle_refund_min: 1_000,
+            tutorial_recycle_refund_full_ticks: 500,
+        }
+    }
+}
+
 impl Default for PlayerViewMode {
     fn default() -> Self {
         Self::Drone

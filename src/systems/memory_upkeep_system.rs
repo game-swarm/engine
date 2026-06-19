@@ -1,23 +1,70 @@
 use bevy::prelude::*;
 
-use crate::components::Drone;
-use crate::resources::PlayerLocalStorage;
+use indexmap::{IndexMap, IndexSet};
+
+use crate::components::{Drone, PlayerId, Position};
+use crate::resources::PlayerGlobalStorage;
 use crate::world::WorldConfig;
+
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+pub struct EmpireUpkeepDeficits(pub IndexMap<PlayerId, u32>);
 
 pub fn memory_upkeep_system(
     config: Res<WorldConfig>,
-    drones: Query<&Drone>,
-    mut local_storage: ResMut<PlayerLocalStorage>,
+    mut drones: Query<(&mut Drone, &Position)>,
+    mut global_storage: ResMut<PlayerGlobalStorage>,
+    mut deficits: Local<EmpireUpkeepDeficits>,
 ) {
-    if config.drone.memory_upkeep_cost.is_empty() {
+    if !config.empire_upkeep.enabled {
         return;
     }
 
-    for drone in drones.iter() {
-        let storage = local_storage.0.entry(drone.owner).or_default();
-        for (resource, cost) in &config.drone.memory_upkeep_cost {
-            let current = storage.entry(resource.clone()).or_default();
-            *current = current.saturating_sub(*cost);
+    let mut rooms_by_player: IndexMap<PlayerId, IndexSet<u32>> = IndexMap::new();
+    for (drone, position) in drones.iter() {
+        rooms_by_player
+            .entry(drone.owner)
+            .or_default()
+            .insert(position.room.0);
+    }
+
+    for (player_id, rooms) in rooms_by_player {
+        let cost = config.empire_upkeep.upkeep_cost(rooms.len() as u32);
+        if cost == 0 {
+            deficits.0.shift_remove(&player_id);
+            continue;
+        }
+
+        let storage = global_storage.0.entry(player_id).or_default();
+        let available = storage
+            .entry(config.empire_upkeep.resource.clone())
+            .or_default();
+        if *available >= cost {
+            *available -= cost;
+            deficits.0.shift_remove(&player_id);
+            continue;
+        }
+
+        *available = 0;
+        let deficit_ticks = deficits
+            .0
+            .entry(player_id)
+            .and_modify(|ticks| *ticks = ticks.saturating_add(1))
+            .or_insert(1);
+
+        if *deficit_ticks >= 10 {
+            for (mut drone, _) in drones
+                .iter_mut()
+                .filter(|(drone, _)| drone.owner == player_id)
+            {
+                drone.age = drone.age.saturating_add(9);
+            }
+        } else if *deficit_ticks >= 3 {
+            for (mut drone, _) in drones
+                .iter_mut()
+                .filter(|(drone, _)| drone.owner == player_id)
+            {
+                drone.fatigue = drone.fatigue.saturating_add(50);
+            }
         }
     }
 }

@@ -2099,4 +2099,48 @@ mod tests {
             })
         );
     }
+
+    // ── P2-2 Empire Upkeep tests ──
+
+    #[test]
+    fn standard_empire_upkeep_uses_superlinear_formula() {
+        let upkeep = crate::world::EmpireUpkeepConfig::standard();
+        assert_eq!(upkeep.upkeep_cost(1), 55);
+        assert_eq!(upkeep.upkeep_cost(10), 1_000);
+    }
+
+    #[test]
+    fn vanilla_empire_upkeep_uses_vanilla_defaults() {
+        let upkeep = crate::world::EmpireUpkeepConfig::vanilla();
+        assert_eq!(upkeep.upkeep_cost(1), 32);
+        assert_eq!(upkeep.upkeep_cost(15), 900);
+    }
+
+    #[test]
+    fn tutorial_empire_upkeep_uses_tutorial_defaults() {
+        let upkeep = crate::world::EmpireUpkeepConfig::tutorial();
+        assert_eq!(upkeep.upkeep_cost(1), 10);
+        assert_eq!(upkeep.upkeep_cost(20), 400);
+    }
+
+    #[test]
+    fn controller_repair_formula_decays_with_distance() {
+        let upkeep = crate::world::EmpireUpkeepConfig::default();
+        assert_eq!(upkeep.repair_cost(200, 0), 130);
+        assert_eq!(upkeep.repair_cost(200, 4), 156);
+    }
+
+    #[test]
+    fn recycle_refund_uses_lifespan_ratio_floor() {
+        let upkeep = crate::world::EmpireUpkeepConfig::default();
+        assert_eq!(upkeep.recycle_refund_amount(1_000, 0, 1_000, 500, false), 500);
+        assert_eq!(upkeep.recycle_refund_amount(1_000, 900, 1_000, 500, false), 100);
+    }
+
+    #[test]
+    fn tutorial_recycle_refund_is_full_for_first_500_ticks() {
+        let upkeep = crate::world::EmpireUpkeepConfig::default();
+        assert_eq!(upkeep.recycle_refund_amount(1_000, 900, 1_000, 499, true), 1_000);
+        assert_eq!(upkeep.recycle_refund_amount(1_000, 900, 1_000, 500, true), 100);
+    }
 }

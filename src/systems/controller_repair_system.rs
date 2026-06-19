@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 
 use crate::components::{Controller, Drone, Position, RepairTracker};
+use crate::resources::{PlayerGlobalStorage, ResourceRegistry};
+use crate::world::WorldConfig;
 
 /// Drone age repair system — handles Controller repair only.
 /// Depot repair is handled separately in depot_repair_system.
@@ -9,11 +11,13 @@ use crate::components::{Controller, Drone, Position, RepairTracker};
 pub fn controller_repair_system(
     mut drones: Query<(&mut Drone, &Position)>,
     controllers: Query<(&Controller, &Position)>,
+    registry: Res<ResourceRegistry>,
+    config: Res<WorldConfig>,
+    mut global_storage: ResMut<PlayerGlobalStorage>,
     mut repair_tracker: ResMut<RepairTracker>,
 ) {
     let hard_cap = repair_tracker.hard_cap;
-    let controller_repair_limit = (drones.iter().count() as u32) / 2;
-    let mut age_recovery_this_tick = 0;
+    let mut body_repair_this_tick = 0;
 
     // Collect all repair sources: Controllers with repair capacity
     let repair_sources: Vec<(&Controller, &Position)> = controllers
@@ -26,11 +30,11 @@ pub fn controller_repair_system(
     }
 
     for (mut drone, drone_pos) in drones.iter_mut() {
-        if drone.age == 0 {
+        if drone.hits >= drone.hits_max {
             continue;
         }
 
-        if age_recovery_this_tick >= controller_repair_limit {
+        if body_repair_this_tick >= hard_cap {
             continue;
         }
 
@@ -41,8 +45,6 @@ pub fn controller_repair_system(
         if total_so_far >= hard_cap {
             continue;
         }
-
-        let remaining_cap = hard_cap - total_so_far;
 
         // Check each repair source
         for (controller, ctrl_pos) in &repair_sources {
@@ -58,18 +60,31 @@ pub fn controller_repair_system(
                 continue;
             }
 
-            // Apply repair
-            let repair_amount = controller.repair_per_drone.min(drone.age);
-            let remaining_controller_cap = controller_repair_limit - age_recovery_this_tick;
-            let actual_repair = repair_amount
-                .min(remaining_cap)
-                .min(remaining_controller_cap);
-
-            if actual_repair > 0 {
-                drone.age = drone.age.saturating_sub(actual_repair);
-                age_recovery_this_tick += actual_repair;
-                *repair_tracker.per_player.entry(player_id).or_default() += actual_repair;
+            let repair_amount = controller
+                .repair_per_drone
+                .min(drone.hits_max.saturating_sub(drone.hits))
+                .min(hard_cap.saturating_sub(total_so_far))
+                .min(hard_cap.saturating_sub(body_repair_this_tick));
+            if repair_amount == 0 {
+                break;
             }
+
+            let body_cost = registry.body_energy_cost(&drone.body);
+            let full_repair_cost = config.empire_upkeep.repair_cost(body_cost, distance);
+            let repair_cost = (u64::from(full_repair_cost).saturating_mul(u64::from(repair_amount))
+                / u64::from(drone.hits_max.max(1))) as u32;
+            let storage = global_storage.0.entry(player_id).or_default();
+            let energy = storage
+                .entry(config.empire_upkeep.resource.clone())
+                .or_default();
+            if *energy < repair_cost {
+                break;
+            }
+
+            *energy -= repair_cost;
+            drone.hits = drone.hits.saturating_add(repair_amount).min(drone.hits_max);
+            body_repair_this_tick += repair_amount;
+            *repair_tracker.per_player.entry(player_id).or_default() += repair_amount;
             break; // One repair per tick per drone
         }
     }
@@ -78,32 +93,39 @@ pub fn controller_repair_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{DEFAULT_DRONE_LIFESPAN, RoomId};
+    use crate::components::{BodyPart, DEFAULT_DRONE_LIFESPAN, RoomId};
     use crate::world::create_world;
     use indexmap::IndexMap;
 
     #[test]
-    fn controller_repairs_drone_in_range() {
+    fn controller_repairs_body_hits_in_range() {
         let mut world = create_world();
-        // Insert RepairTracker
         world.app.world_mut().insert_resource(RepairTracker {
             per_player: IndexMap::new(),
-            hard_cap: 1,
+            hard_cap: 10,
         });
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 1_000);
         let drone = world
             .app
             .world_mut()
             .spawn((
                 Drone {
                     owner: 1,
-                    body: vec![],
+                    body: vec![BodyPart::Move, BodyPart::Work],
                     carry: IndexMap::new(),
                     carry_capacity: 0,
                     fatigue: 0,
-                    hits: 100,
+                    hits: 90,
                     hits_max: 100,
                     spawning: false,
-                    age: 10,
+                    age: 0,
                     last_action_tick: u64::MAX,
                     lifespan: DEFAULT_DRONE_LIFESPAN,
                 },
@@ -147,7 +169,7 @@ mod tests {
                 safe_mode_cooldown: 0,
                 repair_capacity: 20,
                 repair_range: 2,
-                repair_per_drone: 2,
+                repair_per_drone: 5,
             },
             Position {
                 x: 5,
@@ -159,86 +181,16 @@ mod tests {
         world.app.update();
 
         let drone_after = world.app.world().entity(drone).get::<Drone>().unwrap();
-        assert!(drone_after.age <= 10, "repair should offset natural decay");
+        assert_eq!(drone_after.hits, 95);
     }
 
     #[test]
-    fn controller_repair_is_capped_across_multiple_controllers() {
+    fn controller_repair_cost_increases_with_distance() {
         let mut world = create_world();
-        world.app.world_mut().insert_resource(RepairTracker {
-            per_player: IndexMap::new(),
-            hard_cap: 100,
-        });
+        let registry = world.app.world().resource::<ResourceRegistry>();
+        let body_cost = registry.body_energy_cost(&[BodyPart::Move, BodyPart::Work]);
+        let config = &world.app.world().resource::<WorldConfig>().empire_upkeep;
 
-        let mut drones = Vec::new();
-        for x in 0..4 {
-            let drone = world
-                .app
-                .world_mut()
-                .spawn((
-                    Drone {
-                        owner: 1,
-                        body: vec![],
-                        carry: IndexMap::new(),
-                        carry_capacity: 0,
-                        fatigue: 0,
-                        hits: 100,
-                        hits_max: 100,
-                        spawning: false,
-                        age: 10,
-                        last_action_tick: u64::MAX,
-                        lifespan: DEFAULT_DRONE_LIFESPAN,
-                    },
-                    Position {
-                        x,
-                        y: 0,
-                        room: RoomId(0),
-                    },
-                ))
-                .id();
-            drones.push(drone);
-        }
-
-        for x in 0..2 {
-            world.app.world_mut().spawn((
-                Controller {
-                    owner: Some(1),
-                    level: 8,
-                    progress: 100,
-                    progress_total: 400,
-                    downgrade_timer: 5000,
-                    safe_mode: 0,
-                    safe_mode_available: 0,
-                    safe_mode_cooldown: 0,
-                    repair_capacity: 20,
-                    repair_range: 10,
-                    repair_per_drone: 2,
-                },
-                Position {
-                    x,
-                    y: 0,
-                    room: RoomId(0),
-                },
-            ));
-        }
-
-        world.app.update();
-
-        let total_age: u32 = drones
-            .iter()
-            .map(|entity| {
-                world
-                    .app
-                    .world()
-                    .entity(*entity)
-                    .get::<Drone>()
-                    .unwrap()
-                    .age
-            })
-            .sum();
-        assert_eq!(
-            total_age, 42,
-            "controller repair should be capped at 2 age rollback before decay"
-        );
+        assert!(config.repair_cost(body_cost, 3) > config.repair_cost(body_cost, 0));
     }
 }
