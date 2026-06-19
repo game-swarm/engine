@@ -1554,6 +1554,9 @@ pub struct WorldSnapshot {
     pending_global_transfers: PendingGlobalTransfers,
     starting_resources_granted: crate::systems::StartingResourcesGranted,
     player_first_spawn_tick: crate::systems::PlayerFirstSpawnTick,
+    /// Entity allocator state for deterministic rollback verification.
+    pub entity_total_count: u32,
+    pub entity_alive_count: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1567,6 +1570,12 @@ pub struct EntitySnapshot {
     terrain: Option<Terrain>,
     controller: Option<Controller>,
     marked_for_death: bool,
+    spawning_grace: Option<SpawningGrace>,
+    attributes: Option<Attributes>,
+    entity_flags: Option<EntityFlags>,
+    drone_env: Option<DroneEnv>,
+    code_version: Option<CodeVersion>,
+    projectile: Option<crate::systems::Projectile>,
 }
 
 impl WorldSnapshot {
@@ -1609,51 +1618,34 @@ impl WorldSnapshot {
     }
 
     pub fn capture(world: &mut World) -> Self {
-        let mut query = world.query::<(
-            Entity,
-            Option<&Position>,
-            Option<&Owner>,
-            Option<&Drone>,
-            Option<&Structure>,
-            Option<&crate::components::Resource>,
-            Option<&Source>,
-            Option<&Terrain>,
-            Option<&Controller>,
-            Option<&MarkedForDeath>,
-        )>();
-        let entities = query
-            .iter(world)
-            .filter_map(
-                |(
-                    entity,
-                    position,
-                    owner,
-                    drone,
-                    structure,
-                    resource,
-                    source,
-                    terrain,
-                    controller,
-                    marked_for_death,
-                )| {
-                    let snapshot = EntitySnapshot {
-                        position: position.copied(),
-                        owner: owner.copied(),
-                        drone: drone.cloned(),
-                        structure: structure.cloned(),
-                        resource: resource.cloned(),
-                        source: source.cloned(),
-                        terrain: terrain.copied(),
-                        controller: controller.cloned(),
-                        marked_for_death: marked_for_death.is_some(),
-                    };
-                    snapshot
-                        .has_any()
-                        .then_some((SnapshotEntity::from(entity), snapshot))
-                },
-            )
+        let entity_ids: Vec<Entity> = world.query::<Entity>().iter(world).collect();
+        let entities = entity_ids
+            .into_iter()
+            .filter_map(|entity| {
+                let snapshot = EntitySnapshot {
+                    position: world.entity(entity).get::<Position>().copied(),
+                    owner: world.entity(entity).get::<Owner>().copied(),
+                    drone: world.entity(entity).get::<Drone>().cloned(),
+                    structure: world.entity(entity).get::<Structure>().cloned(),
+                    resource: world.entity(entity).get::<crate::components::Resource>().cloned(),
+                    source: world.entity(entity).get::<Source>().cloned(),
+                    terrain: world.entity(entity).get::<Terrain>().copied(),
+                    controller: world.entity(entity).get::<Controller>().cloned(),
+                    marked_for_death: world.entity(entity).get::<MarkedForDeath>().is_some(),
+                    spawning_grace: world.entity(entity).get::<SpawningGrace>().copied(),
+                    attributes: world.entity(entity).get::<Attributes>().cloned(),
+                    entity_flags: world.entity(entity).get::<EntityFlags>().cloned(),
+                    drone_env: world.entity(entity).get::<DroneEnv>().cloned(),
+                    code_version: world.entity(entity).get::<CodeVersion>().copied(),
+                    projectile: world.entity(entity).get::<crate::systems::Projectile>().cloned(),
+                };
+                snapshot
+                    .has_any()
+                    .then_some((SnapshotEntity::from(entity), snapshot))
+            })
             .collect();
 
+        let allocator = world.entities();
         Self {
             entities,
             terrains: world.resource::<RoomTerrains>().clone(),
@@ -1665,6 +1657,8 @@ impl WorldSnapshot {
             pending_global_transfers: world.resource::<PendingGlobalTransfers>().clone(),
             starting_resources_granted: world.resource::<crate::systems::StartingResourcesGranted>().clone(),
             player_first_spawn_tick: world.resource::<crate::systems::PlayerFirstSpawnTick>().clone(),
+            entity_total_count: allocator.total_count() as u32,
+            entity_alive_count: allocator.len(),
         }
     }
 
@@ -1694,6 +1688,12 @@ impl WorldSnapshot {
             } else {
                 entity_mut.remove::<MarkedForDeath>();
             }
+            restore_component(&mut entity_mut, snapshot.spawning_grace);
+            restore_component(&mut entity_mut, snapshot.attributes);
+            restore_component(&mut entity_mut, snapshot.entity_flags);
+            restore_component(&mut entity_mut, snapshot.drone_env);
+            restore_component(&mut entity_mut, snapshot.code_version);
+            restore_component(&mut entity_mut, snapshot.projectile);
         }
 
         *world.resource_mut::<RoomTerrains>() = self.terrains;
@@ -1719,45 +1719,26 @@ impl WorldSnapshot {
     }
 
     fn tracked_entities(world: &mut World) -> Vec<Entity> {
-        let mut query = world.query::<(
-            Entity,
-            Option<&Position>,
-            Option<&Owner>,
-            Option<&Drone>,
-            Option<&Structure>,
-            Option<&crate::components::Resource>,
-            Option<&Source>,
-            Option<&Terrain>,
-            Option<&Controller>,
-            Option<&MarkedForDeath>,
-        )>();
-        query
-            .iter(world)
-            .filter_map(
-                |(
-                    entity,
-                    position,
-                    owner,
-                    drone,
-                    structure,
-                    resource,
-                    source,
-                    terrain,
-                    controller,
-                    marked_for_death,
-                )| {
-                    let has_any = position.is_some()
-                        || owner.is_some()
-                        || drone.is_some()
-                        || structure.is_some()
-                        || resource.is_some()
-                        || source.is_some()
-                        || terrain.is_some()
-                        || controller.is_some()
-                        || marked_for_death.is_some();
-                    has_any.then_some(entity)
-                },
-            )
+        let entity_ids = world.query::<Entity>().iter(world).collect::<Vec<_>>();
+        entity_ids
+            .into_iter()
+            .filter(|&entity| {
+                world.entity(entity).get::<Position>().is_some()
+                    || world.entity(entity).get::<Owner>().is_some()
+                    || world.entity(entity).get::<Drone>().is_some()
+                    || world.entity(entity).get::<Structure>().is_some()
+                    || world.entity(entity).get::<crate::components::Resource>().is_some()
+                    || world.entity(entity).get::<Source>().is_some()
+                    || world.entity(entity).get::<Terrain>().is_some()
+                    || world.entity(entity).get::<Controller>().is_some()
+                    || world.entity(entity).get::<MarkedForDeath>().is_some()
+                    || world.entity(entity).get::<SpawningGrace>().is_some()
+                    || world.entity(entity).get::<Attributes>().is_some()
+                    || world.entity(entity).get::<EntityFlags>().is_some()
+                    || world.entity(entity).get::<DroneEnv>().is_some()
+                    || world.entity(entity).get::<CodeVersion>().is_some()
+                    || world.entity(entity).get::<crate::systems::Projectile>().is_some()
+            })
             .collect()
     }
 }
@@ -1785,6 +1766,12 @@ impl EntitySnapshot {
             || self.terrain.is_some()
             || self.controller.is_some()
             || self.marked_for_death
+            || self.spawning_grace.is_some()
+            || self.attributes.is_some()
+            || self.entity_flags.is_some()
+            || self.drone_env.is_some()
+            || self.code_version.is_some()
+            || self.projectile.is_some()
     }
 }
 
