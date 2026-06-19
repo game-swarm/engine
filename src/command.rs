@@ -132,6 +132,41 @@ pub enum CommandAction {
     },
 }
 
+pub const CORE_COMMAND_ACTIONS: &[&str] = &[
+    "Move",
+    "Harvest",
+    "Transfer",
+    "Withdraw",
+    "Attack",
+    "RangedAttack",
+    "Heal",
+    "ClaimController",
+    "Spawn",
+    "Recycle",
+    "Build",
+    "TransferToGlobal",
+    "TransferFromGlobal",
+    "Hack",
+    "Drain",
+    "Overload",
+    "Debilitate",
+    "Disrupt",
+    "Fortify",
+    "Leech",
+    "Fabricate",
+];
+
+const SPECIAL_COMMAND_ACTIONS: &[&str] = &[
+    "Hack",
+    "Drain",
+    "Overload",
+    "Debilitate",
+    "Disrupt",
+    "Fortify",
+    "Leech",
+    "Fabricate",
+];
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommandActionWire {
@@ -225,6 +260,14 @@ impl<'de> Deserialize<'de> for CommandAction {
             "TransferFromGlobal" => Self::TransferFromGlobal {
                 resource: required!(wire.resource, "resource"),
                 amount: required!(wire.amount, "amount"),
+            },
+            special if SPECIAL_COMMAND_ACTIONS.contains(&special) => Self::Custom {
+                action_type: special.to_string(),
+                object_id: required!(wire.object_id, "object_id"),
+                target_id: Some(required!(wire.target_id, "target_id")),
+                resource: wire.resource,
+                amount: wire.amount,
+                structure: wire.structure,
             },
             custom => Self::Custom {
                 action_type: custom.to_string(),
@@ -528,6 +571,56 @@ pub enum RejectionReason {
     },
 }
 
+pub const CANONICAL_REJECTION_REASONS: &[&str] = &[
+    "ObjectNotFound",
+    "NotOwner",
+    "InsufficientResource",
+    "OutOfRange",
+    "NotStructure",
+    "NotController",
+    "NotVisibleOrNotFound",
+    "TargetNotVisible",
+    "SpawnOnCooldown",
+    "RoomDroneCapReached",
+    "AuthContextInvalid",
+    "CooldownActive",
+    "InvalidDirection",
+    "PositionOccupied",
+    "ConstructionLimitReached",
+    "SafeModeActive",
+    "TargetOverloadCooldown",
+    "TargetFortifyCooldown",
+    "NotEnoughBodyParts",
+    "InvalidBodyPart",
+    "InvalidStructureType",
+    "InvalidResourceType",
+    "SourceNotAllowed",
+    "UnknownAction",
+    "GlobalStorageDisabled",
+    "TransferInProgress",
+    "RateLimited",
+    "InvalidCertificate",
+    "NotAuthorized",
+    "FuelExhausted",
+    "TimeoutExceeded",
+    "SnapshotOverBudget",
+    "CommandBufferFull",
+    "ServerOverloaded",
+    "InternalError",
+    "InvalidCertificate",
+    "NotAuthorized",
+    "CertExpired",
+    "DeviceNotRegistered",
+    "SessionLimitReached",
+    "RefreshTokenInvalid",
+    "ScopeInsufficient",
+    "TokenRevoked",
+    "RateLimited",
+    "MultiDeviceConflict",
+    "UnknownCredential",
+    "InternalAuthError",
+];
+
 pub type CommandResult = Result<(), RejectionReason>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,6 +683,73 @@ pub fn source_gate(
     })
 }
 
+pub fn collect_command_intents(
+    player_id: PlayerId,
+    tick: Tick,
+    source: CommandSource,
+    intents: Vec<CommandIntent>,
+) -> Result<Vec<RawCommand>, TickValidationError> {
+    if intents.len() > MAX_COMMANDS_PER_PLAYER {
+        return Err(TickValidationError::TooManyCommands);
+    }
+
+    intents
+        .into_iter()
+        .map(|intent| {
+            source_gate(player_id, tick, source, intent)
+                .map_err(|_| TickValidationError::SchemaViolation)
+        })
+        .collect()
+}
+
+pub fn sort_raw_commands(commands: &mut [RawCommand]) {
+    commands.sort_by_key(|command| {
+        (
+            command_priority_class(command.source),
+            command.player_id,
+            command_source_rank(command.source),
+            command.sequence,
+            command_hash(command),
+        )
+    });
+}
+
+fn command_priority_class(source: CommandSource) -> u8 {
+    match source {
+        CommandSource::Admin => 0,
+        CommandSource::Wasm | CommandSource::TestHarness | CommandSource::Tutorial => 1,
+        CommandSource::McpDeploy | CommandSource::Deploy => 2,
+        CommandSource::McpQuery => 3,
+        CommandSource::Replay => 4,
+        CommandSource::Rollback => 5,
+        CommandSource::RuleMod => 6,
+        CommandSource::Simulate => 7,
+        CommandSource::DryRun => 8,
+    }
+}
+
+fn command_source_rank(source: CommandSource) -> u8 {
+    match source {
+        CommandSource::Admin => 0,
+        CommandSource::Wasm => 1,
+        CommandSource::McpDeploy => 2,
+        CommandSource::McpQuery => 3,
+        CommandSource::Replay => 4,
+        CommandSource::TestHarness => 5,
+        CommandSource::Tutorial => 6,
+        CommandSource::Deploy => 7,
+        CommandSource::Rollback => 8,
+        CommandSource::RuleMod => 9,
+        CommandSource::Simulate => 10,
+        CommandSource::DryRun => 11,
+    }
+}
+
+fn command_hash(command: &RawCommand) -> [u8; 32] {
+    let bytes = serde_json::to_vec(command).unwrap_or_default();
+    *blake3::hash(&bytes).as_bytes()
+}
+
 pub fn parse_tick_output(
     player_id: PlayerId,
     tick: Tick,
@@ -612,15 +772,14 @@ pub fn parse_tick_output(
         return Err(TickValidationError::TooManyCommands);
     }
 
-    commands
+    let intents = commands
         .iter()
         .map(|command| {
-            let intent: CommandIntent = serde_json::from_value(command.clone())
-                .map_err(|_| TickValidationError::SchemaViolation)?;
-            source_gate(player_id, tick, CommandSource::Wasm, intent)
+            serde_json::from_value(command.clone())
                 .map_err(|_| TickValidationError::SchemaViolation)
         })
-        .collect()
+        .collect::<Result<Vec<CommandIntent>, TickValidationError>>()?;
+    collect_command_intents(player_id, tick, CommandSource::Wasm, intents)
 }
 
 pub fn object_id(entity: Entity) -> ObjectId {

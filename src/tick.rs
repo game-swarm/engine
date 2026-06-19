@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::clickhouse::ClickHouseWriter;
 use crate::command::{
     CommandAction, CommandIntent, CommandRejection, CommandSource, MAX_FUEL, ObjectId, RawCommand,
-    RefundAccumulator, Tick, apply_command, source_gate, validate_command,
+    RefundAccumulator, Tick, apply_command, collect_command_intents, sort_raw_commands,
+    validate_command,
 };
 use crate::components::*;
 use crate::replay_storage::WorldDelta;
@@ -634,10 +635,8 @@ fn collect_player_commands<E: PlayerExecutor + ?Sized>(
             Vec::new()
         }
     };
-    let commands = intents
-        .into_iter()
-        .filter_map(|intent| source_gate(player_id, tick, CommandSource::Wasm, intent).ok())
-        .collect::<Vec<_>>();
+    let commands =
+        collect_command_intents(player_id, tick, CommandSource::Wasm, intents).unwrap_or_default();
 
     PlayerCollectResult {
         player_id,
@@ -647,14 +646,11 @@ fn collect_player_commands<E: PlayerExecutor + ?Sized>(
 }
 
 fn serial_execution_queue(collected: Vec<CollectedPlayerCommands>) -> Vec<RawCommand> {
-    let mut by_player = collected.into_iter().collect::<Vec<_>>();
-    by_player.sort_by_key(|collected| collected.player_id);
-
     let mut queue = Vec::new();
-    for mut collected in by_player {
-        collected.commands.sort_by_key(|command| command.sequence);
+    for collected in collected {
         queue.extend(collected.commands);
     }
+    sort_raw_commands(&mut queue);
     queue
 }
 
@@ -935,13 +931,10 @@ where
         }
 
         let world_snapshot = WorldSnapshot::capture(self.world.app.world_mut());
-        let mut raw_commands = intents
-            .into_iter()
-            .filter_map(|intent| {
-                source_gate(self.player_id, tick, CommandSource::Wasm, intent).ok()
-            })
-            .collect::<Vec<_>>();
-        raw_commands.sort_by_key(|command| command.sequence);
+        let mut raw_commands =
+            collect_command_intents(self.player_id, tick, CommandSource::Wasm, intents)
+                .unwrap_or_default();
+        sort_raw_commands(&mut raw_commands);
 
         let mut last_accepted = Vec::new();
         let mut last_rejections = Vec::new();

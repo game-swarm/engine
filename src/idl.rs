@@ -4,6 +4,7 @@
 //! mod types from world.toml runtime registries — as a machine-readable JSON IDL.
 //! SDK code for both Rust and TypeScript is generated from this IDL.
 
+use crate::command::{CANONICAL_REJECTION_REASONS, CORE_COMMAND_ACTIONS};
 use crate::components::{
     BodyPartRegistry, CustomActionRegistry, SpecialEffectRegistry, StructureTypeRegistry,
 };
@@ -136,7 +137,7 @@ fn core_commands() -> Vec<CommandDef> {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
     };
-    vec![
+    let mut commands = vec![
         def(
             "Move",
             &[("object_id", "ObjectId"), ("direction", "Direction")],
@@ -209,7 +210,14 @@ fn core_commands() -> Vec<CommandDef> {
             "TransferFromGlobal",
             &[("resource", "ResourceName"), ("amount", "ResourceAmount")],
         ),
-    ]
+    ];
+    for action in CORE_COMMAND_ACTIONS.iter().skip(commands.len()) {
+        commands.push(def(
+            action,
+            &[("object_id", "ObjectId"), ("target_id", "ObjectId")],
+        ));
+    }
+    commands
 }
 
 fn core_enums() -> EnumDefs {
@@ -242,46 +250,10 @@ fn core_enums() -> EnumDefs {
             .into_iter()
             .map(String::from)
             .collect(),
-        rejection_reason: vec![
-            "TickValidationFailed",
-            "ObjectNotFound",
-            "NotOwner",
-            "NotMovable",
-            "Fatigued",
-            "MissingBodyPart",
-            "TileBlocked",
-            "InvalidDirection",
-            "StillSpawning",
-            "OutOfRoom",
-            "NoPath",
-            "PathTooLong",
-            "InsufficientMoveParts",
-            "CarryFull",
-            "NotSource",
-            "SourceEmpty",
-            "OutOfRange",
-            "InsufficientResource",
-            "TargetFull",
-            "TargetEmpty",
-            "NotYourRoom",
-            "TileOccupied",
-            "InvalidTerrain",
-            "TooManyConstructionSites",
-            "AlreadyFullHealth",
-            "FriendlyTarget",
-            "NotYourSpawn",
-            "SpawnOnCooldown",
-            "BodyTooLarge",
-            "ExceedsRoomCapacity",
-            "RoomDroneCapReached",
-            "NotFriendly",
-            "PlayerNotFound",
-            "TargetFuelTooLow",
-            "OnCooldown",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
+        rejection_reason: CANONICAL_REJECTION_REASONS
+            .iter()
+            .map(|reason| reason.to_string())
+            .collect(),
     }
 }
 

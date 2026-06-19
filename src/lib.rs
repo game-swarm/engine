@@ -681,6 +681,68 @@ mod tests {
     }
 
     #[test]
+    fn collect_command_intents_rejects_too_many_typed_intents() {
+        let intent = CommandIntent {
+            sequence: 1,
+            action: CommandAction::Move {
+                object_id: 1,
+                direction: Direction::Top,
+            },
+        };
+
+        assert_eq!(
+            collect_command_intents(
+                1,
+                1,
+                CommandSource::Wasm,
+                vec![intent; MAX_COMMANDS_PER_PLAYER + 1],
+            ),
+            Err(TickValidationError::TooManyCommands)
+        );
+    }
+
+    #[test]
+    fn command_action_and_rejection_registries_match_api_surface() {
+        assert_eq!(CORE_COMMAND_ACTIONS.len(), 21);
+        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 47);
+
+        let action: CommandAction =
+            serde_json::from_str(r#"{"type":"Hack","object_id":1,"target_id":2}"#).unwrap();
+        assert_eq!(
+            action,
+            CommandAction::Custom {
+                action_type: "Hack".to_string(),
+                object_id: 1,
+                target_id: Some(2),
+                resource: None,
+                amount: None,
+                structure: None,
+            }
+        );
+        assert!(serde_json::from_str::<CommandAction>(r#"{"type":"Hack","object_id":1}"#).is_err());
+    }
+
+    #[test]
+    fn extracted_idl_exposes_command_and_rejection_registries() {
+        let idl = crate::idl::extract_idl(
+            "test-world",
+            &BodyPartRegistry::default(),
+            &StructureTypeRegistry::default(),
+            &SpecialEffectRegistry::default(),
+            &CustomActionRegistry::default(),
+        );
+
+        assert_eq!(idl.core.commands.len(), 21);
+        assert!(
+            idl.core
+                .commands
+                .iter()
+                .any(|command| command.name == "Fabricate")
+        );
+        assert_eq!(idl.core.enums.rejection_reason.len(), 47);
+    }
+
+    #[test]
     fn source_gate_enforces_p0_9_gameplay_source_matrix() {
         let move_intent = CommandIntent {
             sequence: 1,
