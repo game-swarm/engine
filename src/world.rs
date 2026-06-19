@@ -800,6 +800,9 @@ impl WorldConfig {
         app.insert_resource(StrongholdSpawnConfig::default());
         app.insert_resource(SpawnedStrongholdRooms::default());
         app.insert_resource(SystemSchedulerManifest::default());
+        app.insert_resource(PendingSpecialAttack::default());
+        app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingDamage::default());
     }
     fn register_systems(&self, app: &mut App) {
         if self.propagation_system_enabled() {
@@ -880,6 +883,8 @@ impl WorldConfig {
                 projectile_system,
                 heal_system,
                 combat_system,
+                special_attack_reducer,
+                damage_application_system,
                 decay_system,
                 memory_upkeep_system,
                 drone_env_var_system,

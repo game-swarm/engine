@@ -1,0 +1,214 @@
+use bevy::prelude::*;
+
+use crate::components::PlayerId;
+
+/// Priority chain for special attacks — Hack > Drain > Overload > Debilitate > Disrupt > Fortify.
+/// Higher discriminant = higher priority. This is the single authority definition per manifest §S14.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SpecialAttackKind {
+    Fortify = 1,
+    Disrupt = 2,
+    Debilitate = 3,
+    Overload = 4,
+    Drain = 5,
+    Hack = 6,
+}
+
+/// Raw incoming special attack intent, populated by command processing or S11-S13 combat.
+#[derive(Debug, Clone)]
+pub struct SpecialAttackIntent {
+    pub kind: SpecialAttackKind,
+    pub source: Entity,
+    pub target: Entity,
+    pub owner: PlayerId,
+    pub amount: u32,
+}
+
+/// Buffer of pending special attack intents before reduction.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct PendingSpecialAttack {
+    pub intents: Vec<SpecialAttackIntent>,
+}
+
+/// Resolved intent ready for S22 status_advance_system to process.
+#[derive(Debug, Clone)]
+pub struct ResolvedIntent {
+    pub kind: SpecialAttackKind,
+    pub target: Entity,
+    pub amount: u32,
+}
+
+/// Canonically sorted and resolved intents, delivered to S22.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct PendingIntents {
+    pub intents: Vec<ResolvedIntent>,
+}
+
+/// Damage buffer filled by special attacks, consumed by S15 damage_application.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct PendingDamage {
+    /// (target, damage_amount, damage_type)
+    pub entries: Vec<(Entity, u32, String)>,
+}
+
+/// S14: Special Attack Reducer
+///
+/// Pipeline:
+/// 1. Collect: drain all per-system sub-buffers from PendingSpecialAttack
+/// 2. Merge sort: canonical sort by (priority, source, target) — deterministic
+/// 3. Reducer resolve: same-target conflicts → highest priority wins (Hack > ... > Fortify)
+/// 4. Deliver: write resolved intents to PendingIntents for S22 consumption
+///
+/// Does NOT directly modify entity state — only routes intents.
+pub fn special_attack_reducer(
+    mut pending: ResMut<PendingSpecialAttack>,
+    mut intents: ResMut<PendingIntents>,
+) {
+    if pending.intents.is_empty() {
+        return;
+    }
+
+    // 1. Drain all intents
+    let mut raw: Vec<SpecialAttackIntent> = std::mem::take(&mut pending.intents);
+
+    // 2. Canonical sort: (priority DESC, source, target)
+    raw.sort_by(|a, b| {
+        b.kind
+            .cmp(&a.kind)
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| a.target.cmp(&b.target))
+    });
+
+    // 3. Reducer resolve: same target → highest priority wins
+    // Group by target, keep only the highest-priority intent per target
+    let resolved: Vec<ResolvedIntent> = raw
+        .into_iter()
+        .fold(Vec::new(), |mut acc, intent| {
+            if let Some(_existing) = acc.iter_mut().find(|r| r.target == intent.target) {
+                // Keep the one with higher priority (already sorted, so first in group wins)
+                // The first in a target group has highest priority due to sort
+            } else {
+                acc.push(ResolvedIntent {
+                    kind: intent.kind,
+                    target: intent.target,
+                    amount: intent.amount,
+                });
+            }
+            acc
+        });
+
+    // 4. Deliver to S22
+    intents.intents = resolved;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reducer_sorts_by_priority_desc() {
+        let mut app = App::new();
+        app.insert_resource(PendingSpecialAttack {
+            intents: vec![
+                SpecialAttackIntent {
+                    kind: SpecialAttackKind::Fortify,
+                    source: Entity::from_raw(1),
+                    target: Entity::from_raw(10),
+                    owner: 1,
+                    amount: 5,
+                },
+                SpecialAttackIntent {
+                    kind: SpecialAttackKind::Hack,
+                    source: Entity::from_raw(2),
+                    target: Entity::from_raw(10),
+                    owner: 1,
+                    amount: 10,
+                },
+            ],
+        });
+        app.insert_resource(PendingIntents::default());
+        app.add_systems(Update, special_attack_reducer);
+
+        app.update();
+
+        let intents = app.world().resource::<PendingIntents>();
+        assert_eq!(intents.intents.len(), 1, "same target → only one intent survives");
+        assert_eq!(intents.intents[0].kind, SpecialAttackKind::Hack, "Hack > Fortify");
+        assert_eq!(intents.intents[0].amount, 10);
+    }
+
+    #[test]
+    fn reducer_resolves_same_target_same_priority() {
+        let mut app = App::new();
+        app.insert_resource(PendingSpecialAttack {
+            intents: vec![
+                SpecialAttackIntent {
+                    kind: SpecialAttackKind::Drain,
+                    source: Entity::from_raw(1),
+                    target: Entity::from_raw(10),
+                    owner: 1,
+                    amount: 3,
+                },
+                SpecialAttackIntent {
+                    kind: SpecialAttackKind::Drain,
+                    source: Entity::from_raw(2),
+                    target: Entity::from_raw(10),
+                    owner: 2,
+                    amount: 7,
+                },
+            ],
+        });
+        app.insert_resource(PendingIntents::default());
+        app.add_systems(Update, special_attack_reducer);
+
+        app.update();
+
+        let intents = app.world().resource::<PendingIntents>();
+        assert_eq!(intents.intents.len(), 1, "same priority same target → one intent");
+        // First in sort order wins (lower source entity)
+        assert_eq!(intents.intents[0].amount, 3);
+    }
+
+    #[test]
+    fn reducer_preserves_different_targets() {
+        let mut app = App::new();
+        app.insert_resource(PendingSpecialAttack {
+            intents: vec![
+                SpecialAttackIntent {
+                    kind: SpecialAttackKind::Hack,
+                    source: Entity::from_raw(1),
+                    target: Entity::from_raw(10),
+                    owner: 1,
+                    amount: 5,
+                },
+                SpecialAttackIntent {
+                    kind: SpecialAttackKind::Drain,
+                    source: Entity::from_raw(2),
+                    target: Entity::from_raw(20),
+                    owner: 2,
+                    amount: 3,
+                },
+            ],
+        });
+        app.insert_resource(PendingIntents::default());
+        app.add_systems(Update, special_attack_reducer);
+
+        app.update();
+
+        let intents = app.world().resource::<PendingIntents>();
+        assert_eq!(intents.intents.len(), 2, "different targets → both preserved");
+    }
+
+    #[test]
+    fn reducer_empty_is_noop() {
+        let mut app = App::new();
+        app.insert_resource(PendingSpecialAttack::default());
+        app.insert_resource(PendingIntents::default());
+        app.add_systems(Update, special_attack_reducer);
+
+        app.update();
+
+        let intents = app.world().resource::<PendingIntents>();
+        assert!(intents.intents.is_empty());
+    }
+}
