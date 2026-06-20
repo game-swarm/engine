@@ -1554,6 +1554,8 @@ pub struct WorldSnapshot {
     pending_global_transfers: PendingGlobalTransfers,
     starting_resources_granted: crate::systems::StartingResourcesGranted,
     player_first_spawn_tick: crate::systems::PlayerFirstSpawnTick,
+    /// Per-tick event log for feedback loop replay fidelity.
+    event_log: EventLog,
     /// Entity allocator state for deterministic rollback verification.
     pub entity_total_count: u32,
     pub entity_alive_count: u32,
@@ -1657,6 +1659,7 @@ impl WorldSnapshot {
             pending_global_transfers: world.resource::<PendingGlobalTransfers>().clone(),
             starting_resources_granted: world.resource::<crate::systems::StartingResourcesGranted>().clone(),
             player_first_spawn_tick: world.resource::<crate::systems::PlayerFirstSpawnTick>().clone(),
+            event_log: world.resource::<EventLog>().clone(),
             entity_total_count: allocator.total_count() as u32,
             entity_alive_count: allocator.len(),
         }
@@ -1704,7 +1707,9 @@ impl WorldSnapshot {
         *world.resource_mut::<PlayerGlobalStorage>() = self.global_storage;
         *world.resource_mut::<PendingGlobalTransfers>() = self.pending_global_transfers;
         *world.resource_mut::<crate::systems::StartingResourcesGranted>() = self.starting_resources_granted;
-        *world.resource_mut::<crate::systems::PlayerFirstSpawnTick>() = self.player_first_spawn_tick;
+        *world.resource_mut::<crate::systems::PlayerFirstSpawnTick>() =
+            self.player_first_spawn_tick;
+        *world.resource_mut::<EventLog>() = self.event_log;
         entity_map
     }
 

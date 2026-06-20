@@ -1367,3 +1367,53 @@ mod tests {
         assert_eq!(drone.lifespan, 2_100);
     }
 }
+
+/// Per-tick event log for feedback loop (learn → decide → act → understand).
+/// Systems write structured events; MCP tools (`swarm_explain_last_tick`,
+/// `swarm_get_snapshot`) and WebSocket push consume them for real-time feedback.
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventLog {
+    pub entries: Vec<EventLogEntry>,
+    /// Maximum entries retained; oldest evicted when exceeded.
+    pub max_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventLogEntry {
+    pub tick: crate::command::Tick,
+    pub player_id: Option<PlayerId>,
+    pub event_type: String,
+    pub message: String,
+}
+
+impl EventLog {
+    pub fn with_capacity(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(max_entries.min(1024)),
+            max_entries,
+        }
+    }
+
+    pub fn push(
+        &mut self,
+        tick: crate::command::Tick,
+        player_id: Option<PlayerId>,
+        event_type: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        if self.entries.len() >= self.max_entries {
+            self.entries.remove(0);
+        }
+        self.entries.push(EventLogEntry {
+            tick,
+            player_id,
+            event_type: event_type.into(),
+            message: message.into(),
+        });
+    }
+
+    /// Clear entries older than `horizon` ticks.
+    pub fn retain_since(&mut self, horizon: crate::command::Tick) {
+        self.entries.retain(|entry| entry.tick >= horizon);
+    }
+}

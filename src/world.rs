@@ -803,6 +803,7 @@ impl WorldConfig {
         app.insert_resource(PendingSpecialAttack::default());
         app.insert_resource(PendingIntents::default());
         app.insert_resource(PendingDamage::default());
+        app.insert_resource(EventLog::with_capacity(1000));
     }
     fn register_systems(&self, app: &mut App) {
         if self.propagation_system_enabled() {
