@@ -1076,6 +1076,42 @@ impl Default for OverloadState {
     }
 }
 
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebilitateState {
+    pub damage_type: String,
+    pub remaining_ticks: u32,
+}
+
+impl Default for DebilitateState {
+    fn default() -> Self {
+        Self { damage_type: String::new(), remaining_ticks: 0 }
+    }
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisruptState {
+    /// Body parts being disrupted
+    pub body_parts: Vec<BodyPart>,
+    pub remaining_ticks: u32,
+}
+
+impl Default for DisruptState {
+    fn default() -> Self {
+        Self { body_parts: vec![], remaining_ticks: 0 }
+    }
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FortifyState {
+    pub remaining_ticks: u32,
+}
+
+impl Default for FortifyState {
+    fn default() -> Self {
+        Self { remaining_ticks: 0 }
+    }
+}
+
 pub const DEFAULT_ROOM_SIZE: i32 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
