@@ -1,4 +1,5 @@
 pub mod arena;
+pub mod arena_admin;
 pub mod auth;
 pub mod clickhouse;
 pub mod command;
@@ -30,6 +31,7 @@ pub mod visibility;
 pub mod world;
 
 pub use arena::*;
+pub use arena_admin::*;
 pub use auth::*;
 pub use clickhouse::*;
 pub use command::*;

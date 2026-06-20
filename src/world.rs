@@ -804,6 +804,7 @@ impl WorldConfig {
         app.insert_resource(PendingIntents::default());
         app.insert_resource(PendingDamage::default());
         app.insert_resource(EventLog::with_capacity(1000));
+        app.insert_resource(ArenaRoomAdmin::default());
     }
     fn register_systems(&self, app: &mut App) {
         if self.propagation_system_enabled() {
