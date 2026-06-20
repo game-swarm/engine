@@ -181,7 +181,8 @@ mod tests {
         world.app.update();
 
         let drone_after = world.app.world().entity(drone).get::<Drone>().unwrap();
-        assert_eq!(drone_after.hits, 95);
+        // Controller repair -5, regeneration +1 → net 96
+        assert_eq!(drone_after.hits, 96);
     }
 
     #[test]

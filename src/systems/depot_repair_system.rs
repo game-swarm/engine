@@ -158,10 +158,10 @@ mod tests {
         world.app.update();
 
         let drone_after = world.app.world().entity(drone).get::<Drone>().unwrap();
-        // Depot repair -1, decay +1 → net 0 (age stays at 10 with hard_cap=1)
+        // Depot repair -1; decay no longer adds age (S24) → net 9
         assert_eq!(
-            drone_after.age, 10,
-            "depot repair offsets decay; expected 10, got {}",
+            drone_after.age, 9,
+            "depot repair -1 (no decay offset); expected 9, got {}",
             drone_after.age
         );
     }
@@ -220,10 +220,10 @@ mod tests {
             .query::<&Drone>()
             .iter(world.app.world())
             .collect();
-        // No repair should happen — energy is 0, decay adds +1 → 11
+        // No repair should happen — energy is 0, decay no longer adds age (S24) → stays 10
         assert_eq!(
-            drones[0].age, 11,
-            "drone age should increase by 1 from decay when depot has no energy; got {}",
+            drones[0].age, 10,
+            "drone age unchanged when depot has no energy (decay no longer adds age); got {}",
             drones[0].age
         );
     }
@@ -303,12 +303,12 @@ mod tests {
             .query::<&Drone>()
             .iter(world.app.world())
             .collect();
-        // Player 1 drone: repair -2 + decay +1 → 9
+        // Player 1 drone: repair -2 (decay no longer adds age, S24) → 8
         assert!(drones[0].age < 10, "player 1's drone should be repaired");
-        // Player 2 drone NOT repaired, decay +1 → 11
+        // Player 2 drone NOT repaired, decay no longer adds age → stays 10
         assert_eq!(
-            drones[1].age, 11,
-            "player 2's drone should NOT be repaired; decay alone gives {}",
+            drones[1].age, 10,
+            "player 2's drone should NOT be repaired; decay no longer adds age, got {}",
             drones[1].age
         );
     }

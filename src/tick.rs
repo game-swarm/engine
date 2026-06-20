@@ -2353,6 +2353,7 @@ mod tests {
                 .y,
             9
         );
+        // Decay no longer adds age (S24 → aging_system in W13); new drone age stays 0
         assert_eq!(
             scheduler
                 .world
@@ -2362,7 +2363,7 @@ mod tests {
                 .get::<Drone>()
                 .unwrap()
                 .age,
-            2
+            0
         );
     }
 

@@ -2003,7 +2003,10 @@ mod tests {
         let enemy = world.spawn_drone(2, 10, 11, vec![BodyPart::Move]);
         clear_spawning_grace(&mut world, healer);
         clear_spawning_grace(&mut world, enemy);
-        set_hits(&mut world, enemy, 50);
+        // Set enemy to max_hits so regeneration doesn't add +1 (S10 regen fires
+        // on all drones < max_hits, and heal runs after regen in the chain)
+        let max = world.app.world().entity(enemy).get::<Drone>().unwrap().hits_max;
+        set_hits(&mut world, enemy, max);
         let pre_hits = hits_of(&world, enemy);
         world.run_tick();
         assert_eq!(hits_of(&world, enemy), pre_hits, "should not heal enemy");

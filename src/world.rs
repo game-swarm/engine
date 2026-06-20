@@ -2164,6 +2164,14 @@ cost = { Energy = 33 }
             .map(|player_id| first.shard_for_player(player_id))
             .collect::<std::collections::BTreeSet<_>>();
         assert!(routed.len() > 1);
+        // Damage all drones significantly so regeneration can't fully restore them
+        for &shard_id in &routed {
+            let world = first.shard_mut(shard_id).unwrap();
+            let mut query = world.app.world_mut().query::<&mut Drone>();
+            for mut drone in query.iter_mut(world.app.world_mut()) {
+                drone.hits = 50;
+            }
+        }
         first.run_tick();
         assert_ne!(before, first.state_checksum());
     }
