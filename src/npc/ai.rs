@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::{BodyPart, BodyPartRegistry, DamageType, Drone, Position, RoomTerrains};
 use crate::resources::CurrentTick;
-use crate::systems::{CombatRules, PendingCombat};
+use crate::systems::{CombatRules, PendingCombat, PendingIntents, PendingSpecialAttack, SpecialAttackIntent};
 
 pub const DEFAULT_NPC_AGGRO_RANGE: u32 = 5;
 pub const DEFAULT_NPC_ATTACK_RANGE: u32 = 1;
@@ -16,6 +16,22 @@ pub struct Npc {
     pub hits_max: u32,
     pub damage: u32,
     pub damage_type: String,
+    /// Special attack capability (None = basic attack only)
+    pub special_attack: Option<NpcSpecialAttack>,
+    /// Ticks between special attack uses (0 = every tick)
+    pub special_cooldown: u32,
+    /// Remaining cooldown until next special attack
+    pub special_cooldown_remaining: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NpcSpecialAttack {
+    Hack,
+    Drain,
+    Overload,
+    Debilitate,
+    Disrupt,
+    Fortify,
 }
 
 impl Npc {
@@ -26,7 +42,17 @@ impl Npc {
             hits_max: 100,
             damage: DEFAULT_NPC_DAMAGE,
             damage_type: DamageType::Kinetic.to_string(),
+            special_attack: None,
+            special_cooldown: 0,
+            special_cooldown_remaining: 0,
         }
+    }
+
+    pub fn with_special(mut self, attack: NpcSpecialAttack, cooldown: u32) -> Self {
+        self.special_attack = Some(attack);
+        self.special_cooldown = cooldown;
+        self.special_cooldown_remaining = 0;
+        self
     }
 }
 
@@ -185,8 +211,9 @@ pub fn npc_combat_system(
     body_registry: Res<BodyPartRegistry>,
     combat_rules: Res<CombatRules>,
     mut combat: ResMut<PendingCombat>,
+    mut special_attacks: ResMut<PendingSpecialAttack>,
     drones: Query<(Entity, &Position, &Drone), Without<Npc>>,
-    npcs: Query<(&Position, &NpcBehavior, &Npc), Without<Drone>>,
+    mut npcs: Query<(Entity, &Position, &NpcBehavior, &mut Npc), Without<Drone>>,
 ) {
     let drones = drones
         .iter()
@@ -194,7 +221,7 @@ pub fn npc_combat_system(
         .map(|(entity, position, _)| (entity, *position))
         .collect::<Vec<_>>();
 
-    for (position, behavior, npc) in npcs.iter() {
+    for (npc_entity, position, behavior, mut npc) in npcs.iter_mut() {
         if npc.hits == 0 || behavior.mode != NpcMode::Attack {
             continue;
         }
@@ -214,6 +241,29 @@ pub fn npc_combat_system(
         let registry_damage = body_registry.base_damage(BodyPart::Attack);
         let damage = combat_rules.scale_damage(npc.damage.max(registry_damage));
         combat.queue_typed_damage(target, npc.damage_type.clone(), damage);
+
+        // G4: Queue special attack if NPC has one and cooldown permits
+        if let Some(special) = npc.special_attack {
+            if npc.special_cooldown_remaining == 0 {
+                special_attacks.intents.push(SpecialAttackIntent {
+                    kind: match special {
+                        NpcSpecialAttack::Hack => crate::systems::SpecialAttackKind::Hack,
+                        NpcSpecialAttack::Drain => crate::systems::SpecialAttackKind::Drain,
+                        NpcSpecialAttack::Overload => crate::systems::SpecialAttackKind::Overload,
+                        NpcSpecialAttack::Debilitate => crate::systems::SpecialAttackKind::Debilitate,
+                        NpcSpecialAttack::Disrupt => crate::systems::SpecialAttackKind::Disrupt,
+                        NpcSpecialAttack::Fortify => crate::systems::SpecialAttackKind::Fortify,
+                    },
+                    source: npc_entity,
+                    target,
+                    owner: 0, // NPC owner = system
+                    amount: 1,
+                });
+                npc.special_cooldown_remaining = npc.special_cooldown;
+            } else {
+                npc.special_cooldown_remaining -= 1;
+            }
+        }
     }
 }
 
@@ -414,5 +464,60 @@ mod tests {
 
         let drone = world.app.world().entity(drone).get::<Drone>().unwrap();
         assert_eq!(drone.hits, 70);
+    }
+
+    #[test]
+    fn npc_with_special_attack_queues_intent() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 11, 10, vec![BodyPart::Move, BodyPart::Attack]);
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .remove::<crate::components::SpawningGrace>();
+        world.app.world_mut().spawn((
+            position(10, 10),
+            Npc::new(NpcType::Guardian).with_special(NpcSpecialAttack::Hack, 5),
+            NpcBehavior::guard(position(10, 10)),
+        ));
+
+        world.run_tick();
+
+        // NPC should queue a Hack intent alongside damage
+        let pending = world.app.world().resource::<PendingSpecialAttack>();
+        // After S14 consumes intents, PendingSpecialAttack is empty;
+        // but PendingIntents should have the resolved intent
+        let intents = world.app.world().resource::<PendingIntents>();
+        assert!(
+            !intents.intents.is_empty()
+                || !pending.intents.is_empty(),
+            "NPC with Hack should produce special attack intent"
+        );
+    }
+
+    #[test]
+    fn npc_special_attack_respects_cooldown() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 11, 10, vec![BodyPart::Move, BodyPart::Attack]);
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .remove::<crate::components::SpawningGrace>();
+        let npc_entity = world.app.world_mut().spawn((
+            position(10, 10),
+            Npc::new(NpcType::Guardian).with_special(NpcSpecialAttack::Drain, 3), // cooldown=3
+            NpcBehavior::guard(position(10, 10)),
+        )).id();
+
+        // First tick: cooldown permits attack
+        world.run_tick();
+        let cooldown_after = world.app.world().entity(npc_entity).get::<Npc>().unwrap().special_cooldown_remaining;
+        assert_eq!(cooldown_after, 3, "cooldown should reset after first use");
+
+        // Second tick: cooldown decrements
+        world.run_tick();
+        let cooldown_after2 = world.app.world().entity(npc_entity).get::<Npc>().unwrap().special_cooldown_remaining;
+        assert_eq!(cooldown_after2, 2);
     }
 }
