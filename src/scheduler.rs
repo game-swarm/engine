@@ -255,8 +255,8 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         "hack",
         SystemPhase::Phase2bDeferred,
         Some(ParallelSet::StatusEffects),
-        &["HackState", "Entity", "Owner"],
-        &["HackState"],
+        &["Drone", "HackState", "Owner", "Position"],
+        &["Drone", "HackState"],
     ),
     system(
         17,
@@ -264,8 +264,8 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         "drain",
         SystemPhase::Phase2bDeferred,
         Some(ParallelSet::StatusEffects),
-        &["DrainState", "ResourceAmount"],
-        &["ResourceAmount", "DrainState"],
+        &["DrainState", "Owner", "PlayerLocalStorage"],
+        &["PlayerLocalStorage"],
     ),
     system(
         18,
@@ -273,8 +273,8 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         "overload",
         SystemPhase::Phase2bDeferred,
         Some(ParallelSet::StatusEffects),
-        &["OverloadState", "FuelBudget"],
-        &["FuelBudget", "OverloadState"],
+        &["OverloadState", "Owner", "PlayerLocalStorage"],
+        &["PlayerLocalStorage"],
     ),
     system(
         19,

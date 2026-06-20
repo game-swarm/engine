@@ -1031,6 +1031,51 @@ impl CustomActionRegistry {
     }
 }
 
+/// Phase 2b StatusState components — each special attack gets its own
+/// Bevy component. S22 `status_advance_system` is the UNIQUE WRITER for
+/// all StatusState components (R22 B3). S16-S21 are READERS that produce
+/// per-tick effects based on current state.
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HackState {
+    /// 0=just applied, 1=slow, 2=root, 3=neutralized
+    pub stage: u32,
+    pub remaining_ticks: u32,
+}
+
+impl Default for HackState {
+    fn default() -> Self {
+        Self { stage: 0, remaining_ticks: 5 }
+    }
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrainState {
+    /// Resource being drained
+    pub resource: String,
+    pub amount_per_tick: u32,
+    pub remaining_ticks: u32,
+}
+
+impl Default for DrainState {
+    fn default() -> Self {
+        Self { resource: String::new(), amount_per_tick: 0, remaining_ticks: 0 }
+    }
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverloadState {
+    pub fuel_drain_per_tick: u32,
+    pub fuel_floor: u32,
+    pub remaining_ticks: u32,
+}
+
+impl Default for OverloadState {
+    fn default() -> Self {
+        Self { fuel_drain_per_tick: 0, fuel_floor: 0, remaining_ticks: 0 }
+    }
+}
+
 pub const DEFAULT_ROOM_SIZE: i32 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
