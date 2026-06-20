@@ -148,6 +148,19 @@ fn body_part_count(drone: &Drone, part: BodyPart) -> usize {
     drone.body.iter().filter(|candidate| **candidate == part).count()
 }
 
+/// Check if a drone has ALL specified body parts.
+/// Returns `Ok(())` if all parts are present, `Err(body_part)` with the
+/// first missing part otherwise. Used by disrupt and combat validation
+/// to verify body part targeting (R23 D3/A).
+pub fn body_part_match(drone: &Drone, required: &[BodyPart]) -> Result<(), BodyPart> {
+    for part in required {
+        if !drone.body.contains(part) {
+            return Err(*part);
+        }
+    }
+    Ok(())
+}
+
 fn same_room_range(source: &Position, target: &Position) -> Option<u32> {
     if source.room != target.room {
         return None;
@@ -456,6 +469,8 @@ pub fn combat_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::DEFAULT_DRONE_LIFESPAN;
+    use indexmap::IndexMap;
 
     #[test]
     fn parses_integer_and_float_damage_multiplier() {
@@ -466,5 +481,50 @@ mod tests {
         let compat_float = CombatRules::from_toml_str("[combat]\ndamage = 0.5\n").unwrap();
         assert_eq!(compat_float.damage_multiplier, 5_000);
         assert_eq!(compat_float.scale_damage(25), 12);
+    }
+
+    fn test_drone(body: Vec<BodyPart>) -> Drone {
+        Drone {
+            owner: 1,
+            body,
+            carry: IndexMap::new(),
+            carry_capacity: 0,
+            fatigue: 0,
+            hits: 100,
+            hits_max: 100,
+            spawning: false,
+            age: 0,
+            last_action_tick: u64::MAX,
+            lifespan: DEFAULT_DRONE_LIFESPAN,
+        }
+    }
+
+    #[test]
+    fn body_part_match_passes_for_existing_parts() {
+        let drone = test_drone(vec![BodyPart::Attack, BodyPart::Move]);
+        assert!(body_part_match(&drone, &[BodyPart::Attack]).is_ok());
+        assert!(body_part_match(&drone, &[BodyPart::Attack, BodyPart::Move]).is_ok());
+    }
+
+    #[test]
+    fn body_part_match_fails_for_missing_part() {
+        let drone = test_drone(vec![BodyPart::Move]);
+        let err = body_part_match(&drone, &[BodyPart::Attack]).unwrap_err();
+        assert_eq!(err, BodyPart::Attack);
+    }
+
+    #[test]
+    fn body_part_match_reports_first_missing_part() {
+        let drone = test_drone(vec![BodyPart::Work]);
+        let err = body_part_match(&drone, &[BodyPart::Attack, BodyPart::Heal, BodyPart::Work])
+            .unwrap_err();
+        // Attack is first in the list and missing, so it should be reported first
+        assert_eq!(err, BodyPart::Attack);
+    }
+
+    #[test]
+    fn body_part_match_empty_list_always_passes() {
+        let drone = test_drone(vec![]);
+        assert!(body_part_match(&drone, &[]).is_ok());
     }
 }

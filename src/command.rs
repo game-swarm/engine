@@ -579,6 +579,7 @@ pub enum RejectionReason {
     SafeModeActive,
     TargetFortifyCooldown,
     TargetOverloadCooldown,
+    DisruptedResisted { part: BodyPart },
     InternalError,
     ServerOverloaded,
     SnapshotOverBudget,
@@ -617,6 +618,7 @@ pub const CANONICAL_REJECTION_REASONS: &[&str] = &[
     "SafeModeActive",
     "TargetOverloadCooldown",
     "TargetFortifyCooldown",
+    "DisruptedResisted",
     "NotEnoughBodyParts",
     "InvalidBodyPart",
     "InvalidStructureType",
@@ -1454,6 +1456,7 @@ fn canonical_rejection_reason(rejection: &RejectionReason) -> &'static str {
         RejectionReason::SafeModeActive => "SafeModeActive",
         RejectionReason::TargetFortifyCooldown => "TargetFortifyCooldown",
         RejectionReason::TargetOverloadCooldown => "TargetOverloadCooldown",
+        RejectionReason::DisruptedResisted { .. } => "DisruptedResisted",
         RejectionReason::InternalError => "InternalError",
         RejectionReason::ServerOverloaded => "ServerOverloaded",
         RejectionReason::SnapshotOverBudget => "SnapshotOverBudget",
@@ -2579,7 +2582,11 @@ fn validate_special_action_requirements(
         }
         Some("overload") => require_body(drone, BodyPart::RangedAttack),
         Some("debilitate") => require_body(drone, BodyPart::Work),
-        Some("disrupt") => require_body(drone, BodyPart::Attack),
+        Some("disrupt") => {
+            crate::systems::body_part_match(drone, &[BodyPart::Attack])
+                .map_err(|part| RejectionReason::DisruptedResisted { part })?;
+            Ok(())
+        }
         Some("fortify") => require_body(drone, BodyPart::Tough),
         _ => Ok(()),
     }

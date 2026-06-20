@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn command_action_and_rejection_registries_match_api_surface() {
         assert_eq!(CORE_COMMAND_ACTIONS.len(), 22);
-        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 47);
+        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 48);
 
         let action: CommandAction =
             serde_json::from_str(r#"{"type":"Hack","object_id":1,"target_id":2}"#).unwrap();
@@ -759,7 +759,7 @@ mod tests {
                 .iter()
                 .any(|command| command.name == "Fabricate")
         );
-        assert_eq!(idl.core.enums.rejection_reason.len(), 47);
+        assert_eq!(idl.core.enums.rejection_reason.len(), 48);
     }
 
     #[test]

@@ -21,9 +21,9 @@ pub mod starting_resources_system;
 
 pub use cargo_in_transit_system::{CargoInTransit, cargo_in_transit_system};
 pub use combat_system::{
-    CombatRules, PendingCombat, Projectile, attack_system, combat_system, heal_amount,
-    heal_system, melee_attack_damage, projectile_system, ranged_attack_damage,
-    ranged_attack_system,
+    CombatRules, PendingCombat, Projectile, attack_system, body_part_match, body_part_damage,
+    combat_system, heal_amount, heal_system, melee_attack_damage, projectile_system,
+    ranged_attack_damage, ranged_attack_system,
 };
 pub use controller_repair_system::controller_repair_system;
 pub use controller_system::{
