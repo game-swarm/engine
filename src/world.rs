@@ -31,6 +31,7 @@ use crate::resources::{
     CurrentTick, GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
 };
+use crate::resource_ledger::{ResourceLedger, resource_ledger_system};
 use crate::rule_module::{
     rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system, run_init_scripts,
     RhaiRuleModules,
@@ -806,6 +807,7 @@ impl WorldConfig {
         app.insert_resource(PendingDamage::default());
         app.insert_resource(EventLog::with_capacity(1000));
         app.insert_resource(ArenaRoomAdmin::default());
+        app.insert_resource(ResourceLedger::default());
     }
     fn register_systems(&self, app: &mut App) {
         if self.propagation_system_enabled() {
@@ -895,6 +897,7 @@ impl WorldConfig {
                 rhai_rule_module_tick_end_system,
                 death_cleanup_system,
                 onboarding_system,
+                resource_ledger_system,
             )
                 .chain()
                 .after(global_storage_system),
