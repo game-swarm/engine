@@ -157,6 +157,36 @@ pub struct TournamentBracket {
     next_match_id: u64,
 }
 
+/// Six-stage Arena match lifecycle per spec §9.1.3
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArenaMatchState {
+    /// Room created, awaiting configuration
+    Created,
+    /// Parameters set (map, duration, slots filled)
+    Configured,
+    /// All slots locked, code frozen — ready for start
+    Ready,
+    /// Match in progress (tick execution active)
+    Playing,
+    /// Match ended, result pending
+    Finished,
+    /// Replay generated, match closed
+    Replay,
+}
+
+impl ArenaMatchState {
+    pub fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Created, Self::Configured)
+                | (Self::Configured, Self::Ready)
+                | (Self::Ready, Self::Playing)
+                | (Self::Playing, Self::Finished)
+                | (Self::Finished, Self::Replay)
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArenaError {
     EmptyPlayers,
@@ -166,6 +196,10 @@ pub enum ArenaError {
     UnknownTournamentPlayer(PlayerId),
     TournamentComplete,
     NoScheduledMatch,
+    InvalidState {
+        current: ArenaMatchState,
+        expected: ArenaMatchState,
+    },
 }
 
 impl TournamentBracket {
@@ -388,9 +422,12 @@ fn tournament_winner_from_replay(
 pub struct ArenaMatch {
     pub world: SwarmWorld,
     pub config: ArenaConfig,
+    pub state: ArenaMatchState,
 }
 
 impl ArenaMatch {
+    /// Create a new arena match. Sets up the world, applies rules, seeds initial state.
+    /// State transitions: Created → Configured → Ready (in constructor).
     pub fn new(config: ArenaConfig) -> Result<Self, ArenaError> {
         if config.slots.is_empty() {
             return Err(ArenaError::EmptyPlayers);
@@ -403,7 +440,29 @@ impl ArenaMatch {
         apply_arena_rules(&mut world, &config);
         seed_symmetric_initial_state(&mut world, &config);
 
-        Ok(Self { world, config })
+        Ok(Self {
+            world,
+            config,
+            state: ArenaMatchState::Ready,
+        })
+    }
+
+    /// Returns the current match state.
+    pub fn state(&self) -> ArenaMatchState {
+        self.state
+    }
+
+    /// Start the match — transitions Ready → Playing.
+    /// Call before `run()` if you want explicit state tracking.
+    pub fn start(&mut self) -> Result<(), ArenaError> {
+        if self.state != ArenaMatchState::Ready {
+            return Err(ArenaError::InvalidState {
+                current: self.state,
+                expected: ArenaMatchState::Ready,
+            });
+        }
+        self.state = ArenaMatchState::Playing;
+        Ok(())
     }
 
     pub fn locked_code(&self, player_id: PlayerId) -> Option<&ArenaPlayerCode> {
@@ -415,14 +474,25 @@ impl ArenaMatch {
             .get(&player_id)
     }
 
+    /// Run the match to completion (Playing → Finished → Replay).
     pub fn run(
-        self,
+        mut self,
         executors: HashMap<PlayerId, Box<dyn PlayerExecutor>>,
     ) -> Result<ArenaReplay, ArenaError> {
         for slot in &self.config.slots {
             if !executors.contains_key(&slot.player_id) {
                 return Err(ArenaError::MissingExecutor(slot.player_id));
             }
+        }
+
+        // Transition Ready → Playing if not already started
+        if self.state == ArenaMatchState::Ready {
+            self.start()?;
+        } else if self.state != ArenaMatchState::Playing {
+            return Err(ArenaError::InvalidState {
+                current: self.state,
+                expected: ArenaMatchState::Playing,
+            });
         }
 
         let fixed_ticks = self.config.fixed_ticks;
@@ -438,10 +508,12 @@ impl ArenaMatch {
             scheduler.tick();
         }
 
+        self.state = ArenaMatchState::Finished;
         let records = scheduler.committer.records;
         let mut world = scheduler.world;
         world.record_arena_completed();
 
+        self.state = ArenaMatchState::Replay;
         Ok(ArenaReplay {
             privacy: replay_privacy,
             public: replay_privacy == ReplayPrivacy::Public,
@@ -619,5 +691,55 @@ mod tests {
                 >= 3
         );
         assert!(bracket.completed.len() >= 5);
+    }
+
+    #[test]
+    fn arena_match_state_initializes_as_ready() {
+        let arena = ArenaMatch::new(ArenaConfig::one_v_one(code(1), code(2))).unwrap();
+        assert_eq!(arena.state(), ArenaMatchState::Ready);
+    }
+
+    #[test]
+    fn start_transitions_ready_to_playing() {
+        let mut arena = ArenaMatch::new(ArenaConfig::one_v_one(code(1), code(2))).unwrap();
+        assert!(arena.start().is_ok());
+        assert_eq!(arena.state(), ArenaMatchState::Playing);
+    }
+
+    #[test]
+    fn start_rejects_non_ready_state() {
+        let mut arena = ArenaMatch::new(ArenaConfig::one_v_one(code(1), code(2))).unwrap();
+        arena.start().unwrap(); // Ready→Playing
+        let result = arena.start(); // Already Playing, should fail
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn state_transitions_through_full_lifecycle() {
+        let arena = ArenaMatch::new(ArenaConfig::one_v_one(code(1), code(2))).unwrap();
+        assert_eq!(arena.state(), ArenaMatchState::Ready);
+
+        let mut executors: HashMap<PlayerId, Box<dyn PlayerExecutor>> = HashMap::new();
+        executors.insert(1, Box::<IdleExecutor>::default());
+        executors.insert(2, Box::<IdleExecutor>::default());
+        let replay = arena.run(executors).unwrap();
+
+        // After run: Finished → Replay
+        // (state is consumed with self, but replay contains traces)
+        assert!(!replay.traces.is_empty(), "replay should contain tick traces");
+    }
+
+    #[test]
+    fn arena_match_state_can_transition_rules() {
+        assert!(ArenaMatchState::Created.can_transition_to(ArenaMatchState::Configured));
+        assert!(ArenaMatchState::Configured.can_transition_to(ArenaMatchState::Ready));
+        assert!(ArenaMatchState::Ready.can_transition_to(ArenaMatchState::Playing));
+        assert!(ArenaMatchState::Playing.can_transition_to(ArenaMatchState::Finished));
+        assert!(ArenaMatchState::Finished.can_transition_to(ArenaMatchState::Replay));
+
+        // Invalid transitions
+        assert!(!ArenaMatchState::Ready.can_transition_to(ArenaMatchState::Finished));
+        assert!(!ArenaMatchState::Created.can_transition_to(ArenaMatchState::Ready));
+        assert!(!ArenaMatchState::Replay.can_transition_to(ArenaMatchState::Playing));
     }
 }
