@@ -60,9 +60,11 @@ pub enum ReplayPrivacy {
 pub struct ArenaConfig {
     pub fixed_ticks: Tick,
     pub public_spectate: bool,
+    pub spectate_delay: Option<Tick>,
     pub replay_privacy: ReplayPrivacy,
     pub starting_body: Vec<BodyPart>,
     pub slots: Vec<ArenaPlayerSlot>,
+    pub precommit_required: bool,
 }
 
 impl ArenaConfig {
@@ -71,8 +73,10 @@ impl ArenaConfig {
         Self {
             fixed_ticks: ARENA_FIXED_TICKS,
             public_spectate: true,
+            spectate_delay: Some(100),
             replay_privacy: ReplayPrivacy::Public,
             starting_body: vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
+            precommit_required: true,
             slots: vec![
                 ArenaPlayerSlot {
                     player_id: left.player_id,
@@ -86,6 +90,27 @@ impl ArenaConfig {
                 },
             ],
         }
+    }
+
+    /// Validate that all slot code hashes match their registered modules.
+    /// Returns Ok(()) or ArenaError::PrecommitMismatch.
+    pub fn validate_precommit(&self) -> Result<(), ArenaError> {
+        if !self.precommit_required {
+            return Ok(());
+        }
+        for slot in &self.slots {
+            if slot.locked_code.module_id.is_empty() || slot.locked_code.code_hash.is_empty() {
+                return Err(ArenaError::PrecommitMissing {
+                    player_id: slot.player_id,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Generate a replay URL for this match configuration.
+    pub fn replay_url(&self, match_id: u64) -> String {
+        format!("swarm://arena/replay/{match_id}")
     }
 }
 
@@ -199,6 +224,9 @@ pub enum ArenaError {
     InvalidState {
         current: ArenaMatchState,
         expected: ArenaMatchState,
+    },
+    PrecommitMissing {
+        player_id: PlayerId,
     },
 }
 
