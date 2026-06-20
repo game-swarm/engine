@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::arena_admin::ArenaRoomAdmin;
 use crate::command::{
     apply_command, source_gate, validate_command, CommandIntent, CommandResult, CommandSource,
     RawCommand, Tick,
