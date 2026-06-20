@@ -32,3 +32,15 @@ wat = "1"
 [[bench]]
 name = "rollback_snapshot"
 harness = false
+
+[[bench]]
+name = "command_throughput"
+harness = false
+
+[[bench]]
+name = "snapshot_capture"
+harness = false
+
+[[bench]]
+name = "tick_loop"
+harness = false
