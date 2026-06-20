@@ -1,3 +1,4 @@
+pub mod aging_system;
 pub mod cargo_in_transit_system;
 pub mod combat_system;
 pub mod controller_repair_system;
@@ -26,6 +27,7 @@ pub mod special_attack_reducer;
 pub mod starting_resources_system;
 pub mod status_advance_system;
 
+pub use aging_system::aging_system;
 pub use cargo_in_transit_system::{CargoInTransit, cargo_in_transit_system};
 pub use combat_system::{
     CombatRules, PendingCombat, Projectile, attack_system, body_part_match, body_part_damage,

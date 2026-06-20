@@ -509,8 +509,8 @@ mod tests {
             .get::<Structure>()
             .unwrap();
         assert_eq!(drone_ref.fatigue, 1);
-        // Age is no longer modified by decay_system (moved to aging_system in W13)
-        assert_eq!(drone_ref.age, 7);
+        // Age incremented by aging_system (S23), no longer by decay_system (S24)
+        assert_eq!(drone_ref.age, 8);
         assert_eq!(structure_ref.cooldown, 2);
     }
 

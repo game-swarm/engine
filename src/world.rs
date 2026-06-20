@@ -885,6 +885,7 @@ impl WorldConfig {
                 combat_system,
                 special_attack_reducer,
                 damage_application_system,
+                aging_system,
                 decay_system,
                 memory_upkeep_system,
                 drone_env_var_system,

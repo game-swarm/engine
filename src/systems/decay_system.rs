@@ -58,6 +58,8 @@ mod tests {
     #[test]
     fn decay_does_not_change_age() {
         // Aging is now handled by aging_system (W13), not decay.
+        // The aging_system increments age by 1 per tick, but decay itself
+        // does NOT touch age — verify age only changes by the expected +1 from aging.
         let mut world = create_world();
         let drone = spawn_test_drone(&mut world, 0);
 
@@ -66,6 +68,10 @@ mod tests {
         world.app.update();
 
         let age_after = world.app.world().entity(drone).get::<Drone>().unwrap().age;
-        assert_eq!(age_after, age_before, "decay should NOT modify drone age");
+        assert_eq!(
+            age_after,
+            age_before + 1,
+            "aging system increments age by exactly 1; decay does NOT modify it"
+        );
     }
 }

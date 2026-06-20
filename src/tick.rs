@@ -2353,7 +2353,7 @@ mod tests {
                 .y,
             9
         );
-        // Decay no longer adds age (S24 → aging_system in W13); new drone age stays 0
+        // Aging system (S23) increments age by 1 each tick
         assert_eq!(
             scheduler
                 .world
@@ -2363,7 +2363,7 @@ mod tests {
                 .get::<Drone>()
                 .unwrap()
                 .age,
-            0
+            1
         );
     }
 
