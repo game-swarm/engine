@@ -340,6 +340,237 @@ fn checksum_state<T: std::fmt::Debug>(state: &T) -> u64 {
     u64::from_le_bytes(hash.as_bytes()[0..8].try_into().unwrap())
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// W16c: Session + Deploy State Machines (§7.1-§7.4)
+// Spec: docs/specs/security/09-command-source.md
+// ═══════════════════════════════════════════════════════════════════
+
+use std::collections::HashMap;
+
+/// Session lifecycle states (§7.1)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionStatus {
+    Active,
+    PendingClose,
+    Closed,
+}
+
+/// Per-connection session state (§7.1)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionState {
+    pub session_id: u128,
+    pub player_id: PlayerId,
+    pub status: SessionStatus,
+    pub created_at: u64,
+    pub last_heartbeat: u64,
+    pub expires_at: u64,
+    /// Refund credit accumulated this session (per §7.2, scoped to player+slot+session+tick_window)
+    pub refund_credit: u64,
+}
+
+impl SessionState {
+    pub const RECONNECT_WINDOW_TICKS: u64 = 60;
+    pub const HEARTBEAT_INTERVAL_TICKS: u64 = 30;
+
+    pub fn new(session_id: u128, player_id: PlayerId, now: u64) -> Self {
+        Self {
+            session_id,
+            player_id,
+            status: SessionStatus::Active,
+            created_at: now,
+            last_heartbeat: now,
+            expires_at: now + Self::RECONNECT_WINDOW_TICKS,
+            refund_credit: 0,
+        }
+    }
+
+    pub fn heartbeat(&mut self, now: u64) {
+        self.last_heartbeat = now;
+        self.expires_at = now + Self::RECONNECT_WINDOW_TICKS;
+    }
+
+    pub fn is_expired(&self, now: u64) -> bool {
+        now > self.expires_at
+    }
+
+    pub fn can_reconnect(&self, now: u64) -> bool {
+        matches!(self.status, SessionStatus::PendingClose) && !self.is_expired(now)
+    }
+}
+
+/// Per-player, per-slot monotonic version counter (§7.3)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeployVersionCounters {
+    /// Key: (player_id, slot_name) → current version_counter
+    counters: HashMap<(PlayerId, String), u64>,
+}
+
+impl DeployVersionCounters {
+    /// Returns true if this version_counter is newer (anti-replay)
+    pub fn check_and_advance(&mut self, player_id: PlayerId, slot: &str, counter: u64) -> bool {
+        let key = (player_id, slot.to_string());
+        let current = self.counters.get(&key).copied().unwrap_or(0);
+        if counter > current {
+            self.counters.insert(key, counter);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn current(&self, player_id: PlayerId, slot: &str) -> u64 {
+        self.counters
+            .get(&(player_id, slot.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// Deploy nonce state machine (§7.4)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeployNonceState {
+    Idle,
+    Compiling,
+    Deployed,
+    Rejected,
+}
+
+/// Per-deploy nonce tracker (§7.4)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeployNonce {
+    pub state: DeployNonceState,
+    pub player_id: PlayerId,
+    pub slot: String,
+    pub version_counter: u64,
+    pub module_hash: Option<[u8; 32]>,
+    pub metadata_hash: Option<[u8; 32]>,
+    pub deployed_at: Option<u64>,
+}
+
+impl DeployNonce {
+    pub fn new(player_id: PlayerId, slot: &str, version_counter: u64) -> Self {
+        Self {
+            state: DeployNonceState::Idle,
+            player_id,
+            slot: slot.to_string(),
+            version_counter,
+            module_hash: None,
+            metadata_hash: None,
+            deployed_at: None,
+        }
+    }
+
+    pub fn transition(&mut self, to: DeployNonceState) {
+        self.state = to;
+        if to == DeployNonceState::Deployed {
+            self.deployed_at = Some(0); // tick set by caller
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// W16c: Safe Hint Ladder — 三级错误提示模型
+// ═══════════════════════════════════════════════════════════════════
+
+/// Three-level error hint escalation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HintLevel {
+    /// Level 1: Direct fix suggestion (e.g. "need 50 more energy")
+    Direct,
+    /// Level 2: Reference docs/SDK (e.g. "see swarm_get_docs('harvest')")
+    Reference,
+    /// Level 3: Escalate to human (e.g. "unexpected state, contact admin")
+    Escalate,
+}
+
+/// Structured hint with escalation level
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafeHint {
+    pub level: HintLevel,
+    pub summary: String,
+    pub detail: String,
+    pub doc_ref: Option<String>,
+}
+
+impl SafeHint {
+    pub fn direct(summary: &str, detail: &str) -> Self {
+        Self {
+            level: HintLevel::Direct,
+            summary: summary.to_string(),
+            detail: detail.to_string(),
+            doc_ref: None,
+        }
+    }
+
+    pub fn reference(summary: &str, detail: &str, doc_ref: &str) -> Self {
+        Self {
+            level: HintLevel::Reference,
+            summary: summary.to_string(),
+            detail: detail.to_string(),
+            doc_ref: Some(doc_ref.to_string()),
+        }
+    }
+
+    pub fn escalate(summary: &str, detail: &str) -> Self {
+        Self {
+            level: HintLevel::Escalate,
+            summary: summary.to_string(),
+            detail: detail.to_string(),
+            doc_ref: None,
+        }
+    }
+}
+
+/// Ladder that maps rejection reasons to appropriate hint levels
+pub struct SafeHintLadder;
+
+impl SafeHintLadder {
+    /// Produce the appropriate SafeHint for a rejection reason
+    pub fn hint_for(reason: &str) -> SafeHint {
+        match reason {
+            // Level 1 — Direct fix
+            r if r.contains("insufficient") && r.contains("energy") => {
+                SafeHint::direct("Need more energy", r)
+            }
+            r if r.contains("cooldown") => {
+                SafeHint::direct("Action on cooldown", r)
+            }
+            r if r.contains("room is full") => {
+                SafeHint::direct("Room at capacity", r)
+            }
+
+            // Level 2 — Reference docs
+            r if r.contains("body_part") => {
+                SafeHint::reference(
+                    "Invalid body part targeting",
+                    r,
+                    "swarm_get_docs('body_parts')",
+                )
+            }
+            r if r.contains("disrupt") => {
+                SafeHint::reference(
+                    "Disrupt requires valid body part match",
+                    r,
+                    "swarm_get_docs('disrupt')",
+                )
+            }
+            r if r.contains("hack") || r.contains("drain") || r.contains("overload") => {
+                SafeHint::reference(
+                    "Special attack validation failed",
+                    r,
+                    "swarm_get_docs('special_attacks')",
+                )
+            }
+
+            // Level 3 — Escalate
+            r if r.contains("state") && r.contains("unexpected") => {
+                SafeHint::escalate("Unexpected engine state", r)
+            }
+            _ => SafeHint::direct("Command rejected", reason),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,5 +742,90 @@ mod tests {
                 .iter()
                 .any(|alert| matches!(alert, SecurityAlert::StateInconsistency { .. }))
         );
+    }
+
+    // ── W16c: Session + Deploy State Machines + Safe Hint Ladder ──
+
+    #[test]
+    fn session_lifecycle_active_to_closed() {
+        let mut session = SessionState::new(1, 42, 100);
+        assert_eq!(session.status, SessionStatus::Active);
+        assert!(!session.is_expired(100));
+        assert!(!session.is_expired(159));
+        assert!(session.is_expired(161));
+    }
+
+    #[test]
+    fn session_heartbeat_extends_lifetime() {
+        let mut session = SessionState::new(1, 42, 100);
+        session.heartbeat(150);
+        assert!(!session.is_expired(150));
+        assert!(!session.is_expired(209));
+        assert!(session.is_expired(211));
+    }
+
+    #[test]
+    fn session_reconnect_window() {
+        let mut session = SessionState::new(1, 42, 100);
+        session.status = SessionStatus::PendingClose;
+        assert!(session.can_reconnect(150));
+        assert!(!session.can_reconnect(170));
+    }
+
+    #[test]
+    fn version_counter_anti_replay() {
+        let mut counters = DeployVersionCounters::default();
+        assert!(counters.check_and_advance(1, "main", 1));
+        assert_eq!(counters.current(1, "main"), 1);
+        assert!(!counters.check_and_advance(1, "main", 1));
+        assert!(!counters.check_and_advance(1, "main", 0));
+        assert!(counters.check_and_advance(1, "main", 5));
+        assert_eq!(counters.current(1, "main"), 5);
+    }
+
+    #[test]
+    fn version_counter_per_slot_isolation() {
+        let mut counters = DeployVersionCounters::default();
+        assert!(counters.check_and_advance(1, "main", 3));
+        assert!(counters.check_and_advance(1, "defense", 7));
+        assert_eq!(counters.current(1, "main"), 3);
+        assert_eq!(counters.current(1, "defense"), 7);
+    }
+
+    #[test]
+    fn deploy_nonce_state_machine() {
+        let mut nonce = DeployNonce::new(42, "main", 1);
+        assert_eq!(nonce.state, DeployNonceState::Idle);
+        nonce.transition(DeployNonceState::Compiling);
+        assert_eq!(nonce.state, DeployNonceState::Compiling);
+        nonce.transition(DeployNonceState::Deployed);
+        assert_eq!(nonce.state, DeployNonceState::Deployed);
+        assert!(nonce.deployed_at.is_some());
+    }
+
+    #[test]
+    fn safe_hint_level_1_direct_for_insufficient_energy() {
+        let hint = SafeHintLadder::hint_for("insufficient energy: have 10, need 50");
+        assert_eq!(hint.level, HintLevel::Direct);
+        assert!(hint.summary.contains("Need more energy"));
+    }
+
+    #[test]
+    fn safe_hint_level_2_reference_for_body_part() {
+        let hint = SafeHintLadder::hint_for("invalid body_part targeting");
+        assert_eq!(hint.level, HintLevel::Reference);
+        assert!(hint.doc_ref.unwrap().contains("body_parts"));
+    }
+
+    #[test]
+    fn safe_hint_level_3_escalate_for_unexpected_state() {
+        let hint = SafeHintLadder::hint_for("unexpected state in combat resolver");
+        assert_eq!(hint.level, HintLevel::Escalate);
+    }
+
+    #[test]
+    fn safe_hint_defaults_to_direct() {
+        let hint = SafeHintLadder::hint_for("unknown validation error");
+        assert_eq!(hint.level, HintLevel::Direct);
     }
 }
