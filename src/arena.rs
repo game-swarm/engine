@@ -744,7 +744,9 @@ mod tests {
 
     #[test]
     fn state_transitions_through_full_lifecycle() {
-        let arena = ArenaMatch::new(ArenaConfig::one_v_one(code(1), code(2))).unwrap();
+        let mut config = ArenaConfig::one_v_one(code(1), code(2));
+        config.fixed_ticks = 5; // 5 ticks suffice for state transition validation
+        let arena = ArenaMatch::new(config).unwrap();
         assert_eq!(arena.state(), ArenaMatchState::Ready);
 
         let mut executors: HashMap<PlayerId, Box<dyn PlayerExecutor>> = HashMap::new();
