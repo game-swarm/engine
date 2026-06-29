@@ -1,6 +1,6 @@
 FROM rust:latest AS build
 
-ARG FDB_VERSION=7.3.59
+ARG FDB_VERSION=7.3.69
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -20,9 +20,9 @@ WORKDIR /app
 COPY . .
 RUN cargo build --release
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
-ARG FDB_VERSION=7.3.59
+ARG FDB_VERSION=7.3.69
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
