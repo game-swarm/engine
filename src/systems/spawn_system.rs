@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::{
     BodyPart, BodyPartRegistry, Drone, Owner, PlayerId, Position, RoomId, RoomTerrains,
-    SpawningGrace,
+    PendingEntityCreation, PendingEntityKind, SpawningGrace, StableEntityIdAllocator,
 };
 use crate::onboarding::OnboardingEvent;
 
@@ -23,11 +23,11 @@ pub struct PendingSpawnQueue(pub Vec<PendingSpawn>);
 pub struct RoomDroneCounts(pub BTreeMap<(RoomId, PlayerId), u32>);
 
 pub fn spawn_system(
-    mut commands: Commands,
     mut queue: ResMut<PendingSpawnQueue>,
     mut room_counts: ResMut<RoomDroneCounts>,
+    mut pending_entities: ResMut<PendingEntityCreation>,
+    mut stable_ids: ResMut<StableEntityIdAllocator>,
     terrains: Res<RoomTerrains>,
-    body_registry: Res<BodyPartRegistry>,
     mut onboarding_events: EventWriter<OnboardingEvent>,
 ) {
     let pending = std::mem::take(&mut queue.0);
@@ -36,16 +36,57 @@ pub fn spawn_system(
             continue;
         }
 
-        commands.spawn((
-            spawn.position,
-            Owner(spawn.owner),
-            Drone::new(spawn.owner, spawn.body, &body_registry),
-            SpawningGrace { remaining: 1 },
-        ));
+        let stable_id = stable_ids.allocate();
+        pending_entities.entries.push(crate::components::PendingEntityCreationEntry {
+            stable_id,
+            kind: PendingEntityKind::Drone {
+                owner: spawn.owner,
+                body: spawn.body,
+                position: spawn.position,
+                spawning_grace: 1,
+            },
+        });
         *room_counts
             .0
             .entry((spawn.position.room, spawn.owner))
             .or_default() += 1;
         onboarding_events.send(OnboardingEvent::DroneSpawned);
+    }
+}
+
+pub fn flush_pending_entity_creation_system(
+    mut commands: Commands,
+    mut pending_entities: ResMut<PendingEntityCreation>,
+    body_registry: Res<BodyPartRegistry>,
+) {
+    let mut entries = std::mem::take(&mut pending_entities.entries);
+    entries.sort_by_key(|entry| entry.stable_id);
+    for entry in entries {
+        match entry.kind {
+            PendingEntityKind::Drone {
+                owner,
+                body,
+                position,
+                spawning_grace,
+            } => {
+                let mut entity = commands.spawn((
+                    entry.stable_id,
+                    position,
+                    Owner(owner),
+                    Drone::new(owner, body, &body_registry),
+                ));
+                if spawning_grace > 0 {
+                    entity.insert(SpawningGrace {
+                        remaining: spawning_grace,
+                    });
+                }
+            }
+            PendingEntityKind::Structure {
+                position,
+                structure,
+            } => {
+                commands.spawn((entry.stable_id, position, structure));
+            }
+        }
     }
 }

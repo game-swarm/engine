@@ -1112,6 +1112,92 @@ impl Default for FortifyState {
     }
 }
 
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeechState {
+    pub resource: String,
+    pub amount_per_tick: u32,
+    pub age_acceleration: u32,
+    pub remaining_ticks: u32,
+}
+
+impl Default for LeechState {
+    fn default() -> Self {
+        Self {
+            resource: "Energy".to_string(),
+            amount_per_tick: 0,
+            age_acceleration: 1,
+            remaining_ticks: 0,
+        }
+    }
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FabricateState {
+    pub structure_type: StructureType,
+    pub remaining_ticks: u32,
+}
+
+impl Default for FabricateState {
+    fn default() -> Self {
+        Self {
+            structure_type: StructureType::FACTORY,
+            remaining_ticks: 0,
+        }
+    }
+}
+
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HackBuffer {
+    pub active: bool,
+}
+
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrainBuffer {
+    pub resource: String,
+    pub amount_per_tick: u32,
+}
+
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverloadBuffer {
+    pub fuel_drain_per_tick: u32,
+    pub fuel_floor: u32,
+}
+
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebilitateBuffer {
+    pub damage_type: String,
+}
+
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisruptBuffer {
+    pub body_parts: Vec<BodyPart>,
+}
+
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FortifyBuffer {
+    pub active: bool,
+}
+
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeechBuffer {
+    pub resource: String,
+    pub amount_per_tick: u32,
+    pub age_acceleration: u32,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FabricateBuffer {
+    pub structure_type: StructureType,
+}
+
+impl Default for FabricateBuffer {
+    fn default() -> Self {
+        Self {
+            structure_type: StructureType::FACTORY,
+        }
+    }
+}
+
 pub const DEFAULT_ROOM_SIZE: i32 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1315,8 +1401,69 @@ pub struct Controller {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct CodeVersion(pub u64);
 
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MarkedForDeath;
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct DeathMark;
+
+pub type MarkedForDeath = DeathMark;
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct StableEntityId(pub u64);
+
+#[derive(BevyResource, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StableEntityIdAllocator {
+    pub next: u64,
+}
+
+impl Default for StableEntityIdAllocator {
+    fn default() -> Self {
+        Self { next: 1 }
+    }
+}
+
+impl StableEntityIdAllocator {
+    pub fn allocate(&mut self) -> StableEntityId {
+        let id = StableEntityId(self.next);
+        self.next = self.next.saturating_add(1);
+        id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingEntityKind {
+    Drone {
+        owner: PlayerId,
+        body: Vec<BodyPart>,
+        position: Position,
+        spawning_grace: u32,
+    },
+    Structure {
+        position: Position,
+        structure: Structure,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEntityCreationEntry {
+    pub stable_id: StableEntityId,
+    pub kind: PendingEntityKind,
+}
+
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEntityCreation {
+    pub entries: Vec<PendingEntityCreationEntry>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Action {
+    #[serde(rename = "type")]
+    pub action_type: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionRegistry {
+    pub handlers: BTreeMap<String, String>,
+}
 
 /// Shared resource tracking per-player age repair totals across Controller and Depot systems.
 /// Combined repair cannot exceed 50% of natural growth per tick per drone.

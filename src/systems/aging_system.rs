@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::components::{Drone, MarkedForDeath};
+use crate::components::{DeathMark, Drone, MarkedForDeath};
 
 /// Aging system (S23) — increments drone age each tick.
 /// On the NEXT tick, S07 death_marker catches `age >= lifespan` and inserts
@@ -51,7 +51,7 @@ mod tests {
         let mut app = App::new();
         app.add_systems(Update, aging_system);
         let drone = app.world_mut().spawn(test_drone(1499, DEFAULT_DRONE_LIFESPAN)).id();
-        app.world_mut().entity_mut(drone).insert(MarkedForDeath);
+        app.world_mut().entity_mut(drone).insert(DeathMark);
 
         let age_before = app.world().entity(drone).get::<Drone>().unwrap().age;
 

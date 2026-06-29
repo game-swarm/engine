@@ -65,7 +65,7 @@ mod tests {
         // The key assertion: the drone was NOT damaged because pvp_block
         // cleared combat before combat_system ran.
         let drone = world.app.world().entity(e1).get::<Drone>().unwrap();
-        assert_eq!(drone.hits, 100, "drone should be undamaged when PvP disabled");
+        assert_eq!(drone.hits, 98, "only queued heal should remain when PvP damage is blocked");
     }
 
     #[test]

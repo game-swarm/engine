@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 
-use crate::components::{Drone, MarkedForDeath, SpawningGrace, Structure};
-use crate::systems::special_attack_reducer::PendingDamage;
+use indexmap::IndexMap;
+
+use crate::components::{DeathMark, Drone, MarkedForDeath, SpawningGrace, Structure};
+use crate::systems::special_attack_reducer::{PendingDamage, PendingHeal};
 
 /// S15: Damage Application System
 ///
@@ -12,31 +14,68 @@ use crate::systems::special_attack_reducer::PendingDamage;
 /// Filter: `Without<SpawningGrace>` per manifest §S15.
 pub fn damage_application_system(
     mut damage: ResMut<PendingDamage>,
+    mut heal: ResMut<PendingHeal>,
     mut drones: Query<&mut Drone, Without<SpawningGrace>>,
     mut structures: Query<&mut Structure, Without<SpawningGrace>>,
     mut commands: Commands,
 ) {
-    if damage.entries.is_empty() {
+    if damage.entries.is_empty() && heal.entries.is_empty() {
         return;
     }
 
-    let entries = std::mem::take(&mut damage.entries);
+    let mut damage_by_target: IndexMap<Entity, u32> = IndexMap::new();
+    for entry in std::mem::take(&mut damage.entries) {
+        *damage_by_target.entry(entry.target).or_default() = damage_by_target
+            .get(&entry.target)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(entry.amount);
+    }
 
-    for (target, amount, _damage_type) in entries {
-        // Try to apply damage to drone
+    let mut heal_by_target: IndexMap<Entity, u32> = IndexMap::new();
+    for entry in std::mem::take(&mut heal.entries) {
+        *heal_by_target.entry(entry.target).or_default() = heal_by_target
+            .get(&entry.target)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(entry.amount);
+    }
+
+    let mut targets = damage_by_target.keys().copied().collect::<Vec<_>>();
+    for target in heal_by_target.keys().copied() {
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    targets.sort_by_key(|entity| entity.to_bits());
+
+    for target in targets {
+        let amount = damage_by_target
+            .get(&target)
+            .copied()
+            .unwrap_or_default()
+            .saturating_sub(heal_by_target.get(&target).copied().unwrap_or_default());
         if let Ok(mut drone) = drones.get_mut(target) {
-            drone.hits = drone.hits.saturating_sub(amount);
+            let heal_amount = heal_by_target
+                .get(&target)
+                .copied()
+                .unwrap_or_default()
+                .saturating_sub(damage_by_target.get(&target).copied().unwrap_or_default());
+            if heal_amount > 0 {
+                drone.hits = drone.hits.saturating_add(heal_amount).min(drone.hits_max);
+            } else {
+                drone.hits = drone.hits.saturating_sub(amount);
+            }
             if drone.hits == 0 {
-                commands.entity(target).insert(MarkedForDeath);
+                commands.entity(target).insert(DeathMark);
             }
             continue;
         }
 
-        // Try to apply damage to structure
         if let Ok(mut structure) = structures.get_mut(target) {
             structure.hits = structure.hits.saturating_sub(amount);
             if structure.hits == 0 {
-                commands.entity(target).insert(MarkedForDeath);
+                commands.entity(target).insert(DeathMark);
             }
         }
     }
@@ -79,8 +118,9 @@ mod tests {
         app.add_systems(Update, damage_application_system);
         let drone = spawn_test_drone(&mut app, 1, 100, 100);
         app.insert_resource(PendingDamage {
-            entries: vec![(drone, 30, "Kinetic".into())],
+            entries: vec![(drone, 30, "Kinetic".into()).into()],
         });
+        app.insert_resource(PendingHeal::default());
 
         app.update();
 
@@ -94,8 +134,9 @@ mod tests {
         app.add_systems(Update, damage_application_system);
         let drone = spawn_test_drone(&mut app, 1, 10, 100);
         app.insert_resource(PendingDamage {
-            entries: vec![(drone, 10, "Kinetic".into())],
+            entries: vec![(drone, 10, "Kinetic".into()).into()],
         });
+        app.insert_resource(PendingHeal::default());
 
         app.update();
 
@@ -114,8 +155,9 @@ mod tests {
         let drone = spawn_test_drone(&mut app, 1, 100, 100);
         app.world_mut().entity_mut(drone).insert(SpawningGrace { remaining: 1 });
         app.insert_resource(PendingDamage {
-            entries: vec![(drone, 30, "Kinetic".into())],
+            entries: vec![(drone, 30, "Kinetic".into()).into()],
         });
+        app.insert_resource(PendingHeal::default());
 
         app.update();
 

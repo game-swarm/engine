@@ -6,6 +6,7 @@ use crate::components::{
     Attributes, BodyPart, BodyPartRegistry, DamageTypeRegistry, Drone, EntityFlags, Owner,
     Position, ResistanceRegistry, SpawningGrace, Structure,
 };
+use crate::systems::{PendingDamage, PendingHeal};
 
 pub const DEFAULT_ATTACK_DAMAGE: u32 = 30;
 pub const DEFAULT_RANGED_ATTACK_DAMAGE: u32 = 25;
@@ -388,14 +389,16 @@ pub fn combat_system(
     body_registry: Res<BodyPartRegistry>,
     damage_registry: Res<DamageTypeRegistry>,
     resistance_registry: Res<ResistanceRegistry>,
-    mut drones: Query<(
-        &mut Drone,
+    mut pending_damage: ResMut<PendingDamage>,
+    mut pending_heal: ResMut<PendingHeal>,
+    drones: Query<(
+        &Drone,
         Option<&Attributes>,
         Option<&EntityFlags>,
         Option<&SpawningGrace>,
     )>,
-    mut structures: Query<
-        (&mut Structure, Option<&Attributes>, Option<&EntityFlags>),
+    structures: Query<
+        (&Structure, Option<&Attributes>, Option<&EntityFlags>),
         Without<Drone>,
     >,
 ) {
@@ -418,7 +421,7 @@ pub fn combat_system(
     damage_by_target.sort_keys();
 
     for (entity, damages) in &damage_by_target {
-        if let Ok((mut drone, attrs, flags, grace)) = drones.get_mut(*entity) {
+        if let Ok((drone, attrs, flags, grace)) = drones.get(*entity) {
             if grace.is_some() {
                 continue;
             }
@@ -434,8 +437,10 @@ pub fn combat_system(
                 );
                 acc.saturating_add(((*amount as f64) * multiplier).floor() as u32)
             });
-            drone.hits = drone.hits.saturating_sub(total);
-        } else if let Ok((mut structure, attrs, flags)) = structures.get_mut(*entity) {
+            if total > 0 {
+                pending_damage.push(*entity, total, "Kinetic");
+            }
+        } else if let Ok((_structure, attrs, flags)) = structures.get(*entity) {
             let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
                 let multiplier = final_damage_multiplier(
                     None,
@@ -448,7 +453,9 @@ pub fn combat_system(
                 );
                 acc.saturating_add(((*amount as f64) * multiplier).floor() as u32)
             });
-            structure.hits = structure.hits.saturating_sub(total);
+            if total > 0 {
+                pending_damage.push(*entity, total, "Kinetic");
+            }
         }
     }
 
@@ -460,8 +467,8 @@ pub fn combat_system(
     heal_by_target.sort_keys();
 
     for (entity, amount) in &heal_by_target {
-        if let Ok((mut drone, _, _, _)) = drones.get_mut(*entity) {
-            drone.hits = (drone.hits + amount).min(drone.hits_max);
+        if drones.get(*entity).is_ok() {
+            pending_heal.push(*entity, *amount);
         }
     }
 }

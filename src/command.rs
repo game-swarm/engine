@@ -13,7 +13,10 @@ use crate::resources::{
     ALLIED_DAILY_CAP, NEW_PLAYER_TRANSFER_LOCK, PendingAlliedTransfer, PendingAlliedTransfers,
     AlliedTransferCooldowns, AlliedTransferDailyUsage, CurrentTick,
 };
-use crate::systems::{PendingControllerUpgrade, PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
+use crate::systems::{
+    PendingControllerUpgrade, PendingDamage, PendingHeal, PendingSpawn, PendingSpawnQueue,
+    RoomDroneCounts,
+};
 
 pub type ObjectId = u64;
 pub type Tick = u64;
@@ -2304,11 +2307,9 @@ fn apply_resisted_damage(
         }
     };
     let damage = ((damage as f64) * multiplier).floor() as u32;
-    if let Some(mut target_drone) = world.entity_mut(target).get_mut::<Drone>() {
-        target_drone.hits = target_drone.hits.saturating_sub(damage);
-    } else if let Some(mut structure) = world.entity_mut(target).get_mut::<Structure>() {
-        structure.hits = structure.hits.saturating_sub(damage);
-    }
+    world
+        .resource_mut::<PendingDamage>()
+        .push(target, damage, damage_type.to_string());
     Ok(())
 }
 
@@ -2323,11 +2324,10 @@ fn apply_heal(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> Co
             .resource::<BodyPartRegistry>()
             .heal_amount(BodyPart::Heal);
     let target = entity(target_id)?;
-    let mut entity_mut = world.entity_mut(target);
-    let mut drone = entity_mut
-        .get_mut::<Drone>()
-        .ok_or(RejectionReason::ObjectNotFound)?;
-    drone.hits = (drone.hits + heal).min(drone.hits_max);
+    if world.entity(target).get::<Drone>().is_none() {
+        return Err(RejectionReason::ObjectNotFound);
+    }
+    world.resource_mut::<PendingHeal>().push(target, heal);
     Ok(())
 }
 
@@ -2425,10 +2425,18 @@ fn apply_build(
         y,
         room: position.room,
     };
-    world.spawn((
-        position,
-        structure_defaults(structure_type, Some(player_id), world),
-    ));
+    let stable_id = world.resource_mut::<StableEntityIdAllocator>().allocate();
+    let structure = structure_defaults(structure_type, Some(player_id), world);
+    world
+        .resource_mut::<PendingEntityCreation>()
+        .entries
+        .push(PendingEntityCreationEntry {
+            stable_id,
+            kind: PendingEntityKind::Structure {
+                position,
+                structure,
+            },
+        });
     send_onboarding_event(world, OnboardingEvent::StructureBuilt);
     Ok(())
 }
@@ -2928,11 +2936,9 @@ fn apply_resisted_damage_amount(
     let target = entity(target_id)?;
     let multiplier = effect_multiplier(world, target, damage_type)?;
     let damage = ((damage as f64) * multiplier).floor() as u32;
-    if let Some(mut target_drone) = world.entity_mut(target).get_mut::<Drone>() {
-        target_drone.hits = target_drone.hits.saturating_sub(damage);
-    } else if let Some(mut structure) = world.entity_mut(target).get_mut::<Structure>() {
-        structure.hits = structure.hits.saturating_sub(damage);
-    }
+    world
+        .resource_mut::<PendingDamage>()
+        .push(target, damage, damage_type.to_string());
     Ok(damage)
 }
 
@@ -2941,8 +2947,8 @@ fn heal_drone(world: &mut World, object_id: ObjectId, amount: u32) {
         return;
     }
     if let Ok(object) = entity(object_id) {
-        if let Some(mut drone) = world.entity_mut(object).get_mut::<Drone>() {
-            drone.hits = (drone.hits + amount).min(drone.hits_max);
+        if world.entity(object).get::<Drone>().is_some() {
+            world.resource_mut::<PendingHeal>().push(object, amount);
         }
     }
 }
@@ -3423,6 +3429,14 @@ fn tile_has_any_drone(world: &mut World, position: Position) -> bool {
 
 fn tile_has_any_object(world: &mut World, position: Position) -> bool {
     tile_has_any_drone(world, position)
+        || world
+            .resource::<PendingEntityCreation>()
+            .entries
+            .iter()
+            .any(|entry| match &entry.kind {
+                PendingEntityKind::Drone { position: pending, .. }
+                | PendingEntityKind::Structure { position: pending, .. } => *pending == position,
+            })
         || world
             .query::<(&Position, &Structure)>()
             .iter(world)

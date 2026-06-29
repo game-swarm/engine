@@ -805,6 +805,10 @@ impl WorldConfig {
         app.insert_resource(PendingSpecialAttack::default());
         app.insert_resource(PendingIntents::default());
         app.insert_resource(PendingDamage::default());
+        app.insert_resource(PendingHeal::default());
+        app.insert_resource(PendingEntityCreation::default());
+        app.insert_resource(StableEntityIdAllocator::default());
+        app.insert_resource(ActionRegistry::default());
         app.insert_resource(EventLog::with_capacity(1000));
         app.insert_resource(ArenaRoomAdmin::default());
         app.insert_resource(ResourceLedger::default());
@@ -835,7 +839,6 @@ impl WorldConfig {
         app.add_systems(
             Update,
             stronghold_spawn_system
-                .after(pvp_block_system)
                 .before(npc_spawn_system),
         );
         app.add_systems(
@@ -847,7 +850,7 @@ impl WorldConfig {
         app.add_systems(
             Update,
             npc_ai_system
-                .after(room_state_system)
+                .after(spawn_system)
                 .before(npc_combat_system),
         );
         app.add_systems(
@@ -856,16 +859,13 @@ impl WorldConfig {
         );
         app.add_systems(
             Update,
-            npc_spawn_system
-                .after(pvp_block_system)
-                .before(spawn_system),
+            npc_spawn_system.before(spawn_system),
         );
         app.add_systems(
             Update,
             (
                 rhai_rule_module_tick_start_system,
                 death_mark_system,
-                pvp_block_system,
                 spawn_system,
                 starting_resources_system,
                 regeneration_system,
@@ -879,10 +879,8 @@ impl WorldConfig {
         app.add_systems(
             Update,
             (
-                controller_system,
                 controller_repair_system,
                 depot_repair_system,
-                room_state_system,
                 attack_system,
                 ranged_attack_system,
                 projectile_system,
@@ -890,17 +888,44 @@ impl WorldConfig {
                 combat_system,
                 special_attack_reducer,
                 damage_application_system,
+            )
+                .chain()
+                .after(global_storage_system),
+        );
+        app.add_systems(
+            Update,
+            (
+                hack_buffer_system,
+                drain_buffer_system,
+                overload_buffer_system,
+                debilitate_buffer_system,
+                disrupt_buffer_system,
+                fortify_buffer_system,
+                leech_buffer_system,
+                fabricate_buffer_system,
+                status_advance_system,
                 aging_system,
                 decay_system,
                 memory_upkeep_system,
                 drone_env_var_system,
                 rhai_rule_module_tick_end_system,
-                death_cleanup_system,
-                onboarding_system,
-                resource_ledger_system,
             )
                 .chain()
-                .after(global_storage_system),
+                .after(damage_application_system),
+        );
+        app.add_systems(
+            Update,
+            (
+                death_cleanup_system,
+                pvp_block_system,
+                room_state_system,
+                controller_system,
+                onboarding_system,
+                resource_ledger_system,
+                flush_pending_entity_creation_system,
+            )
+                .chain()
+                .after(rhai_rule_module_tick_end_system),
         );
     }
 }

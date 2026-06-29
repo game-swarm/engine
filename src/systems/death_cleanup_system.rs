@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::components::{Drone, MarkedForDeath, Position, Source};
+use crate::components::{DeathMark, Drone, MarkedForDeath, Position, Source};
 
 /// Death cleanup system (S25) — deterministic despawn of all MarkedForDeath
 /// entities, ordered by entity index descending (stable ordering).
@@ -73,7 +73,7 @@ mod tests {
                     y,
                     room: crate::components::RoomId(0),
                 },
-                MarkedForDeath,
+                DeathMark,
             ))
             .id()
     }
@@ -147,7 +147,7 @@ mod tests {
                 y: 10,
                 room: crate::components::RoomId(0),
             },
-            MarkedForDeath,
+            DeathMark,
         ));
 
         world.app.update();

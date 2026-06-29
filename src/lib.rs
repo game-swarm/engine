@@ -1416,6 +1416,7 @@ mod tests {
             ),
             Ok(())
         );
+        world.app.update();
         assert_eq!(
             world
                 .app
@@ -1457,6 +1458,7 @@ mod tests {
             ),
             Ok(())
         );
+        world.app.update();
         assert_eq!(
             world
                 .app
@@ -1482,6 +1484,7 @@ mod tests {
             ),
             Ok(())
         );
+        world.app.update();
         assert_eq!(
             world
                 .app
@@ -1828,6 +1831,8 @@ mod tests {
         let mut world = create_world();
         let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
         let target = world.spawn_drone(2, 11, 10, vec![BodyPart::Move]);
+        world.app.world_mut().entity_mut(attacker).remove::<SpawningGrace>();
+        world.app.world_mut().entity_mut(target).remove::<SpawningGrace>();
 
         assert_eq!(
             submit(
@@ -1841,6 +1846,15 @@ mod tests {
             ),
             Ok(())
         );
+        world
+            .app
+            .world_mut()
+            .entity_mut(attacker)
+            .get_mut::<Drone>()
+            .unwrap()
+            .body
+            .clear();
+        world.app.update();
         assert_eq!(
             world
                 .app
@@ -1853,6 +1867,7 @@ mod tests {
         );
 
         let healer = world.spawn_drone(2, 12, 10, vec![BodyPart::Heal]);
+        world.app.world_mut().entity_mut(healer).remove::<SpawningGrace>();
         assert_eq!(
             submit(
                 &mut world,
@@ -1865,6 +1880,15 @@ mod tests {
             ),
             Ok(())
         );
+        world
+            .app
+            .world_mut()
+            .entity_mut(healer)
+            .get_mut::<Drone>()
+            .unwrap()
+            .body
+            .clear();
+        world.app.update();
         assert_eq!(
             world
                 .app
@@ -1873,7 +1897,7 @@ mod tests {
                 .get::<Drone>()
                 .unwrap()
                 .hits,
-            82
+            83
         );
     }
 
@@ -2236,6 +2260,7 @@ mod tests {
             ),
             Ok(())
         );
+        world.app.update();
 
         let built = world
             .app

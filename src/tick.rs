@@ -1687,7 +1687,7 @@ impl WorldSnapshot {
             restore_component(&mut entity_mut, snapshot.terrain);
             restore_component(&mut entity_mut, snapshot.controller);
             if snapshot.marked_for_death {
-                entity_mut.insert(MarkedForDeath);
+                entity_mut.insert(DeathMark);
             } else {
                 entity_mut.remove::<MarkedForDeath>();
             }

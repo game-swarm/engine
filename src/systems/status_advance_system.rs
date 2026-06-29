@@ -1,14 +1,16 @@
 use bevy::prelude::*;
 
 use crate::components::{
-    DebilitateState, DisruptState, DrainState, FortifyState, HackState, OverloadState,
+    DebilitateState, DisruptState, DrainState, FabricateState, FortifyState, HackState,
+    LeechState, OverloadState,
 };
 use crate::systems::{PendingDamage, PendingIntents, SpecialAttackKind};
 
 /// S22 status_advance_system — UNIQUE WRITER for all StatusState components.
 ///
 /// This system is the single authority that writes HackState, DrainState,
-/// OverloadState, DebilitateState, DisruptState, and FortifyState (R22 B3).
+/// OverloadState, DebilitateState, DisruptState, FortifyState, LeechState,
+/// and FabricateState (R22 B3).
 /// It reads canonical sorted intents from S14's PendingIntents buffer,
 /// resets/extends existing statuses, advances remaining_ticks, and
 /// removes expired statuses. Initial component insertion happens via
@@ -22,6 +24,8 @@ pub fn status_advance_system(
     mut debilitate_q: Query<(Entity, &mut DebilitateState)>,
     mut disrupt_q: Query<(Entity, &mut DisruptState)>,
     mut fortify_q: Query<(Entity, &mut FortifyState)>,
+    mut leech_q: Query<(Entity, &mut LeechState)>,
+    mut fabricate_q: Query<(Entity, &mut FabricateState)>,
 ) {
     if let Some(intents) = intents {
         for intent in &intents.intents {
@@ -63,6 +67,18 @@ pub fn status_advance_system(
                         state.remaining_ticks = 3;
                     }
                 }
+                SpecialAttackKind::Leech => {
+                    if let Ok((_, mut state)) = leech_q.get_mut(intent.target) {
+                        state.remaining_ticks = 3;
+                        state.amount_per_tick = intent.amount / 3;
+                        state.age_acceleration = state.age_acceleration.max(1);
+                    }
+                }
+                SpecialAttackKind::Fabricate => {
+                    if let Ok((_, mut state)) = fabricate_q.get_mut(intent.target) {
+                        state.remaining_ticks = 1;
+                    }
+                }
             }
         }
     }
@@ -102,6 +118,20 @@ pub fn status_advance_system(
         state.remaining_ticks = state.remaining_ticks.saturating_sub(1);
         if state.remaining_ticks == 0 {
             commands.entity(entity).remove::<FortifyState>();
+        }
+    }
+    for (entity, mut state) in leech_q.iter_mut() {
+        state.remaining_ticks = state.remaining_ticks.saturating_sub(1);
+        if state.remaining_ticks > 0 {
+            state.age_acceleration = state.age_acceleration.saturating_add(1);
+        } else {
+            commands.entity(entity).remove::<LeechState>();
+        }
+    }
+    for (entity, mut state) in fabricate_q.iter_mut() {
+        state.remaining_ticks = state.remaining_ticks.saturating_sub(1);
+        if state.remaining_ticks == 0 {
+            commands.entity(entity).remove::<FabricateState>();
         }
     }
 }

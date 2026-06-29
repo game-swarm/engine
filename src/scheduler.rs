@@ -1,6 +1,6 @@
 use bevy::prelude::Resource;
 
-pub const SYSTEM_MANIFEST_VERSION: &str = "2.0.0";
+pub const SYSTEM_MANIFEST_VERSION: &str = "3.0.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemPhase {
@@ -308,12 +308,30 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         "status_advance_system",
         "status_adv",
         SystemPhase::Phase2bDeferred,
-        Some(ParallelSet::StatusEffects),
+        None,
         &["StatusState", "PendingIntents"],
         &["StatusState"],
     ),
     system(
         23,
+        "leech_buffer_system",
+        "leech_buf",
+        SystemPhase::Phase2bDeferred,
+        Some(ParallelSet::StatusEffects),
+        &["LeechState"],
+        &["LeechBuffer"],
+    ),
+    system(
+        24,
+        "fabricate_buffer_system",
+        "fab_buf",
+        SystemPhase::Phase2bDeferred,
+        Some(ParallelSet::StatusEffects),
+        &["FabricateState"],
+        &["FabricateBuffer"],
+    ),
+    system(
+        25,
         "aging_system",
         "aging",
         SystemPhase::Phase2bDeferred,
@@ -322,7 +340,7 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         &["Drone", "DeathMark"],
     ),
     system(
-        24,
+        26,
         "decay_system",
         "decay",
         SystemPhase::Phase2bDeferred,
@@ -331,7 +349,7 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         &["Fatigue", "Cooldown"],
     ),
     system(
-        25,
+        27,
         "death_cleanup",
         "death_cln",
         SystemPhase::Phase2bDeferred,
@@ -340,7 +358,7 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         &["Entity", "ResourceAmount"],
     ),
     system(
-        26,
+        28,
         "pvp_block_system",
         "pvp_block",
         SystemPhase::Phase2bDeferred,
@@ -349,7 +367,7 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         &["PendingCombat"],
     ),
     system(
-        27,
+        29,
         "room_state_system",
         "room_state",
         SystemPhase::Phase2bDeferred,
@@ -358,7 +376,7 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         &["Room", "EventLog"],
     ),
     system(
-        28,
+        30,
         "controller_system",
         "ctrl_p2b",
         SystemPhase::Phase2bDeferred,
@@ -367,7 +385,7 @@ pub const SYSTEM_MANIFEST: &[SystemManifestEntry] = &[
         &["Controller", "PlayerState"],
     ),
     system(
-        29,
+        31,
         "resource_ledger",
         "res_ledger",
         SystemPhase::Phase2bDeferred,
@@ -400,9 +418,10 @@ pub const SYSTEM_EXECUTION_STEPS: &[SystemExecutionStep] = &[
             "debuff",
             "disrupt",
             "fort",
-            "status_adv",
         ],
     ),
+    serial(&["status_adv"]),
+    parallel(ParallelSet::StatusEffects, &["leech_buf", "fab_buf"]),
     serial(&["aging"]),
     parallel(ParallelSet::WorldMaintenance, &["decay"]),
     serial(&["death_cln"]),
@@ -457,8 +476,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_defines_29_ordered_systems() {
-        assert_eq!(SYSTEM_MANIFEST.len(), 29);
+    fn manifest_defines_31_ordered_systems() {
+        assert_eq!(SYSTEM_MANIFEST.len(), 31);
         assert_eq!(SYSTEM_MANIFEST.first().unwrap().system_id, "cmd_exec");
         assert_eq!(SYSTEM_MANIFEST.last().unwrap().system_id, "res_ledger");
         for (index, system) in SYSTEM_MANIFEST.iter().enumerate() {
@@ -495,7 +514,8 @@ mod tests {
                 "debuff",
                 "disrupt",
                 "fort",
-                "status_adv"
+                "leech_buf",
+                "fab_buf"
             ]
         );
         assert_eq!(by_set[&ParallelSet::WorldMaintenance], ["decay"]);
@@ -545,7 +565,7 @@ mod tests {
     fn create_world_installs_scheduler_manifest_resource() {
         let world = crate::create_world();
         let manifest = world.app.world().resource::<SystemSchedulerManifest>();
-        assert_eq!(manifest.systems.len(), 29);
+        assert_eq!(manifest.systems.len(), 31);
         assert_eq!(
             manifest.ordered_system_ids(),
             world_config_registration_order()

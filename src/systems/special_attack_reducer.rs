@@ -2,16 +2,18 @@ use bevy::prelude::*;
 
 use crate::components::PlayerId;
 
-/// Priority chain for special attacks — Hack > Drain > Overload > Debilitate > Disrupt > Fortify.
+/// Priority chain for status actions — Hack > Drain > Overload > Debilitate > Disrupt > Fortify > Leech > Fabricate.
 /// Higher discriminant = higher priority. This is the single authority definition per manifest §S14.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SpecialAttackKind {
     Fortify = 1,
-    Disrupt = 2,
-    Debilitate = 3,
-    Overload = 4,
-    Drain = 5,
-    Hack = 6,
+    Leech = 2,
+    Fabricate = 3,
+    Disrupt = 4,
+    Debilitate = 5,
+    Overload = 6,
+    Drain = 7,
+    Hack = 8,
 }
 
 /// Raw incoming special attack intent, populated by command processing or S11-S13 combat.
@@ -23,6 +25,8 @@ pub struct SpecialAttackIntent {
     pub owner: PlayerId,
     pub amount: u32,
 }
+
+pub type StatusActionIntent = SpecialAttackIntent;
 
 /// Buffer of pending special attack intents before reduction.
 #[derive(Resource, Debug, Clone, Default)]
@@ -47,8 +51,56 @@ pub struct PendingIntents {
 /// Damage buffer filled by special attacks, consumed by S15 damage_application.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct PendingDamage {
-    /// (target, damage_amount, damage_type)
-    pub entries: Vec<(Entity, u32, String)>,
+    pub entries: Vec<PendingDamageEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDamageEntry {
+    pub target: Entity,
+    pub amount: u32,
+    pub damage_type: String,
+}
+
+impl From<(Entity, u32, String)> for PendingDamageEntry {
+    fn from((target, amount, damage_type): (Entity, u32, String)) -> Self {
+        Self {
+            target,
+            amount,
+            damage_type,
+        }
+    }
+}
+
+impl PendingDamage {
+    pub fn push(
+        &mut self,
+        target: Entity,
+        amount: u32,
+        damage_type: impl Into<String>,
+    ) {
+        self.entries.push(PendingDamageEntry {
+            target,
+            amount,
+            damage_type: damage_type.into(),
+        });
+    }
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+pub struct PendingHeal {
+    pub entries: Vec<PendingHealEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingHealEntry {
+    pub target: Entity,
+    pub amount: u32,
+}
+
+impl PendingHeal {
+    pub fn push(&mut self, target: Entity, amount: u32) {
+        self.entries.push(PendingHealEntry { target, amount });
+    }
 }
 
 /// S14: Special Attack Reducer
@@ -56,7 +108,7 @@ pub struct PendingDamage {
 /// Pipeline:
 /// 1. Collect: drain all per-system sub-buffers from PendingSpecialAttack
 /// 2. Merge sort: canonical sort by (priority, source, target) — deterministic
-/// 3. Reducer resolve: same-target conflicts → highest priority wins (Hack > ... > Fortify)
+/// 3. Reducer resolve: same-target conflicts → highest priority wins (Hack > ... > Fabricate)
 /// 4. Deliver: write resolved intents to PendingIntents for S22 consumption
 ///
 /// Does NOT directly modify entity state — only routes intents.
