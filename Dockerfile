@@ -8,6 +8,7 @@ RUN apt-get update \
         curl \
         libasound2-dev \
         libssl-dev \
+        libudev-dev \
         pkg-config \
     && arch="$(dpkg --print-architecture)" \
     && curl -fsSL -o /tmp/foundationdb-clients.deb \
