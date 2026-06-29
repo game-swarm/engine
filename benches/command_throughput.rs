@@ -45,11 +45,11 @@ fn bench_command_throughput(c: &mut Criterion) {
         let target = spawn_drone(&mut world, 2, 11, 10, vec![BodyPart::Move]);
         let intents: Vec<CommandIntent> = (0..1000)
             .map(|_| CommandIntent {
-                action: CommandAction::Attack {
-                    target: Some(target.to_bits()),
-                    body_part: BodyPart::Attack,
-                    damage_type: DamageType::Kinetic,
-                    charge_bonus: 0,
+                action: CommandAction::Action {
+                    action_type: "Attack".to_string(),
+                    object_id: attacker.to_bits(),
+                    target_id: Some(target.to_bits()),
+                    payload: serde_json::Value::Object(serde_json::Map::new()),
                 },
                 drone_id: Some(attacker.to_bits()),
                 tick: 0,

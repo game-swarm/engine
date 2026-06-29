@@ -89,18 +89,11 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
-    Attack {
+    Action {
+        action_type: String,
         object_id: ObjectId,
-        target_id: ObjectId,
-    },
-    RangedAttack {
-        object_id: ObjectId,
-        target_id: ObjectId,
-        range: u32,
-    },
-    Heal {
-        object_id: ObjectId,
-        target_id: ObjectId,
+        target_id: Option<ObjectId>,
+        payload: serde_json::Value,
     },
     ClaimController {
         object_id: ObjectId,
@@ -133,14 +126,6 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
-    Custom {
-        action_type: String,
-        object_id: ObjectId,
-        target_id: Option<ObjectId>,
-        resource: Option<String>,
-        amount: Option<u32>,
-        structure: Option<StructureType>,
-    },
 }
 
 pub const CORE_COMMAND_ACTIONS: &[&str] = &[
@@ -148,9 +133,7 @@ pub const CORE_COMMAND_ACTIONS: &[&str] = &[
     "Harvest",
     "Transfer",
     "Withdraw",
-    "Attack",
-    "RangedAttack",
-    "Heal",
+    "Action",
     "ClaimController",
     "Spawn",
     "Recycle",
@@ -158,17 +141,12 @@ pub const CORE_COMMAND_ACTIONS: &[&str] = &[
     "TransferToGlobal",
     "TransferFromGlobal",
     "AlliedTransfer",
-    "Hack",
-    "Drain",
-    "Overload",
-    "Debilitate",
-    "Disrupt",
-    "Fortify",
-    "Leech",
-    "Fabricate",
 ];
 
 const SPECIAL_COMMAND_ACTIONS: &[&str] = &[
+    "Attack",
+    "RangedAttack",
+    "Heal",
     "Hack",
     "Drain",
     "Overload",
@@ -184,6 +162,7 @@ const SPECIAL_COMMAND_ACTIONS: &[&str] = &[
 struct CommandActionWire {
     #[serde(rename = "type")]
     action_type: String,
+    action_name: Option<String>,
     object_id: Option<ObjectId>,
     target_id: Option<ObjectId>,
     controller_id: Option<ObjectId>,
@@ -200,6 +179,7 @@ struct CommandActionWire {
     price_amount: Option<u32>,
     order_id: Option<u64>,
     target_player: Option<PlayerId>,
+    payload: Option<serde_json::Value>,
 }
 
 impl<'de> Deserialize<'de> for CommandAction {
@@ -235,18 +215,11 @@ impl<'de> Deserialize<'de> for CommandAction {
                 resource: required!(wire.resource, "resource"),
                 amount: required!(wire.amount, "amount"),
             },
-            "Attack" => Self::Attack {
+            "Action" => Self::Action {
+                action_type: required!(wire.action_name.clone(), "action_name"),
                 object_id: required!(wire.object_id, "object_id"),
-                target_id: required!(wire.target_id, "target_id"),
-            },
-            "RangedAttack" => Self::RangedAttack {
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: required!(wire.target_id, "target_id"),
-                range: required!(wire.range, "range"),
-            },
-            "Heal" => Self::Heal {
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: required!(wire.target_id, "target_id"),
+                target_id: wire.target_id,
+                payload: command_action_payload(&wire),
             },
             "ClaimController" => Self::ClaimController {
                 object_id: required!(wire.object_id, "object_id"),
@@ -279,24 +252,40 @@ impl<'de> Deserialize<'de> for CommandAction {
                 resource: required!(wire.resource, "resource"),
                 amount: required!(wire.amount, "amount"),
             },
-            special if SPECIAL_COMMAND_ACTIONS.contains(&special) => Self::Custom {
-                action_type: special.to_string(),
+            action if SPECIAL_COMMAND_ACTIONS.contains(&action) => Self::Action {
+                action_type: action.to_string(),
                 object_id: required!(wire.object_id, "object_id"),
                 target_id: Some(required!(wire.target_id, "target_id")),
-                resource: wire.resource,
-                amount: wire.amount,
-                structure: wire.structure,
+                payload: command_action_payload(&wire),
             },
-            custom => Self::Custom {
+            custom => Self::Action {
                 action_type: custom.to_string(),
                 object_id: required!(wire.object_id, "object_id"),
                 target_id: wire.target_id,
-                resource: wire.resource,
-                amount: wire.amount,
-                structure: wire.structure,
+                payload: command_action_payload(&wire),
             },
         })
     }
+}
+
+fn command_action_payload(wire: &CommandActionWire) -> serde_json::Value {
+    if let Some(payload) = &wire.payload {
+        return payload.clone();
+    }
+    let mut payload = serde_json::Map::new();
+    if let Some(resource) = &wire.resource {
+        payload.insert("resource".to_string(), serde_json::json!(resource));
+    }
+    if let Some(amount) = wire.amount {
+        payload.insert("amount".to_string(), serde_json::json!(amount));
+    }
+    if let Some(range) = wire.range {
+        payload.insert("range".to_string(), serde_json::json!(range));
+    }
+    if let Some(structure) = wire.structure {
+        payload.insert("structure".to_string(), serde_json::json!(structure));
+    }
+    serde_json::Value::Object(payload)
 }
 
 impl Serialize for CommandAction {
@@ -342,22 +331,19 @@ impl Serialize for CommandAction {
             } => serialize_resource_action(
                 &mut map, "Withdraw", object_id, target_id, resource, amount,
             )?,
-            Self::Attack {
+            Self::Action {
+                action_type,
                 object_id,
                 target_id,
-            } => serialize_target_action(&mut map, "Attack", object_id, target_id)?,
-            Self::RangedAttack {
-                object_id,
-                target_id,
-                range,
+                payload,
             } => {
-                serialize_target_action(&mut map, "RangedAttack", object_id, target_id)?;
-                map.serialize_entry("range", range)?;
+                map.serialize_entry("type", action_type)?;
+                map.serialize_entry("object_id", object_id)?;
+                if let Some(target_id) = target_id {
+                    map.serialize_entry("target_id", target_id)?;
+                }
+                serialize_action_payload_entries(&mut map, payload)?;
             }
-            Self::Heal {
-                object_id,
-                target_id,
-            } => serialize_target_action(&mut map, "Heal", object_id, target_id)?,
             Self::ClaimController {
                 object_id,
                 controller_id,
@@ -411,32 +397,26 @@ impl Serialize for CommandAction {
                 map.serialize_entry("resource", resource)?;
                 map.serialize_entry("amount", amount)?;
             }
-            Self::Custom {
-                action_type,
-                object_id,
-                target_id,
-                resource,
-                amount,
-                structure,
-            } => {
-                map.serialize_entry("type", action_type)?;
-                map.serialize_entry("object_id", object_id)?;
-                if let Some(target_id) = target_id {
-                    map.serialize_entry("target_id", target_id)?;
-                }
-                if let Some(resource) = resource {
-                    map.serialize_entry("resource", resource)?;
-                }
-                if let Some(amount) = amount {
-                    map.serialize_entry("amount", amount)?;
-                }
-                if let Some(structure) = structure {
-                    map.serialize_entry("structure", structure)?;
-                }
-            }
         }
         map.end()
     }
+}
+
+fn serialize_action_payload_entries<S>(
+    map: &mut S,
+    payload: &serde_json::Value,
+) -> Result<(), S::Error>
+where
+    S: SerializeMap,
+{
+    if let Some(payload) = payload.as_object() {
+        for (key, value) in payload {
+            map.serialize_entry(key, value)?;
+        }
+    } else if !payload.is_null() {
+        map.serialize_entry("payload", payload)?;
+    }
+    Ok(())
 }
 
 fn serialize_target_action<S>(
@@ -869,19 +849,20 @@ pub fn validate_command(
             resource,
             *amount,
         ),
-        CommandAction::Attack {
+        CommandAction::Action {
+            action_type,
             object_id,
             target_id,
-        } => validate_attack(world, raw.player_id, *object_id, *target_id),
-        CommandAction::RangedAttack {
-            object_id,
-            target_id,
-            range,
-        } => validate_ranged_attack(world, raw.player_id, *object_id, *target_id, *range),
-        CommandAction::Heal {
-            object_id,
-            target_id,
-        } => validate_heal(world, raw.player_id, *object_id, *target_id),
+            payload,
+        } => validate_action(
+            world,
+            raw.player_id,
+            raw.tick,
+            action_type,
+            *object_id,
+            *target_id,
+            payload,
+        ),
         CommandAction::ClaimController {
             object_id,
             controller_id,
@@ -910,19 +891,6 @@ pub fn validate_command(
             resource,
             amount,
         } => validate_allied_transfer(world, raw.player_id, *target_player, resource, *amount),
-        CommandAction::Custom {
-            action_type,
-            object_id,
-            target_id,
-            ..
-        } => validate_custom_action(
-            world,
-            raw.player_id,
-            raw.tick,
-            action_type,
-            *object_id,
-            *target_id,
-        ),
     };
 
     if matches!(result, Err(RejectionReason::InsufficientResource { .. })) {
@@ -1045,15 +1013,6 @@ pub fn source_allows_action(source: CommandSource, action: &CommandAction) -> bo
     }
 }
 
-fn action_triggers_combat(action: &CommandAction) -> bool {
-    matches!(
-        action,
-        CommandAction::Attack { .. }
-            | CommandAction::RangedAttack { .. }
-            | CommandAction::Heal { .. }
-    )
-}
-
 fn action_uses_global_storage(action: &CommandAction) -> bool {
     matches!(
         action,
@@ -1105,13 +1064,11 @@ pub fn available_action_metadata(world: &World) -> Vec<CommandActionMetadata> {
             "Withdraw resource from a target",
             &["object_id", "target_id", "resource", "amount"],
         ),
-        builtin_action_metadata("Attack", "Melee attack", &["object_id", "target_id"]),
         builtin_action_metadata(
-            "RangedAttack",
-            "Ranged attack",
-            &["object_id", "target_id", "range"],
+            "Action",
+            "Dispatch a registered combat or effect action",
+            &["action_type", "object_id", "target_id", "payload"],
         ),
-        builtin_action_metadata("Heal", "Heal a friendly drone", &["object_id", "target_id"]),
         builtin_action_metadata(
             "ClaimController",
             "Claim a room controller",
@@ -1228,9 +1185,7 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Harvest { .. } => "Harvest",
         CommandAction::Transfer { .. } => "Transfer",
         CommandAction::Withdraw { .. } => "Withdraw",
-        CommandAction::Attack { .. } => "Attack",
-        CommandAction::RangedAttack { .. } => "RangedAttack",
-        CommandAction::Heal { .. } => "Heal",
+        CommandAction::Action { action_type, .. } => action_type,
         CommandAction::ClaimController { .. } => "ClaimController",
         CommandAction::Spawn { .. } => "Spawn",
         CommandAction::Recycle { .. } => "Recycle",
@@ -1238,7 +1193,6 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
         CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
         CommandAction::AlliedTransfer { .. } => "AlliedTransfer",
-        CommandAction::Custom { action_type, .. } => action_type,
     };
 
     let detail = match rejection {
@@ -1574,27 +1528,22 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             actor_id = Some(object_id);
             apply_withdraw(world, object_id, target_id, &resource, amount)
         }
-        CommandAction::Attack {
+        CommandAction::Action {
+            action_type,
             object_id,
             target_id,
+            payload,
         } => {
             actor_id = Some(object_id);
-            apply_attack(world, object_id, target_id)
-        }
-        CommandAction::RangedAttack {
-            object_id,
-            target_id,
-            range: _,
-        } => {
-            actor_id = Some(object_id);
-            apply_ranged_attack(world, object_id, target_id)
-        }
-        CommandAction::Heal {
-            object_id,
-            target_id,
-        } => {
-            actor_id = Some(object_id);
-            apply_heal(world, object_id, target_id)
+            apply_action(
+                world,
+                player_id,
+                action_tick,
+                &action_type,
+                object_id,
+                target_id,
+                &payload,
+            )
         }
         CommandAction::ClaimController {
             object_id,
@@ -1630,24 +1579,6 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             resource,
             amount,
         } => apply_allied_transfer(world, player_id, target_player, &resource, amount),
-        CommandAction::Custom {
-            action_type,
-            object_id,
-            target_id,
-            structure,
-            ..
-        } => {
-            actor_id = Some(object_id);
-            apply_custom_action(
-                world,
-                player_id,
-                action_tick,
-                &action_type,
-                object_id,
-                target_id,
-                structure,
-            )
-        }
     };
 
     if result.is_ok() {
@@ -1829,6 +1760,40 @@ fn validate_heal(
         return Err(RejectionReason::AlreadyFullHealth);
     }
     ensure_range(position, target_position, 3)
+}
+
+fn validate_action(
+    world: &mut World,
+    player_id: PlayerId,
+    tick: Tick,
+    action_type: &str,
+    object_id: ObjectId,
+    target_id: Option<ObjectId>,
+    payload: &serde_json::Value,
+) -> CommandResult {
+    match action_type {
+        "Attack" => validate_attack(world, player_id, object_id, require_target_id(target_id)?),
+        "RangedAttack" => validate_ranged_attack(
+            world,
+            player_id,
+            object_id,
+            require_target_id(target_id)?,
+            payload_u32(payload, "range").unwrap_or(MAX_RANGED_ATTACK_RANGE),
+        ),
+        "Heal" => validate_heal(world, player_id, object_id, require_target_id(target_id)?),
+        custom => validate_custom_action(world, player_id, tick, custom, object_id, target_id),
+    }
+}
+
+fn require_target_id(target_id: Option<ObjectId>) -> Result<ObjectId, RejectionReason> {
+    target_id.ok_or(RejectionReason::ObjectNotFound)
+}
+
+fn payload_u32(payload: &serde_json::Value, field: &str) -> Option<u32> {
+    payload
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 fn validate_claim_controller(
@@ -2231,7 +2196,45 @@ fn apply_withdraw(
     Ok(())
 }
 
-fn apply_attack(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> CommandResult {
+fn apply_action(
+    world: &mut World,
+    player_id: PlayerId,
+    tick: Tick,
+    action_type: &str,
+    object_id: ObjectId,
+    target_id: Option<ObjectId>,
+    payload: &serde_json::Value,
+) -> CommandResult {
+    match action_type {
+        "Attack" => apply_basic_attack(world, object_id, require_target_id(target_id)?),
+        "RangedAttack" => {
+            apply_basic_ranged_attack(world, object_id, require_target_id(target_id)?)
+        }
+        "Heal" => apply_basic_heal(world, object_id, require_target_id(target_id)?),
+        custom => apply_custom_action(
+            world,
+            player_id,
+            tick,
+            custom,
+            object_id,
+            target_id,
+            payload_structure(payload),
+        ),
+    }
+}
+
+fn payload_structure(payload: &serde_json::Value) -> Option<StructureType> {
+    payload
+        .get("structure")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn apply_basic_attack(
+    world: &mut World,
+    object_id: ObjectId,
+    target_id: ObjectId,
+) -> CommandResult {
     let (_, drone) = drone_snapshot(world, object_id)?;
     let (damage_type, damage) = crate::systems::combat_system::body_part_damage(
         drone
@@ -2246,7 +2249,7 @@ fn apply_attack(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> 
     apply_resisted_damage(world, target_id, &damage_type, damage)
 }
 
-fn apply_ranged_attack(
+fn apply_basic_ranged_attack(
     world: &mut World,
     object_id: ObjectId,
     target_id: ObjectId,
@@ -2312,7 +2315,7 @@ fn apply_resisted_damage(
     Ok(())
 }
 
-fn apply_heal(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> CommandResult {
+fn apply_basic_heal(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> CommandResult {
     let (_, healer) = drone_snapshot(world, object_id)?;
     let heal = healer
         .body
@@ -3838,13 +3841,11 @@ mod tests {
                 tick_target: 1,
             },
             sequence: 1,
-            action: CommandAction::Custom {
+            action: CommandAction::Action {
                 action_type: action_type.to_string(),
                 object_id,
                 target_id,
-                resource: None,
-                amount: None,
-                structure: None,
+                payload: serde_json::Value::Object(serde_json::Map::new()),
             },
         }
     }

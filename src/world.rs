@@ -1038,7 +1038,10 @@ impl SwarmWorld {
 
     pub fn run_tick_for(&mut self, tick: Tick) {
         let current = self.tick_head();
-        assert!(tick >= current, "tick_head cannot move backwards");
+        assert!(
+            tick >= current,
+            "tick_head cannot move backwards: requested={tick}, current={current}"
+        );
         self.app.world_mut().resource_mut::<CurrentTick>().0 = tick;
         self.app.update();
         self.app.world_mut().resource_mut::<CurrentTick>().0 = tick + 1;

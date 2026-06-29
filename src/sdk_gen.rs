@@ -513,9 +513,6 @@ fn rust_command_action(idl: &IdlDoc) -> String {
         }
     }
 
-    // Custom variant (generic — mod actions go through here)
-    out.push_str("    Custom {\n        action_type: String,\n        object_id: u64,\n        target_id: Option<u64>,\n        resource: Option<String>,\n        amount: Option<u32>,\n        structure: Option<StructureType>,\n    },\n");
-
     out.push_str("}\n");
     out
 }
@@ -523,6 +520,7 @@ fn rust_command_action(idl: &IdlDoc) -> String {
 fn idl_to_rust_type(idl_type: &str) -> String {
     match idl_type {
         "ObjectId" => "u64".into(),
+        "ObjectId?" => "Option<u64>".into(),
         "Direction" => "Direction".into(),
         "ResourceName" => "String".into(),
         "ResourceName?" => "Option<String>".into(),
@@ -532,6 +530,8 @@ fn idl_to_rust_type(idl_type: &str) -> String {
         "i32" => "i32".into(),
         "StructureType" => "StructureType".into(),
         "BodyPart[]" => "Vec<BodyPart>".into(),
+        "String" => "String".into(),
+        "JsonValue" => "serde_json::Value".into(),
         other => format!("String /* {other} */"),
     }
 }
@@ -559,7 +559,7 @@ fn rust_custom_constructors(actions: &[ModCustomAction]) -> String {
     for action in actions {
         let fn_name = action.name.to_lowercase();
         out.push_str(&format!(
-            "    /// {description}\n    pub fn {fn_name}(object_id: ObjectId, target_id: ObjectId) -> Self {{\n        CommandAction::Custom {{\n            action_type: \"{name}\".into(),\n            object_id,\n            target_id: Some(target_id),\n            resource: None,\n            amount: None,\n            structure: None,\n        }}\n    }}\n\n",
+            "    /// {description}\n    pub fn {fn_name}(object_id: ObjectId, target_id: ObjectId) -> Self {{\n        CommandAction::Action {{\n            action_type: \"{name}\".into(),\n            object_id,\n            target_id: Some(target_id),\n            payload: serde_json::Value::Object(serde_json::Map::new()),\n        }}\n    }}\n\n",
             description = action.description,
             name = action.name,
             fn_name = fn_name,

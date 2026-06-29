@@ -735,20 +735,18 @@ mod tests {
 
     #[test]
     fn command_action_and_rejection_registries_match_api_surface() {
-        assert_eq!(CORE_COMMAND_ACTIONS.len(), 22);
+        assert_eq!(CORE_COMMAND_ACTIONS.len(), 12);
         assert_eq!(CANONICAL_REJECTION_REASONS.len(), 45);
 
         let action: CommandAction =
             serde_json::from_str(r#"{"type":"Hack","object_id":1,"target_id":2}"#).unwrap();
         assert_eq!(
             action,
-            CommandAction::Custom {
+            CommandAction::Action {
                 action_type: "Hack".to_string(),
                 object_id: 1,
                 target_id: Some(2),
-                resource: None,
-                amount: None,
-                structure: None,
+                payload: serde_json::Value::Object(serde_json::Map::new()),
             }
         );
         assert!(serde_json::from_str::<CommandAction>(r#"{"type":"Hack","object_id":1}"#).is_err());
@@ -764,12 +762,12 @@ mod tests {
             &CustomActionRegistry::default(),
         );
 
-        assert_eq!(idl.core.commands.len(), 22);
+        assert_eq!(idl.core.commands.len(), 12);
         assert!(
             idl.core
                 .commands
                 .iter()
-                .any(|command| command.name == "Fabricate")
+                .any(|command| command.name == "Action")
         );
         assert_eq!(idl.core.enums.rejection_reason.len(), 45);
     }
@@ -785,9 +783,11 @@ mod tests {
         };
         let attack_intent = CommandIntent {
             sequence: 1,
-            action: CommandAction::Attack {
+            action: CommandAction::Action {
+                action_type: "Attack".to_string(),
                 object_id: 1,
-                target_id: 2,
+                target_id: Some(2),
+                payload: serde_json::Value::Object(serde_json::Map::new()),
             },
         };
 
@@ -1857,9 +1857,11 @@ mod tests {
                 &mut world,
                 1,
                 1,
-                CommandAction::Attack {
+                CommandAction::Action {
+                    action_type: "Attack".to_string(),
                     object_id: object_id(attacker),
-                    target_id: object_id(target)
+                    target_id: Some(object_id(target)),
+                    payload: serde_json::Value::Object(serde_json::Map::new()),
                 }
             ),
             Ok(())
@@ -1895,9 +1897,11 @@ mod tests {
                 &mut world,
                 2,
                 2,
-                CommandAction::Heal {
+                CommandAction::Action {
+                    action_type: "Heal".to_string(),
                     object_id: object_id(healer),
-                    target_id: object_id(target)
+                    target_id: Some(object_id(target)),
+                    payload: serde_json::Value::Object(serde_json::Map::new()),
                 }
             ),
             Ok(())
@@ -1933,9 +1937,11 @@ mod tests {
                 &mut world,
                 1,
                 1,
-                CommandAction::Attack {
+                CommandAction::Action {
+                    action_type: "Attack".to_string(),
                     object_id: object_id(attacker),
-                    target_id: object_id(friendly)
+                    target_id: Some(object_id(friendly)),
+                    payload: serde_json::Value::Object(serde_json::Map::new()),
                 }
             ),
             Err(RejectionReason::FriendlyTarget)
@@ -1947,9 +1953,11 @@ mod tests {
                 &mut world,
                 1,
                 2,
-                CommandAction::Heal {
+                CommandAction::Action {
+                    action_type: "Heal".to_string(),
                     object_id: object_id(healer),
-                    target_id: object_id(friendly)
+                    target_id: Some(object_id(friendly)),
+                    payload: serde_json::Value::Object(serde_json::Map::new()),
                 }
             ),
             Err(RejectionReason::AlreadyFullHealth)
@@ -1968,9 +1976,11 @@ mod tests {
                 &mut world,
                 1,
                 3,
-                CommandAction::Heal {
+                CommandAction::Action {
+                    action_type: "Heal".to_string(),
                     object_id: object_id(healer),
-                    target_id: object_id(enemy)
+                    target_id: Some(object_id(enemy)),
+                    payload: serde_json::Value::Object(serde_json::Map::new()),
                 }
             ),
             Err(RejectionReason::NotFriendly)

@@ -735,12 +735,13 @@ where
         committer: C,
         broadcaster: B,
     ) -> Self {
+        let tick_counter = world.tick_head();
         Self {
             world,
             executors,
             committer,
             broadcaster,
-            tick_counter: 0,
+            tick_counter,
             metrics: TickMetrics::default(),
             collect_cache: None,
             degraded_mode: DegradedModeState::default(),
@@ -961,13 +962,14 @@ where
         committer: C,
         broadcaster: B,
     ) -> Self {
+        let tick_counter = world.tick_head();
         Self {
             world,
             player_id,
             executor,
             committer,
             broadcaster,
-            tick_counter: 0,
+            tick_counter,
             metrics: TickMetrics::default(),
             degraded_mode: DegradedModeState::default(),
         }
@@ -1426,19 +1428,6 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
             object_id,
             target_id,
             ..
-        }
-        | CommandAction::Attack {
-            object_id,
-            target_id,
-        }
-        | CommandAction::RangedAttack {
-            object_id,
-            target_id,
-            ..
-        }
-        | CommandAction::Heal {
-            object_id,
-            target_id,
         } => {
             remap_object_id(object_id, entity_map);
             remap_object_id(target_id, entity_map);
@@ -1458,7 +1447,7 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
             remap_object_id(object_id, entity_map);
             remap_object_id(spawn_id, entity_map);
         }
-        CommandAction::Custom {
+        CommandAction::Action {
             object_id,
             target_id,
             ..

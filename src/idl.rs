@@ -4,7 +4,7 @@
 //! mod types from world.toml runtime registries — as a machine-readable JSON IDL.
 //! SDK code for both Rust and TypeScript is generated from this IDL.
 
-use crate::command::{CANONICAL_REJECTION_REASONS, CORE_COMMAND_ACTIONS};
+use crate::command::CANONICAL_REJECTION_REASONS;
 use crate::components::{
     BodyPartRegistry, CustomActionRegistry, SpecialEffectRegistry, StructureTypeRegistry,
 };
@@ -137,7 +137,7 @@ fn core_commands() -> Vec<CommandDef> {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
     };
-    let mut commands = vec![
+    let commands = vec![
         def(
             "Move",
             &[("object_id", "ObjectId"), ("direction", "Direction")],
@@ -169,20 +169,13 @@ fn core_commands() -> Vec<CommandDef> {
             ],
         ),
         def(
-            "Attack",
-            &[("object_id", "ObjectId"), ("target_id", "ObjectId")],
-        ),
-        def(
-            "RangedAttack",
+            "Action",
             &[
+                ("action_type", "String"),
                 ("object_id", "ObjectId"),
-                ("target_id", "ObjectId"),
-                ("range", "u32"),
+                ("target_id", "ObjectId?"),
+                ("payload", "JsonValue"),
             ],
-        ),
-        def(
-            "Heal",
-            &[("object_id", "ObjectId"), ("target_id", "ObjectId")],
         ),
         def(
             "ClaimController",
@@ -210,13 +203,15 @@ fn core_commands() -> Vec<CommandDef> {
             "TransferFromGlobal",
             &[("resource", "ResourceName"), ("amount", "ResourceAmount")],
         ),
+        def(
+            "AlliedTransfer",
+            &[
+                ("target_player", "u64"),
+                ("resource", "ResourceName"),
+                ("amount", "ResourceAmount"),
+            ],
+        ),
     ];
-    for action in CORE_COMMAND_ACTIONS.iter().skip(commands.len()) {
-        commands.push(def(
-            action,
-            &[("object_id", "ObjectId"), ("target_id", "ObjectId")],
-        ));
-    }
     commands
 }
 
