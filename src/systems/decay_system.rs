@@ -4,10 +4,7 @@ use crate::components::{Drone, Structure};
 
 /// Decay system — handles fatigue/cooldown reduction and structure maintenance.
 /// Drone aging has been moved to aging_system (W13).
-pub fn decay_system(
-    mut drones: Query<&mut Drone>,
-    mut structures: Query<&mut Structure>,
-) {
+pub fn decay_system(mut drones: Query<&mut Drone>, mut structures: Query<&mut Structure>) {
     for mut drone in drones.iter_mut() {
         drone.fatigue = drone.fatigue.saturating_sub(1);
     }

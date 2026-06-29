@@ -1,14 +1,14 @@
 use bevy::prelude::*;
 
-use crate::components::{DeathMark, Drone, MarkedForDeath, Position, Source};
+use crate::components::{DeathMark, Drone, Position, Source};
 
-/// Death cleanup system (S25) — deterministic despawn of all MarkedForDeath
+/// Death cleanup system (S25) — deterministic despawn of all DeathMark
 /// entities, ordered by entity index descending (stable ordering).
 /// When a Drone dies carrying resources, the carry is dropped into any Source
 /// at the same position (capped at the Source's capacity).
 pub fn death_cleanup_system(
     mut commands: Commands,
-    marked: Query<(Entity, Option<&Drone>, Option<&Position>), With<MarkedForDeath>>,
+    marked: Query<(Entity, Option<&Drone>, Option<&Position>), With<DeathMark>>,
     mut sources: Query<(&Position, &mut Source)>,
 ) {
     // Collect all marked entities with their entity index for deterministic ordering
@@ -28,9 +28,8 @@ pub fn death_cleanup_system(
                             total_dropped = total_dropped.saturating_add(*amount);
                         }
                         // Carry drop accelerates source regeneration
-                        let free_capacity = source.capacity.saturating_sub(
-                            source.ticks_to_regeneration
-                        );
+                        let free_capacity =
+                            source.capacity.saturating_sub(source.ticks_to_regeneration);
                         let effective = total_dropped.min(free_capacity);
                         source.ticks_to_regeneration =
                             source.ticks_to_regeneration.saturating_sub(effective);

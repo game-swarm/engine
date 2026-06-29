@@ -1,19 +1,19 @@
 use bevy::prelude::*;
 
-use crate::components::{DeathMark, Drone, MarkedForDeath};
+use crate::components::{DeathMark, Drone};
 use crate::systems::PendingHeal;
 
 /// Phase 2b regeneration system — recovers drone body hits naturally each tick.
 ///
-/// Each tick, every drone without MarkedForDeath regains 1 hit point, capped at
+/// Each tick, every drone without DeathMark regains 1 hit point, capped at
 /// hits_max. Runs after spawn_grace and before damage_application so
 /// regeneration happens before combat damage is applied (prevents double-dip
 /// with heal).
 ///
-/// Filter: `Without<MarkedForDeath>` — drones marked for death do not regenerate.
+/// Filter: `Without<DeathMark>` — drones marked for death do not regenerate.
 pub fn regeneration_system(
     mut pending_heal: ResMut<PendingHeal>,
-    drones: Query<(Entity, &Drone), Without<MarkedForDeath>>,
+    drones: Query<(Entity, &Drone), Without<DeathMark>>,
 ) {
     for (entity, drone) in drones.iter() {
         if drone.hits < drone.hits_max {
@@ -25,7 +25,7 @@ pub fn regeneration_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{Position, RoomId, DEFAULT_DRONE_LIFESPAN};
+    use crate::components::{DEFAULT_DRONE_LIFESPAN, Position, RoomId};
     use indexmap::IndexMap;
 
     fn spawn_drone(app: &mut App, owner: u32, hits: u32, hits_max: u32) -> Entity {
@@ -44,7 +44,11 @@ mod tests {
                     last_action_tick: u64::MAX,
                     lifespan: DEFAULT_DRONE_LIFESPAN,
                 },
-                Position { x: 0, y: 0, room: RoomId(0) },
+                Position {
+                    x: 0,
+                    y: 0,
+                    room: RoomId(0),
+                },
             ))
             .id()
     }
@@ -89,7 +93,7 @@ mod tests {
         app.update();
 
         let d = app.world().entity(drone).get::<Drone>().unwrap();
-        assert_eq!(d.hits, 50, "MarkedForDeath drones should not regenerate");
+        assert_eq!(d.hits, 50, "DeathMark drones should not regenerate");
         assert!(app.world().resource::<PendingHeal>().entries.is_empty());
     }
 }

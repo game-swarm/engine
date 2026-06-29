@@ -2,9 +2,8 @@ use bevy::prelude::*;
 
 use crate::components::{Drone, Owner, Position};
 use crate::resources::{
-    GlobalStorageConfig, GlobalTransferDirection, PendingGlobalTransfers, PlayerGlobalStorage,
-    PlayerLocalStorage, ResourceCost, ResourceName,
-    PendingAlliedTransfers,
+    GlobalStorageConfig, GlobalTransferDirection, PendingAlliedTransfers, PendingGlobalTransfers,
+    PlayerGlobalStorage, PlayerLocalStorage, ResourceCost, ResourceName,
 };
 
 pub fn global_storage_system(
@@ -210,10 +209,7 @@ pub fn allied_transfer_system(
     pending.0 = remaining;
 
     for transfer in delivered {
-        let target = global_storage
-            .0
-            .entry(transfer.to_player)
-            .or_default();
+        let target = global_storage.0.entry(transfer.to_player).or_default();
         add_resource(target, transfer.resource, transfer.deliver_amount);
     }
 }

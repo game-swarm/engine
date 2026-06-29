@@ -1,12 +1,12 @@
 use bevy::prelude::*;
 
-use crate::components::{DeathMark, Drone, MarkedForDeath};
+use crate::components::{DeathMark, Drone};
 
 /// Aging system (S23) — increments drone age each tick.
 /// On the NEXT tick, S07 death_marker catches `age >= lifespan` and inserts
-/// MarkedForDeath with proper RoomCap release.
-/// Filter: `Without<MarkedForDeath>` — dead drones do not continue aging.
-pub fn aging_system(mut drones: Query<&mut Drone, Without<MarkedForDeath>>) {
+/// DeathMark with proper RoomCap release.
+/// Filter: `Without<DeathMark>` — dead drones do not continue aging.
+pub fn aging_system(mut drones: Query<&mut Drone, Without<DeathMark>>) {
     for mut drone in drones.iter_mut() {
         drone.age = drone.age.saturating_add(1);
     }
@@ -38,7 +38,10 @@ mod tests {
     fn aging_increments_drone_age() {
         let mut app = App::new();
         app.add_systems(Update, aging_system);
-        let drone = app.world_mut().spawn(test_drone(5, DEFAULT_DRONE_LIFESPAN)).id();
+        let drone = app
+            .world_mut()
+            .spawn(test_drone(5, DEFAULT_DRONE_LIFESPAN))
+            .id();
 
         app.update();
 
@@ -50,7 +53,10 @@ mod tests {
     fn aging_skips_marked_for_death() {
         let mut app = App::new();
         app.add_systems(Update, aging_system);
-        let drone = app.world_mut().spawn(test_drone(1499, DEFAULT_DRONE_LIFESPAN)).id();
+        let drone = app
+            .world_mut()
+            .spawn(test_drone(1499, DEFAULT_DRONE_LIFESPAN))
+            .id();
         app.world_mut().entity_mut(drone).insert(DeathMark);
 
         let age_before = app.world().entity(drone).get::<Drone>().unwrap().age;
@@ -60,7 +66,7 @@ mod tests {
         let age_after = app.world().entity(drone).get::<Drone>().unwrap().age;
         assert_eq!(
             age_after, age_before,
-            "MarkedForDeath drones should not continue aging"
+            "DeathMark drones should not continue aging"
         );
     }
 
@@ -68,7 +74,10 @@ mod tests {
     fn aging_saturates_at_u32_max() {
         let mut app = App::new();
         app.add_systems(Update, aging_system);
-        let drone = app.world_mut().spawn(test_drone(u32::MAX, DEFAULT_DRONE_LIFESPAN)).id();
+        let drone = app
+            .world_mut()
+            .spawn(test_drone(u32::MAX, DEFAULT_DRONE_LIFESPAN))
+            .id();
 
         app.update();
 

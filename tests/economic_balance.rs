@@ -7,12 +7,12 @@ mod tests {
     use swarm_engine::command::Tick;
     use swarm_engine::components::PlayerId;
     use swarm_engine::resource_ledger::{
-        compute_fee, compute_tiered_storage_tax, execute_global_deposit, execute_global_withdraw,
-        execute_storage_tax, ResourceLedger, ResourceOperation,
+        ResourceLedger, ResourceOperation, compute_fee, compute_tiered_storage_tax,
+        execute_global_deposit, execute_global_withdraw, execute_storage_tax,
     };
     use swarm_engine::resources::{
-        GlobalStorageConfig, GlobalStorageTaxTier, PlayerGlobalStorage, PlayerLocalStorage,
-        PendingGlobalTransfers,
+        GlobalStorageConfig, GlobalStorageTaxTier, PendingGlobalTransfers, PlayerGlobalStorage,
+        PlayerLocalStorage,
     };
 
     fn default_global_config() -> GlobalStorageConfig {
@@ -22,7 +22,7 @@ mod tests {
             intercept_enabled: false,
             intercept_range: 0,
             capacity: 1_000_000,
-            transfer_to_global_fee_per_10_000: 50,   // 0.5%
+            transfer_to_global_fee_per_10_000: 50,    // 0.5%
             transfer_from_global_fee_per_10_000: 100, // 1.0%
             transfer_to_global_ticks: 0,              // instant
             transfer_from_global_ticks: 0,            // instant
@@ -97,7 +97,14 @@ mod tests {
             .insert("energy".to_string(), 1000);
 
         let result = execute_global_deposit(
-            &mut local, &mut global, &mut pending, &config, 1, "energy", 1000, 0,
+            &mut local,
+            &mut global,
+            &mut pending,
+            &config,
+            1,
+            "energy",
+            1000,
+            0,
         );
         assert!(result.success);
         // 0.5% fee = 5, net = 995
@@ -120,7 +127,14 @@ mod tests {
             .insert("energy".to_string(), 1000);
 
         let result = execute_global_withdraw(
-            &mut local, &mut global, &mut pending, &config, 1, "energy", 1000, 0,
+            &mut local,
+            &mut global,
+            &mut pending,
+            &config,
+            1,
+            "energy",
+            1000,
+            0,
         );
         assert!(result.success);
         // 1.0% fee = 10, net = 990
@@ -143,7 +157,14 @@ mod tests {
             .insert("energy".to_string(), 100);
 
         let result = execute_global_deposit(
-            &mut local, &mut global, &mut pending, &config, 1, "energy", 1000, 0,
+            &mut local,
+            &mut global,
+            &mut pending,
+            &config,
+            1,
+            "energy",
+            1000,
+            0,
         );
         assert!(!result.success);
     }
@@ -171,10 +192,24 @@ mod tests {
         let mut ledger = ResourceLedger::default();
 
         // Player 1 deposits 1000 energy: source loses 1000
-        ledger.record(0, Some(1), None, "energy", 1000, ResourceOperation::GlobalDeposit);
+        ledger.record(
+            0,
+            Some(1),
+            None,
+            "energy",
+            1000,
+            ResourceOperation::GlobalDeposit,
+        );
 
         // Player 1 withdraws 500: target gains 500
-        ledger.record(0, None, Some(1), "energy", 500, ResourceOperation::GlobalWithdraw);
+        ledger.record(
+            0,
+            None,
+            Some(1),
+            "energy",
+            500,
+            ResourceOperation::GlobalWithdraw,
+        );
 
         let p1 = &ledger.balance_delta[&1];
         assert_eq!(p1["energy"], -500);
@@ -185,7 +220,14 @@ mod tests {
         let mut ledger = ResourceLedger::default();
         let cs_before = ledger.ledger_checksum;
 
-        ledger.record(0, Some(1), Some(2), "energy", 100, ResourceOperation::LocalTransfer);
+        ledger.record(
+            0,
+            Some(1),
+            Some(2),
+            "energy",
+            100,
+            ResourceOperation::LocalTransfer,
+        );
         assert_ne!(ledger.ledger_checksum, cs_before);
 
         ledger.ops.clear();

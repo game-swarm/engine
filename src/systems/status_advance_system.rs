@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
 use crate::components::{
-    DebilitateState, DisruptState, DrainState, FabricateState, FortifyState, HackState,
-    LeechState, OverloadState,
+    DebilitateState, DisruptState, DrainState, FabricateState, FortifyState, HackState, LeechState,
+    OverloadState,
 };
 use crate::systems::{PendingDamage, PendingIntents, SpecialAttackKind};
 
@@ -146,7 +146,10 @@ mod tests {
         let mut app = App::new();
         let e = app
             .world_mut()
-            .spawn(HackState { stage: 1, remaining_ticks: 2 })
+            .spawn(HackState {
+                stage: 1,
+                remaining_ticks: 2,
+            })
             .id();
         app.insert_resource(PendingIntents {
             intents: vec![ResolvedIntent {
@@ -185,7 +188,10 @@ mod tests {
         let mut app = App::new();
         let e = app
             .world_mut()
-            .spawn(DebilitateState { damage_type: "Kinetic".into(), remaining_ticks: 10 })
+            .spawn(DebilitateState {
+                damage_type: "Kinetic".into(),
+                remaining_ticks: 10,
+            })
             .id();
         app.insert_resource(PendingIntents {
             intents: vec![ResolvedIntent {

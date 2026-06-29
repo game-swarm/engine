@@ -2,7 +2,7 @@ use ed25519_dalek::{Signer, SigningKey, Verifier};
 use serde::{Deserialize, Serialize};
 
 use crate::components::PlayerId;
-use crate::mcp::{decode_ed25519_signature, encode_base64, McpError};
+use crate::mcp::{McpError, decode_ed25519_signature, encode_base64};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

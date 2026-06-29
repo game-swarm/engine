@@ -411,14 +411,7 @@ pub const SYSTEM_EXECUTION_STEPS: &[SystemExecutionStep] = &[
     serial(&["dmg_apply"]),
     parallel(
         ParallelSet::StatusEffects,
-        &[
-            "hack",
-            "drain",
-            "overload",
-            "debuff",
-            "disrupt",
-            "fort",
-        ],
+        &["hack", "drain", "overload", "debuff", "disrupt", "fort"],
     ),
     serial(&["status_adv"]),
     parallel(ParallelSet::StatusEffects, &["leech_buf", "fab_buf"]),

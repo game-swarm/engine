@@ -42,7 +42,11 @@ mod tests {
             .world_mut()
             .spawn((
                 Drone::new(1, vec![], &BodyPartRegistry::default()),
-                Position { x: 0, y: 0, room: RoomId(0) },
+                Position {
+                    x: 0,
+                    y: 0,
+                    room: RoomId(0),
+                },
                 SpawningGrace { remaining: 1 },
             ))
             .id();
@@ -51,7 +55,10 @@ mod tests {
         world.app.update();
 
         let grace = world.app.world().entity(e).get::<SpawningGrace>();
-        assert!(grace.is_none(), "SpawningGrace should be removed after 1 tick");
+        assert!(
+            grace.is_none(),
+            "SpawningGrace should be removed after 1 tick"
+        );
     }
 
     #[test]
@@ -60,7 +67,11 @@ mod tests {
         let mut world = create_world();
         world.app.world_mut().spawn((
             Drone::new(1, vec![], &BodyPartRegistry::default()),
-            Position { x: 0, y: 0, room: RoomId(0) },
+            Position {
+                x: 0,
+                y: 0,
+                room: RoomId(0),
+            },
             SpawningGrace { remaining: 2 },
         ));
 

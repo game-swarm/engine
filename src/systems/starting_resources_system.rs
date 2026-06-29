@@ -32,7 +32,9 @@ pub fn starting_resources_system(
     for controller in controllers.iter() {
         if let Some(owner) = controller.owner {
             first_spawn.0.entry(owner).or_insert(tick);
-            if !granted.0.contains(&owner) && !config.starting_resources.starting_resources.is_empty() {
+            if !granted.0.contains(&owner)
+                && !config.starting_resources.starting_resources.is_empty()
+            {
                 let storage = global_storage.0.entry(owner).or_default();
                 for (resource, amount) in &config.starting_resources.starting_resources {
                     let entry = storage.entry(resource.clone()).or_default();

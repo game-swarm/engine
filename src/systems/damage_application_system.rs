@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use indexmap::IndexMap;
 
-use crate::components::{DeathMark, Drone, MarkedForDeath, SpawningGrace, Structure};
+use crate::components::{DeathMark, Drone, SpawningGrace, Structure};
 use crate::systems::special_attack_reducer::{PendingDamage, PendingHeal};
 
 /// S15: Damage Application System
@@ -84,7 +84,7 @@ pub fn damage_application_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{Position, RoomId, DEFAULT_DRONE_LIFESPAN};
+    use crate::components::{DEFAULT_DRONE_LIFESPAN, Position, RoomId};
     use indexmap::IndexMap;
 
     fn spawn_test_drone(app: &mut App, owner: u32, hits: u32, hits_max: u32) -> Entity {
@@ -143,7 +143,7 @@ mod tests {
         let d = app.world().entity(drone).get::<Drone>().unwrap();
         assert_eq!(d.hits, 0);
         assert!(
-            app.world().entity(drone).contains::<MarkedForDeath>(),
+            app.world().entity(drone).contains::<DeathMark>(),
             "should be marked for death"
         );
     }
@@ -153,7 +153,9 @@ mod tests {
         let mut app = App::new();
         app.add_systems(Update, damage_application_system);
         let drone = spawn_test_drone(&mut app, 1, 100, 100);
-        app.world_mut().entity_mut(drone).insert(SpawningGrace { remaining: 1 });
+        app.world_mut()
+            .entity_mut(drone)
+            .insert(SpawningGrace { remaining: 1 });
         app.insert_resource(PendingDamage {
             entries: vec![(drone, 30, "Kinetic".into()).into()],
         });

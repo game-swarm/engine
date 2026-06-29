@@ -4,8 +4,8 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{
-    BodyPart, BodyPartRegistry, Drone, Owner, PlayerId, Position, RoomId, RoomTerrains,
-    PendingEntityCreation, PendingEntityKind, SpawningGrace, StableEntityIdAllocator,
+    BodyPart, BodyPartRegistry, Drone, Owner, PendingEntityCreation, PendingEntityKind, PlayerId,
+    Position, RoomId, RoomTerrains, SpawningGrace, StableEntityIdAllocator,
 };
 use crate::onboarding::OnboardingEvent;
 
@@ -37,15 +37,17 @@ pub fn spawn_system(
         }
 
         let stable_id = stable_ids.allocate();
-        pending_entities.entries.push(crate::components::PendingEntityCreationEntry {
-            stable_id,
-            kind: PendingEntityKind::Drone {
-                owner: spawn.owner,
-                body: spawn.body,
-                position: spawn.position,
-                spawning_grace: 1,
-            },
-        });
+        pending_entities
+            .entries
+            .push(crate::components::PendingEntityCreationEntry {
+                stable_id,
+                kind: PendingEntityKind::Drone {
+                    owner: spawn.owner,
+                    body: spawn.body,
+                    position: spawn.position,
+                    spawning_grace: 1,
+                },
+            });
         *room_counts
             .0
             .entry((spawn.position.room, spawn.owner))

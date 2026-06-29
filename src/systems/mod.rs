@@ -16,10 +16,10 @@ pub mod drain_buffer_system;
 pub mod drain_system;
 pub mod drone_env_var_system;
 pub mod fabricate_buffer_system;
-pub mod fortify_system;
 pub mod fortify_buffer_system;
-pub mod hack_buffer_system;
+pub mod fortify_system;
 pub mod global_storage_system;
+pub mod hack_buffer_system;
 pub mod hack_system;
 pub mod leech_buffer_system;
 pub mod memory_upkeep_system;
@@ -38,7 +38,7 @@ pub mod status_advance_system;
 pub use aging_system::aging_system;
 pub use cargo_in_transit_system::{CargoInTransit, cargo_in_transit_system};
 pub use combat_system::{
-    CombatRules, PendingCombat, Projectile, attack_system, body_part_match, body_part_damage,
+    CombatRules, PendingCombat, Projectile, attack_system, body_part_damage, body_part_match,
     combat_system, heal_amount, heal_system, melee_attack_damage, projectile_system,
     ranged_attack_damage, ranged_attack_system,
 };
@@ -81,8 +81,8 @@ pub use spawn_system::{
 };
 pub use spawning_grace_system::{spawning_grace_expiry_system, spawning_grace_system};
 pub use special_attack_reducer::{
-    PendingDamage, PendingIntents, PendingSpecialAttack, ResolvedIntent, SpecialAttackIntent,
-    SpecialAttackKind, StatusActionIntent, PendingHeal, PendingHealEntry, PendingDamageEntry,
+    PendingDamage, PendingDamageEntry, PendingHeal, PendingHealEntry, PendingIntents,
+    PendingSpecialAttack, ResolvedIntent, SpecialAttackKind, StatusActionIntent,
     special_attack_reducer,
 };
 pub use starting_resources_system::{

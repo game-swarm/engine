@@ -222,7 +222,11 @@ mod tests {
     }
 
     fn clear_spawning_grace(world: &mut crate::SwarmWorld, entity: bevy::prelude::Entity) {
-        world.app.world_mut().entity_mut(entity).remove::<SpawningGrace>();
+        world
+            .app
+            .world_mut()
+            .entity_mut(entity)
+            .remove::<SpawningGrace>();
     }
 
     fn set_hits(world: &mut crate::SwarmWorld, entity: bevy::prelude::Entity, hits: u32) {
@@ -236,7 +240,13 @@ mod tests {
     }
 
     fn hits_of(world: &crate::SwarmWorld, entity: bevy::prelude::Entity) -> u32 {
-        world.app.world().entity(entity).get::<Drone>().unwrap().hits
+        world
+            .app
+            .world()
+            .entity(entity)
+            .get::<Drone>()
+            .unwrap()
+            .hits
     }
 
     #[test]
@@ -726,7 +736,7 @@ mod tests {
     #[test]
     fn command_action_and_rejection_registries_match_api_surface() {
         assert_eq!(CORE_COMMAND_ACTIONS.len(), 22);
-        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 48);
+        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 45);
 
         let action: CommandAction =
             serde_json::from_str(r#"{"type":"Hack","object_id":1,"target_id":2}"#).unwrap();
@@ -761,7 +771,7 @@ mod tests {
                 .iter()
                 .any(|command| command.name == "Fabricate")
         );
-        assert_eq!(idl.core.enums.rejection_reason.len(), 48);
+        assert_eq!(idl.core.enums.rejection_reason.len(), 45);
     }
 
     #[test]
@@ -1831,8 +1841,16 @@ mod tests {
         let mut world = create_world();
         let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Attack]);
         let target = world.spawn_drone(2, 11, 10, vec![BodyPart::Move]);
-        world.app.world_mut().entity_mut(attacker).remove::<SpawningGrace>();
-        world.app.world_mut().entity_mut(target).remove::<SpawningGrace>();
+        world
+            .app
+            .world_mut()
+            .entity_mut(attacker)
+            .remove::<SpawningGrace>();
+        world
+            .app
+            .world_mut()
+            .entity_mut(target)
+            .remove::<SpawningGrace>();
 
         assert_eq!(
             submit(
@@ -1867,7 +1885,11 @@ mod tests {
         );
 
         let healer = world.spawn_drone(2, 12, 10, vec![BodyPart::Heal]);
-        world.app.world_mut().entity_mut(healer).remove::<SpawningGrace>();
+        world
+            .app
+            .world_mut()
+            .entity_mut(healer)
+            .remove::<SpawningGrace>();
         assert_eq!(
             submit(
                 &mut world,
@@ -1965,7 +1987,10 @@ mod tests {
         clear_spawning_grace(&mut world, attacker);
         clear_spawning_grace(&mut world, target);
         world.run_tick();
-        assert!(hits_of(&world, target) < 100, "attack should reduce target hits");
+        assert!(
+            hits_of(&world, target) < 100,
+            "attack should reduce target hits"
+        );
     }
 
     #[test]
@@ -1977,7 +2002,11 @@ mod tests {
         clear_spawning_grace(&mut world, ally);
         let pre_hits = hits_of(&world, ally);
         world.run_tick();
-        assert_eq!(hits_of(&world, ally), pre_hits, "should not attack same-owner ally");
+        assert_eq!(
+            hits_of(&world, ally),
+            pre_hits,
+            "should not attack same-owner ally"
+        );
     }
 
     #[test]
@@ -1993,9 +2022,16 @@ mod tests {
         let far_pre = hits_of(&world, far);
         world.run_tick();
         // near drone at distance 1 should be hit
-        assert!(hits_of(&world, near) < near_pre, "near drone should be attacked");
+        assert!(
+            hits_of(&world, near) < near_pre,
+            "near drone should be attacked"
+        );
         // far drone (different room or out of range) should be untouched
-        assert_eq!(hits_of(&world, far), far_pre, "far drone should not be attacked");
+        assert_eq!(
+            hits_of(&world, far),
+            far_pre,
+            "far drone should not be attacked"
+        );
     }
 
     #[test]
@@ -2007,7 +2043,11 @@ mod tests {
         // target still has SpawningGrace
         let pre_hits = hits_of(&world, target);
         world.run_tick();
-        assert_eq!(hits_of(&world, target), pre_hits, "should skip drone with SpawningGrace");
+        assert_eq!(
+            hits_of(&world, target),
+            pre_hits,
+            "should skip drone with SpawningGrace"
+        );
     }
 
     #[test]
@@ -2031,7 +2071,13 @@ mod tests {
         clear_spawning_grace(&mut world, enemy);
         // Set enemy to max_hits so regeneration doesn't add +1 (S10 regen fires
         // on all drones < max_hits, and heal runs after regen in the chain)
-        let max = world.app.world().entity(enemy).get::<Drone>().unwrap().hits_max;
+        let max = world
+            .app
+            .world()
+            .entity(enemy)
+            .get::<Drone>()
+            .unwrap()
+            .hits_max;
         set_hits(&mut world, enemy, max);
         let pre_hits = hits_of(&world, enemy);
         world.run_tick();
@@ -2045,7 +2091,13 @@ mod tests {
         let ally = world.spawn_drone(1, 10, 11, vec![BodyPart::Move]);
         clear_spawning_grace(&mut world, healer);
         clear_spawning_grace(&mut world, ally);
-        let max = world.app.world().entity(ally).get::<Drone>().unwrap().hits_max;
+        let max = world
+            .app
+            .world()
+            .entity(ally)
+            .get::<Drone>()
+            .unwrap()
+            .hits_max;
         set_hits(&mut world, ally, max - 1);
         world.run_tick();
         assert_eq!(hits_of(&world, ally), max, "should not exceed hits_max");
@@ -2058,7 +2110,13 @@ mod tests {
         let ally = world.spawn_drone(1, 10, 11, vec![BodyPart::Move]);
         clear_spawning_grace(&mut world, healer);
         clear_spawning_grace(&mut world, ally);
-        let max = world.app.world().entity(ally).get::<Drone>().unwrap().hits_max;
+        let max = world
+            .app
+            .world()
+            .entity(ally)
+            .get::<Drone>()
+            .unwrap()
+            .hits_max;
         set_hits(&mut world, ally, max);
         world.run_tick();
         assert_eq!(hits_of(&world, ally), max, "should skip full-health ally");
@@ -2325,15 +2383,27 @@ mod tests {
     #[test]
     fn recycle_refund_uses_lifespan_ratio_floor() {
         let upkeep = crate::world::EmpireUpkeepConfig::default();
-        assert_eq!(upkeep.recycle_refund_amount(1_000, 0, 1_000, 500, false), 500);
-        assert_eq!(upkeep.recycle_refund_amount(1_000, 900, 1_000, 500, false), 100);
+        assert_eq!(
+            upkeep.recycle_refund_amount(1_000, 0, 1_000, 500, false),
+            500
+        );
+        assert_eq!(
+            upkeep.recycle_refund_amount(1_000, 900, 1_000, 500, false),
+            100
+        );
     }
 
     #[test]
     fn tutorial_recycle_refund_is_full_for_first_500_ticks() {
         let upkeep = crate::world::EmpireUpkeepConfig::default();
-        assert_eq!(upkeep.recycle_refund_amount(1_000, 900, 1_000, 499, true), 1_000);
-        assert_eq!(upkeep.recycle_refund_amount(1_000, 900, 1_000, 500, true), 100);
+        assert_eq!(
+            upkeep.recycle_refund_amount(1_000, 900, 1_000, 499, true),
+            1_000
+        );
+        assert_eq!(
+            upkeep.recycle_refund_amount(1_000, 900, 1_000, 500, true),
+            100
+        );
     }
 
     // ── P2-5 Starting Resources tests ──
@@ -2449,7 +2519,11 @@ mod tests {
                 amount: 1000,
             },
         });
-        assert!(result.is_ok(), "transfer should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.err()
+        );
 
         // Verify sender deducted: 10000 - 1000 = 9000
         let sender_storage = world
@@ -2537,7 +2611,7 @@ mod tests {
         let mut world = create_world();
         world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         world.spawn_drone(2, 20, 20, vec![BodyPart::Move]);
-        world.run_tick_for(1);  // register spawns at tick 1
+        world.run_tick_for(1); // register spawns at tick 1
         world.run_tick_for(510);
         world
             .app
@@ -2548,23 +2622,25 @@ mod tests {
             .or_default()
             .insert("Energy".to_string(), 10000);
 
-        world.submit_raw_command(RawCommand {
-            player_id: 1,
-            tick: 511,
-            source: crate::command::CommandSource::TestHarness,
-            auth: crate::command::CommandAuth {
-                source: crate::command::CommandSource::TestHarness,
+        world
+            .submit_raw_command(RawCommand {
                 player_id: 1,
-                tick_submitted: 511,
-                tick_target: 511,
-            },
-            sequence: 0,
-            action: CommandAction::AlliedTransfer {
-                target_player: 2,
-                resource: "Energy".to_string(),
-                amount: 1000,
-            },
-        }).unwrap();
+                tick: 511,
+                source: crate::command::CommandSource::TestHarness,
+                auth: crate::command::CommandAuth {
+                    source: crate::command::CommandSource::TestHarness,
+                    player_id: 1,
+                    tick_submitted: 511,
+                    tick_target: 511,
+                },
+                sequence: 0,
+                action: CommandAction::AlliedTransfer {
+                    target_player: 2,
+                    resource: "Energy".to_string(),
+                    amount: 1000,
+                },
+            })
+            .unwrap();
 
         // After 200 ticks, delivery should complete with 1000 - 20 (2% fee) = 980
         for t in 511..=710 {
@@ -2580,7 +2656,10 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         // Player 2 received: 5000 (starting) + 980 (transfer after 200bp fee)
-        assert_eq!(target_storage.get("Energy").copied().unwrap_or(0), 5000 + 980);
+        assert_eq!(
+            target_storage.get("Energy").copied().unwrap_or(0),
+            5000 + 980
+        );
     }
 
     #[test]
@@ -2588,7 +2667,7 @@ mod tests {
         let mut world = create_world();
         world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         world.spawn_drone(2, 20, 20, vec![BodyPart::Move]);
-        world.run_tick_for(1);  // register spawns at tick 1
+        world.run_tick_for(1); // register spawns at tick 1
         world.run_tick_for(510);
         world
             .app
@@ -2600,23 +2679,27 @@ mod tests {
             .insert("Energy".to_string(), 10000);
 
         // First transfer succeeds
-        assert!(world.submit_raw_command(RawCommand {
-            player_id: 1,
-            tick: 511,
-            source: crate::command::CommandSource::TestHarness,
-            auth: crate::command::CommandAuth {
-                source: crate::command::CommandSource::TestHarness,
-                player_id: 1,
-                tick_submitted: 511,
-                tick_target: 511,
-            },
-            sequence: 0,
-            action: CommandAction::AlliedTransfer {
-                target_player: 2,
-                resource: "Energy".to_string(),
-                amount: 100,
-            },
-        }).is_ok());
+        assert!(
+            world
+                .submit_raw_command(RawCommand {
+                    player_id: 1,
+                    tick: 511,
+                    source: crate::command::CommandSource::TestHarness,
+                    auth: crate::command::CommandAuth {
+                        source: crate::command::CommandSource::TestHarness,
+                        player_id: 1,
+                        tick_submitted: 511,
+                        tick_target: 511,
+                    },
+                    sequence: 0,
+                    action: CommandAction::AlliedTransfer {
+                        target_player: 2,
+                        resource: "Energy".to_string(),
+                        amount: 100,
+                    },
+                })
+                .is_ok()
+        );
 
         // Second transfer within cooldown should fail
         let result2 = world.submit_raw_command(RawCommand {

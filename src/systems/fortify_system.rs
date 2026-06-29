@@ -7,9 +7,7 @@ use crate::components::FortifyState;
 /// Reads FortifyState (written by S22) and provides armor/resistance.
 /// The actual damage reduction is applied by damage_application_system
 /// when it reads FortifyState from the entity.
-pub fn fortify_system(
-    fortified: Query<&FortifyState>,
-) {
+pub fn fortify_system(fortified: Query<&FortifyState>) {
     for state in fortified.iter() {
         if state.remaining_ticks == 0 {
             continue;

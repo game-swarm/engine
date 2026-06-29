@@ -331,7 +331,7 @@ pub fn execute_storage_tax(
 use bevy::prelude::*;
 
 /// Cumulative ledger tracking all resource operations this tick
-#[derive(Resource, Debug, Clone, Default)]
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceLedger {
     /// Ordered log of all resource operations
     pub ops: Vec<ResourceLedgerEntry>,
@@ -342,7 +342,7 @@ pub struct ResourceLedger {
 }
 
 /// A single resource operation entry
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceLedgerEntry {
     pub tick: Tick,
     pub source_player: Option<PlayerId>,
@@ -468,10 +468,7 @@ mod tests {
     fn tiered_storage_tax_below_30_percent_is_free() {
         let tiers = tiers_spec_compliant();
         // 200k / 1M = 20% → tier 0, rate 0
-        assert_eq!(
-            compute_tiered_storage_tax(200_000, 1_000_000, &tiers),
-            0
-        );
+        assert_eq!(compute_tiered_storage_tax(200_000, 1_000_000, &tiers), 0);
     }
 
     #[test]
@@ -502,21 +499,44 @@ mod tests {
     #[test]
     fn ledger_records_balance_delta() {
         let mut ledger = ResourceLedger::default();
-        ledger.record(0, Some(1), Some(2), "energy", 100, ResourceOperation::LocalTransfer);
+        ledger.record(
+            0,
+            Some(1),
+            Some(2),
+            "energy",
+            100,
+            ResourceOperation::LocalTransfer,
+        );
         assert_eq!(ledger.ops.len(), 1);
-        assert_eq!(*ledger.balance_delta.get(&1).unwrap().get("energy").unwrap(), -100);
-        assert_eq!(*ledger.balance_delta.get(&2).unwrap().get("energy").unwrap(), 100);
+        assert_eq!(
+            *ledger.balance_delta.get(&1).unwrap().get("energy").unwrap(),
+            -100
+        );
+        assert_eq!(
+            *ledger.balance_delta.get(&2).unwrap().get("energy").unwrap(),
+            100
+        );
         assert_eq!(ledger.ledger_checksum, 100);
     }
 
     #[test]
     fn ledger_system_clears_ops() {
         let mut ledger = ResourceLedger::default();
-        ledger.record(0, Some(1), None, "energy", -50, ResourceOperation::UpkeepDeduction);
+        ledger.record(
+            0,
+            Some(1),
+            None,
+            "energy",
+            -50,
+            ResourceOperation::UpkeepDeduction,
+        );
         assert_eq!(ledger.ops.len(), 1);
         // Manually clear ops (simulating what the Bevy system does)
         ledger.ops.clear();
         assert!(ledger.ops.is_empty(), "system should clear ops each tick");
-        assert_eq!(ledger.ledger_checksum, 50, "checksum should persist across ticks");
+        assert_eq!(
+            ledger.ledger_checksum, 50,
+            "checksum should persist across ticks"
+        );
     }
 }

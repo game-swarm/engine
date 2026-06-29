@@ -756,7 +756,10 @@ mod tests {
 
         // After run: Finished → Replay
         // (state is consumed with self, but replay contains traces)
-        assert!(!replay.traces.is_empty(), "replay should contain tick traces");
+        assert!(
+            !replay.traces.is_empty(),
+            "replay should contain tick traces"
+        );
     }
 
     #[test]

@@ -7,9 +7,7 @@ use crate::components::DisruptState;
 /// Reads DisruptState (written by S22) and applies the interrupted flag
 /// to the affected entity. Body part match is verified by command validation
 /// before the intent is passed to S14→S22.
-pub fn disrupt_system(
-    disrupted: Query<&DisruptState>,
-) {
+pub fn disrupt_system(disrupted: Query<&DisruptState>) {
     for state in disrupted.iter() {
         if state.remaining_ticks == 0 {
             continue;

@@ -32,11 +32,7 @@ pub struct ArenaRoomRecord {
 
 impl ArenaRoomAdmin {
     /// Create a new room and return its ID.
-    pub fn create_room(
-        &mut self,
-        mode: ArenaRoomMode,
-        owner: Option<PlayerId>,
-    ) -> u64 {
+    pub fn create_room(&mut self, mode: ArenaRoomMode, owner: Option<PlayerId>) -> u64 {
         let room_id = self.next_room_id;
         self.next_room_id += 1;
         self.active_rooms.insert(

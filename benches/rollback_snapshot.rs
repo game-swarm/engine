@@ -7,9 +7,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use swarm_engine::components::*;
-use swarm_engine::resources::{
-    PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
-};
+use swarm_engine::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use swarm_engine::systems::{PendingCombat, PendingSpawnQueue, Projectile, RoomDroneCounts};
 use swarm_engine::tick::WorldSnapshot;
 
@@ -56,7 +54,7 @@ fn build_populated_world(n: usize) -> World {
         )])));
         entity.insert(DroneEnv::default());
         entity.insert(CodeVersion(1));
-        entity.insert(MarkedForDeath);
+        entity.insert(DeathMark);
 
         if i % 5 == 0 {
             entity.insert(Projectile {

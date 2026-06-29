@@ -46,13 +46,25 @@ mod tests {
     fn overload_drains_fuel_to_floor() {
         let mut app = App::new();
         let mut storage = PlayerLocalStorage(IndexMap::new());
-        storage.0.entry(1).or_default().insert("energy".to_string(), 500);
+        storage
+            .0
+            .entry(1)
+            .or_default()
+            .insert("energy".to_string(), 500);
         app.insert_resource(storage);
 
         app.world_mut().spawn((
-            OverloadState { fuel_drain_per_tick: 100, fuel_floor: 200, remaining_ticks: 3 },
+            OverloadState {
+                fuel_drain_per_tick: 100,
+                fuel_floor: 200,
+                remaining_ticks: 3,
+            },
             Owner(1),
-            Position { x: 0, y: 0, room: crate::components::RoomId(0) },
+            Position {
+                x: 0,
+                y: 0,
+                room: crate::components::RoomId(0),
+            },
         ));
 
         app.add_systems(Update, overload_system);
@@ -60,20 +72,36 @@ mod tests {
 
         let storage = app.world().resource::<PlayerLocalStorage>();
         let player = storage.0.get(&1).unwrap();
-        assert_eq!(player.get("energy").copied().unwrap_or(0), 400, "should drain 100 fuel");
+        assert_eq!(
+            player.get("energy").copied().unwrap_or(0),
+            400,
+            "should drain 100 fuel"
+        );
     }
 
     #[test]
     fn overload_stops_at_fuel_floor() {
         let mut app = App::new();
         let mut storage = PlayerLocalStorage(IndexMap::new());
-        storage.0.entry(1).or_default().insert("energy".to_string(), 250);
+        storage
+            .0
+            .entry(1)
+            .or_default()
+            .insert("energy".to_string(), 250);
         app.insert_resource(storage);
 
         app.world_mut().spawn((
-            OverloadState { fuel_drain_per_tick: 100, fuel_floor: 200, remaining_ticks: 3 },
+            OverloadState {
+                fuel_drain_per_tick: 100,
+                fuel_floor: 200,
+                remaining_ticks: 3,
+            },
             Owner(1),
-            Position { x: 0, y: 0, room: crate::components::RoomId(0) },
+            Position {
+                x: 0,
+                y: 0,
+                room: crate::components::RoomId(0),
+            },
         ));
 
         app.add_systems(Update, overload_system);
@@ -81,6 +109,10 @@ mod tests {
 
         let storage = app.world().resource::<PlayerLocalStorage>();
         let player = storage.0.get(&1).unwrap();
-        assert_eq!(player.get("energy").copied().unwrap_or(0), 200, "should stop at floor 200");
+        assert_eq!(
+            player.get("energy").copied().unwrap_or(0),
+            200,
+            "should stop at floor 200"
+        );
     }
 }

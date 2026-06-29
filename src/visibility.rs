@@ -238,10 +238,7 @@ pub fn spectate_visible_entities(
     }
     let _effective_tick = tick - spectate_delay as u64;
     let mut query = world.query::<(Entity, &Position)>();
-    query
-        .iter(world)
-        .map(|(entity, _)| entity)
-        .collect()
+    query.iter(world).map(|(entity, _)| entity).collect()
 }
 
 #[cfg(test)]
@@ -367,39 +364,90 @@ mod tests {
     fn hint_ladder_safe_for_self_state_codes() {
         use crate::command::RejectionReason;
         assert_eq!(hint_ladder(&RejectionReason::Fatigued), HintLevel::Safe);
-        assert_eq!(hint_ladder(&RejectionReason::CooldownActive), HintLevel::Safe);
-        assert_eq!(hint_ladder(&RejectionReason::InsufficientEnergy), HintLevel::Safe);
-        assert_eq!(hint_ladder(&RejectionReason::AlreadyFullHealth), HintLevel::Safe);
-        assert_eq!(hint_ladder(&RejectionReason::SpawnOnCooldown), HintLevel::Safe);
-        assert_eq!(hint_ladder(&RejectionReason::RoomDroneCapReached), HintLevel::Safe);
+        assert_eq!(
+            hint_ladder(&RejectionReason::CooldownActive),
+            HintLevel::Safe
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::InsufficientEnergy),
+            HintLevel::Safe
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::AlreadyFullHealth),
+            HintLevel::Safe
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::SpawnOnCooldown),
+            HintLevel::Safe
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::RoomDroneCapReached),
+            HintLevel::Safe
+        );
     }
 
     #[test]
     fn hint_ladder_fixhint_for_oracle_codes() {
         use crate::command::RejectionReason;
-        assert_eq!(hint_ladder(&RejectionReason::NotVisibleOrNotFound), HintLevel::FixHint);
-        assert_eq!(hint_ladder(&RejectionReason::PlayerNotFound), HintLevel::FixHint);
-        assert_eq!(hint_ladder(&RejectionReason::FriendlyTarget), HintLevel::FixHint);
-        assert_eq!(hint_ladder(&RejectionReason::NotFriendly), HintLevel::FixHint);
-        assert_eq!(hint_ladder(&RejectionReason::OutOfRange { distance: 5, max: 3 }), HintLevel::FixHint);
-        assert_eq!(hint_ladder(&RejectionReason::ObjectNotFound), HintLevel::FixHint);
-        assert_eq!(hint_ladder(&RejectionReason::TargetNotFound), HintLevel::FixHint);
-        assert_eq!(hint_ladder(&RejectionReason::TargetNotVisible), HintLevel::FixHint);
+        assert_eq!(
+            hint_ladder(&RejectionReason::NotVisibleOrNotFound),
+            HintLevel::FixHint
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::PlayerNotFound),
+            HintLevel::FixHint
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::FriendlyTarget),
+            HintLevel::FixHint
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::NotFriendly),
+            HintLevel::FixHint
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::OutOfRange {
+                distance: 5,
+                max: 3
+            }),
+            HintLevel::FixHint
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::ObjectNotFound),
+            HintLevel::FixHint
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::TargetNotFound),
+            HintLevel::FixHint
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::TargetNotVisible),
+            HintLevel::FixHint
+        );
         assert_eq!(hint_ladder(&RejectionReason::NoPath), HintLevel::FixHint);
     }
 
     #[test]
     fn hint_ladder_defaults_to_fixhint() {
         use crate::command::RejectionReason;
-        assert_eq!(hint_ladder(&RejectionReason::InternalError), HintLevel::FixHint);
-        assert_eq!(hint_ladder(&RejectionReason::ServerOverloaded), HintLevel::FixHint);
+        assert_eq!(
+            hint_ladder(&RejectionReason::InternalError),
+            HintLevel::FixHint
+        );
+        assert_eq!(
+            hint_ladder(&RejectionReason::ServerOverloaded),
+            HintLevel::FixHint
+        );
     }
 
     #[test]
     fn format_hint_safe_empty() {
         use crate::command::RejectionReason;
         let msg = format_hint(&RejectionReason::NotVisibleOrNotFound, HintLevel::Safe);
-        assert!(msg.is_empty(), "Safe should return empty string, got '{msg}'");
+        assert!(
+            msg.is_empty(),
+            "Safe should return empty string, got '{msg}'"
+        );
     }
 
     #[test]
@@ -407,17 +455,32 @@ mod tests {
         use crate::command::RejectionReason;
         let msg = format_hint(&RejectionReason::NotVisibleOrNotFound, HintLevel::FixHint);
         assert!(!msg.is_empty(), "FixHint should return a hint message");
-        assert!(msg.contains("not visible"), "FixHint should be generic, got '{msg}'");
+        assert!(
+            msg.contains("not visible"),
+            "FixHint should be generic, got '{msg}'"
+        );
 
-        let msg = format_hint(&RejectionReason::OutOfRange { distance: 5, max: 3 }, HintLevel::FixHint);
-        assert!(msg.contains("out of range"), "FixHint should be generic, got '{msg}'");
+        let msg = format_hint(
+            &RejectionReason::OutOfRange {
+                distance: 5,
+                max: 3,
+            },
+            HintLevel::FixHint,
+        );
+        assert!(
+            msg.contains("out of range"),
+            "FixHint should be generic, got '{msg}'"
+        );
     }
 
     #[test]
     fn format_hint_fulldebug_detailed() {
         use crate::command::RejectionReason;
         let msg = format_hint(&RejectionReason::NotVisibleOrNotFound, HintLevel::FullDebug);
-        assert!(msg.contains("NotVisibleOrNotFound"), "FullDebug should include variant name, got '{msg}'");
+        assert!(
+            msg.contains("NotVisibleOrNotFound"),
+            "FullDebug should include variant name, got '{msg}'"
+        );
     }
 
     // ── Oracle defence: omitted_count bucketing (§10.2) ──
@@ -442,7 +505,10 @@ mod tests {
         let mut world = create_world();
         world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         let visible = spectate_visible_entities(world.app.world_mut(), 100, false, 50);
-        assert!(visible.is_empty(), "public_spectate=false should return empty");
+        assert!(
+            visible.is_empty(),
+            "public_spectate=false should return empty"
+        );
     }
 
     #[test]
@@ -450,7 +516,10 @@ mod tests {
         let mut world = create_world();
         world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         let visible = spectate_visible_entities(world.app.world_mut(), 30, true, 50);
-        assert!(visible.is_empty(), "tick < spectate_delay should return empty");
+        assert!(
+            visible.is_empty(),
+            "tick < spectate_delay should return empty"
+        );
     }
 
     #[test]
@@ -459,6 +528,9 @@ mod tests {
         world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         world.spawn_drone(2, 40, 40, vec![BodyPart::Move]);
         let visible = spectate_visible_entities(world.app.world_mut(), 100, true, 50);
-        assert!(!visible.is_empty(), "spectators should see entities after delay");
+        assert!(
+            !visible.is_empty(),
+            "spectators should see entities after delay"
+        );
     }
 }

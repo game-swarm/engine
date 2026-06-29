@@ -1045,7 +1045,10 @@ pub struct HackState {
 
 impl Default for HackState {
     fn default() -> Self {
-        Self { stage: 0, remaining_ticks: 5 }
+        Self {
+            stage: 0,
+            remaining_ticks: 5,
+        }
     }
 }
 
@@ -1059,7 +1062,11 @@ pub struct DrainState {
 
 impl Default for DrainState {
     fn default() -> Self {
-        Self { resource: String::new(), amount_per_tick: 0, remaining_ticks: 0 }
+        Self {
+            resource: String::new(),
+            amount_per_tick: 0,
+            remaining_ticks: 0,
+        }
     }
 }
 
@@ -1072,7 +1079,11 @@ pub struct OverloadState {
 
 impl Default for OverloadState {
     fn default() -> Self {
-        Self { fuel_drain_per_tick: 0, fuel_floor: 0, remaining_ticks: 0 }
+        Self {
+            fuel_drain_per_tick: 0,
+            fuel_floor: 0,
+            remaining_ticks: 0,
+        }
     }
 }
 
@@ -1084,7 +1095,10 @@ pub struct DebilitateState {
 
 impl Default for DebilitateState {
     fn default() -> Self {
-        Self { damage_type: String::new(), remaining_ticks: 0 }
+        Self {
+            damage_type: String::new(),
+            remaining_ticks: 0,
+        }
     }
 }
 
@@ -1097,7 +1111,10 @@ pub struct DisruptState {
 
 impl Default for DisruptState {
     fn default() -> Self {
-        Self { body_parts: vec![], remaining_ticks: 0 }
+        Self {
+            body_parts: vec![],
+            remaining_ticks: 0,
+        }
     }
 }
 
@@ -1404,9 +1421,9 @@ pub struct CodeVersion(pub u64);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct DeathMark;
 
-pub type MarkedForDeath = DeathMark;
-
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Component, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct StableEntityId(pub u64);
 
 #[derive(BevyResource, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

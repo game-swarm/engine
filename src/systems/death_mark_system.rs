@@ -1,12 +1,12 @@
 use bevy::prelude::*;
 
-use crate::components::{DeathMark, Drone, MarkedForDeath, Position, Structure};
+use crate::components::{DeathMark, Drone, Position, Structure};
 use crate::systems::RoomDroneCounts;
 
 pub fn death_mark_system(
     mut commands: Commands,
-    drones: Query<(Entity, &Drone, Option<&Position>), Without<MarkedForDeath>>,
-    structures: Query<(Entity, &Structure), Without<MarkedForDeath>>,
+    drones: Query<(Entity, &Drone, Option<&Position>), Without<DeathMark>>,
+    structures: Query<(Entity, &Structure), Without<DeathMark>>,
     mut room_counts: ResMut<RoomDroneCounts>,
 ) {
     for (entity, drone, position) in drones.iter() {

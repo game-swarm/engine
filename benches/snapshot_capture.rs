@@ -1,7 +1,7 @@
 // P5-2: Snapshot Capture/Restore Benchmark
 // Measure: 50 entity world snapshot < 20ms capture, < 30ms restore
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use swarm_engine::components::BodyPart;
 use swarm_engine::tick::WorldSnapshot;
 use swarm_engine::{create_world, spawn_drone};
@@ -23,9 +23,7 @@ fn bench_snapshot_capture(c: &mut Criterion) {
     }
 
     group.bench_function("capture_50_drones", |b| {
-        b.iter(|| {
-            WorldSnapshot::capture(world.app.world_mut())
-        });
+        b.iter(|| WorldSnapshot::capture(world.app.world_mut()));
     });
 
     let snapshot = WorldSnapshot::capture(world.app.world_mut());

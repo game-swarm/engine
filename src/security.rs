@@ -532,28 +532,20 @@ impl SafeHintLadder {
             r if r.contains("insufficient") && r.contains("energy") => {
                 SafeHint::direct("Need more energy", r)
             }
-            r if r.contains("cooldown") => {
-                SafeHint::direct("Action on cooldown", r)
-            }
-            r if r.contains("room is full") => {
-                SafeHint::direct("Room at capacity", r)
-            }
+            r if r.contains("cooldown") => SafeHint::direct("Action on cooldown", r),
+            r if r.contains("room is full") => SafeHint::direct("Room at capacity", r),
 
             // Level 2 — Reference docs
-            r if r.contains("body_part") => {
-                SafeHint::reference(
-                    "Invalid body part targeting",
-                    r,
-                    "swarm_get_docs('body_parts')",
-                )
-            }
-            r if r.contains("disrupt") => {
-                SafeHint::reference(
-                    "Disrupt requires valid body part match",
-                    r,
-                    "swarm_get_docs('disrupt')",
-                )
-            }
+            r if r.contains("body_part") => SafeHint::reference(
+                "Invalid body part targeting",
+                r,
+                "swarm_get_docs('body_parts')",
+            ),
+            r if r.contains("disrupt") => SafeHint::reference(
+                "Disrupt requires valid body part match",
+                r,
+                "swarm_get_docs('disrupt')",
+            ),
             r if r.contains("hack") || r.contains("drain") || r.contains("overload") => {
                 SafeHint::reference(
                     "Special attack validation failed",
@@ -595,6 +587,8 @@ mod tests {
             rejections: Vec::new(),
             metrics,
             state_checksum: world.state_checksum(),
+            system_manifest_hash: [0; 32],
+            action_manifest_hash: [0; 32],
             security_alerts: Vec::new(),
         }
     }

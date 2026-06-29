@@ -146,7 +146,11 @@ pub fn heal_amount(parts: usize) -> u32 {
 }
 
 fn body_part_count(drone: &Drone, part: BodyPart) -> usize {
-    drone.body.iter().filter(|candidate| **candidate == part).count()
+    drone
+        .body
+        .iter()
+        .filter(|candidate| **candidate == part)
+        .count()
 }
 
 /// Check if a drone has ALL specified body parts.
@@ -290,7 +294,11 @@ pub fn projectile_system(
             continue;
         }
         let target = Entity::from_bits(projectile.target);
-        if targets.get(target).map(|drone| drone.hits > 0).unwrap_or(false) {
+        if targets
+            .get(target)
+            .map(|drone| drone.hits > 0)
+            .unwrap_or(false)
+        {
             impacts.push((target, projectile.damage_type.clone(), projectile.damage));
         }
         commands.entity(projectile_entity).despawn();
@@ -397,10 +405,7 @@ pub fn combat_system(
         Option<&EntityFlags>,
         Option<&SpawningGrace>,
     )>,
-    structures: Query<
-        (&Structure, Option<&Attributes>, Option<&EntityFlags>),
-        Without<Drone>,
-    >,
+    structures: Query<(&Structure, Option<&Attributes>, Option<&EntityFlags>), Without<Drone>>,
 ) {
     // --- Damage phase (first) ---
     // Accumulate total damage per target, then apply in deterministic order.

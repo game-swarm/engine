@@ -6,9 +6,7 @@ use crate::components::{DebilitateState, Drone};
 ///
 /// Reads DebilitateState (written by S22) and doubles damage from
 /// the debilitated damage type against the affected drone.
-pub fn debilitate_system(
-    mut debilitated: Query<(&mut Drone, &DebilitateState)>,
-) {
+pub fn debilitate_system(mut debilitated: Query<(&mut Drone, &DebilitateState)>) {
     for (mut drone, state) in debilitated.iter_mut() {
         if state.remaining_ticks == 0 {
             continue;
@@ -47,7 +45,10 @@ mod tests {
         let mut app = App::new();
         app.world_mut().spawn((
             test_drone(),
-            DebilitateState { damage_type: "Corrosive".into(), remaining_ticks: 5 },
+            DebilitateState {
+                damage_type: "Corrosive".into(),
+                remaining_ticks: 5,
+            },
         ));
 
         app.add_systems(Update, debilitate_system);
@@ -61,7 +62,10 @@ mod tests {
         let mut app = App::new();
         app.world_mut().spawn((
             test_drone(),
-            DebilitateState { damage_type: "Kinetic".into(), remaining_ticks: 0 },
+            DebilitateState {
+                damage_type: "Kinetic".into(),
+                remaining_ticks: 0,
+            },
         ));
 
         app.add_systems(Update, debilitate_system);

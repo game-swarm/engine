@@ -21,7 +21,7 @@ pub fn pvp_block_system(config: Res<WorldConfig>, mut combat: ResMut<PendingComb
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{Drone, DEFAULT_DRONE_LIFESPAN};
+    use crate::components::{DEFAULT_DRONE_LIFESPAN, Drone};
     use crate::world::create_world;
     use indexmap::IndexMap;
 
@@ -48,7 +48,12 @@ mod tests {
     #[test]
     fn pvp_block_clears_combat_when_disabled() {
         let mut world = create_world();
-        world.app.world_mut().resource_mut::<WorldConfig>().combat.pvp_enabled = false;
+        world
+            .app
+            .world_mut()
+            .resource_mut::<WorldConfig>()
+            .combat
+            .pvp_enabled = false;
 
         // Pre-populate PendingCombat with damage/heal
         let e1 = spawn_test_drone(&mut world, 1);
@@ -65,13 +70,21 @@ mod tests {
         // The key assertion: the drone was NOT damaged because pvp_block
         // cleared combat before combat_system ran.
         let drone = world.app.world().entity(e1).get::<Drone>().unwrap();
-        assert_eq!(drone.hits, 98, "only queued heal should remain when PvP damage is blocked");
+        assert_eq!(
+            drone.hits, 98,
+            "only queued heal should remain when PvP damage is blocked"
+        );
     }
 
     #[test]
     fn pvp_block_allows_combat_when_enabled() {
         let mut world = create_world();
-        world.app.world_mut().resource_mut::<WorldConfig>().combat.pvp_enabled = true;
+        world
+            .app
+            .world_mut()
+            .resource_mut::<WorldConfig>()
+            .combat
+            .pvp_enabled = true;
 
         let e1 = spawn_test_drone(&mut world, 1);
         {

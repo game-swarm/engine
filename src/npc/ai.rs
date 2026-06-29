@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::{BodyPart, BodyPartRegistry, DamageType, Drone, Position, RoomTerrains};
 use crate::resources::CurrentTick;
-use crate::systems::{CombatRules, PendingCombat, PendingIntents, PendingSpecialAttack, SpecialAttackIntent};
+use crate::systems::{
+    CombatRules, PendingCombat, PendingIntents, PendingSpecialAttack, StatusActionIntent,
+};
 
 pub const DEFAULT_NPC_AGGRO_RANGE: u32 = 5;
 pub const DEFAULT_NPC_ATTACK_RANGE: u32 = 1;
@@ -245,12 +247,14 @@ pub fn npc_combat_system(
         // G4: Queue special attack if NPC has one and cooldown permits
         if let Some(special) = npc.special_attack {
             if npc.special_cooldown_remaining == 0 {
-                special_attacks.intents.push(SpecialAttackIntent {
+                special_attacks.intents.push(StatusActionIntent {
                     kind: match special {
                         NpcSpecialAttack::Hack => crate::systems::SpecialAttackKind::Hack,
                         NpcSpecialAttack::Drain => crate::systems::SpecialAttackKind::Drain,
                         NpcSpecialAttack::Overload => crate::systems::SpecialAttackKind::Overload,
-                        NpcSpecialAttack::Debilitate => crate::systems::SpecialAttackKind::Debilitate,
+                        NpcSpecialAttack::Debilitate => {
+                            crate::systems::SpecialAttackKind::Debilitate
+                        }
                         NpcSpecialAttack::Disrupt => crate::systems::SpecialAttackKind::Disrupt,
                         NpcSpecialAttack::Fortify => crate::systems::SpecialAttackKind::Fortify,
                     },
@@ -489,8 +493,7 @@ mod tests {
         // but PendingIntents should have the resolved intent
         let intents = world.app.world().resource::<PendingIntents>();
         assert!(
-            !intents.intents.is_empty()
-                || !pending.intents.is_empty(),
+            !intents.intents.is_empty() || !pending.intents.is_empty(),
             "NPC with Hack should produce special attack intent"
         );
     }
@@ -504,20 +507,36 @@ mod tests {
             .world_mut()
             .entity_mut(drone)
             .remove::<crate::components::SpawningGrace>();
-        let npc_entity = world.app.world_mut().spawn((
-            position(10, 10),
-            Npc::new(NpcType::Guardian).with_special(NpcSpecialAttack::Drain, 3), // cooldown=3
-            NpcBehavior::guard(position(10, 10)),
-        )).id();
+        let npc_entity = world
+            .app
+            .world_mut()
+            .spawn((
+                position(10, 10),
+                Npc::new(NpcType::Guardian).with_special(NpcSpecialAttack::Drain, 3), // cooldown=3
+                NpcBehavior::guard(position(10, 10)),
+            ))
+            .id();
 
         // First tick: cooldown permits attack
         world.run_tick();
-        let cooldown_after = world.app.world().entity(npc_entity).get::<Npc>().unwrap().special_cooldown_remaining;
+        let cooldown_after = world
+            .app
+            .world()
+            .entity(npc_entity)
+            .get::<Npc>()
+            .unwrap()
+            .special_cooldown_remaining;
         assert_eq!(cooldown_after, 3, "cooldown should reset after first use");
 
         // Second tick: cooldown decrements
         world.run_tick();
-        let cooldown_after2 = world.app.world().entity(npc_entity).get::<Npc>().unwrap().special_cooldown_remaining;
+        let cooldown_after2 = world
+            .app
+            .world()
+            .entity(npc_entity)
+            .get::<Npc>()
+            .unwrap()
+            .special_cooldown_remaining;
         assert_eq!(cooldown_after2, 2);
     }
 }

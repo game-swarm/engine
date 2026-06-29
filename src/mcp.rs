@@ -507,9 +507,18 @@ pub struct TournamentStatusResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    WebSessionOk,
+    AppCertRequired,
+    AdminCertRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
+    pub auth_mode: AuthMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -518,6 +527,14 @@ pub struct AvailableActionsResult {
     pub player_id: PlayerId,
     pub wasm_actions: Vec<String>,
     pub mcp_tools: Vec<ToolInfo>,
+}
+
+fn tool_info(name: &str, description: &str) -> ToolInfo {
+    ToolInfo {
+        name: name.to_string(),
+        description: description.to_string(),
+        auth_mode: mcp_tool_auth_mode(name).unwrap_or(AuthMode::WebSessionOk),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1886,192 +1903,200 @@ impl McpServer {
 
 fn mcp_tool_infos() -> Vec<ToolInfo> {
     vec![
-        ToolInfo {
-            name: "swarm_get_snapshot".to_string(),
-            description: "Get the visible world state for a player at the current tick".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_terrain".to_string(),
-            description: "Get terrain type at room coordinates".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_world_rules".to_string(),
-            description: "Get the world rules and mods configuration".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_schema".to_string(),
-            description: "Get the CommandIntent JSON Schema".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_available_actions".to_string(),
-            description: "List all WASM actions and MCP tools available to the player".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_explain_last_tick".to_string(),
-            description: "Explain the last tick's results for a player".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_tick_trace".to_string(),
-            description: "Get commands, state diff, rejections, and metrics for a tick".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_engine_stats".to_string(),
-            description: "Get engine tick, memory, CPU, and sandbox cache statistics".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_state_checksum".to_string(),
-            description: "Get deterministic world state checksum for current or traced tick".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_sandbox_profile".to_string(),
-            description: "Get sandbox fuel, host call, memory, and execution profile for a drone".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_list_errors".to_string(),
-            description: "List command rejections collected from tick traces".to_string(),
-        },
-        ToolInfo { name: "swarm_get_drone".to_string(), description: "Get full state for an owned or visible drone".to_string() },
-        ToolInfo { name: "swarm_get_room".to_string(), description: "Get a room visible to the player".to_string() },
-        ToolInfo { name: "swarm_get_structure".to_string(), description: "Get visible structure state by id".to_string() },
-        ToolInfo { name: "swarm_get_controller".to_string(), description: "Get visible controller state by id".to_string() },
-        ToolInfo { name: "swarm_get_code".to_string(), description: "Get deployed code metadata for a drone".to_string() },
-        ToolInfo { name: "swarm_get_visibility".to_string(), description: "Get visible rooms and entities".to_string() },
-        ToolInfo { name: "swarm_get_path".to_string(), description: "Return a simple path between visible positions".to_string() },
-        ToolInfo { name: "swarm_get_resources".to_string(), description: "Get visible player resources".to_string() },
-        ToolInfo { name: "swarm_get_info".to_string(), description: "Get world metadata".to_string() },
-        ToolInfo { name: "swarm_list_drones".to_string(), description: "List visible drones".to_string() },
-        ToolInfo { name: "swarm_list_rooms".to_string(), description: "List visible rooms".to_string() },
-        ToolInfo { name: "swarm_list_structures".to_string(), description: "List visible structures".to_string() },
-        ToolInfo { name: "swarm_list_controllers".to_string(), description: "List visible controllers".to_string() },
-        ToolInfo { name: "swarm_get_events".to_string(), description: "Get visible events".to_string() },
-        ToolInfo { name: "swarm_get_messages".to_string(), description: "Get drone messages".to_string() },
-        ToolInfo {
-            name: "swarm_profile".to_string(),
-            description: "Profile a player's current world state".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_economy".to_string(),
-            description:
-                "Summarize player economy income, expenses, storage tax, and maintenance"
-                    .to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_economy_trend".to_string(),
-            description: "Return deterministic economy trend points for recent ticks".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_drone_efficiency".to_string(),
-            description: "Estimate a drone efficiency percentage from fatigue, health, spawning, and carry state".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_leaderboard".to_string(),
-            description: "Return leaderboard entries from ranking state and live world counts".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_sdk_fetch".to_string(),
-            description: "Fetch a minimal SDK starter package for bot development".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_dry_run".to_string(),
-            description: "Dry-run commands without mutating the world".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_simulate".to_string(),
-            description: "Predict future ticks from a visible world snapshot without mutating live state".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_replay".to_string(),
-            description: "Retrieve replay data as entity-change deltas between two ticks, anchored on the nearest keyframe".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_docs".to_string(),
-            description: "Get Swarm documentation and reference material".to_string(),
-        },
-        ToolInfo {
-            name: "resources/list".to_string(),
-            description: "List available resource types".to_string(),
-        },
-        ToolInfo {
-            name: "resources/read".to_string(),
-            description: "Read resource definitions".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_auth_revoke".to_string(),
-            description: "Revoke a session or certificate".to_string(),
-        },
-        ToolInfo { name: "swarm_auth_login".to_string(), description: "Authenticate a user or agent against the Auth control plane".to_string() },
-        ToolInfo { name: "swarm_auth_logout".to_string(), description: "Terminate an Auth control-plane session".to_string() },
-        ToolInfo { name: "swarm_auth_refresh".to_string(), description: "Refresh Auth control-plane session credentials".to_string() },
-        ToolInfo { name: "swarm_auth_check".to_string(), description: "Check Auth control-plane session or certificate status".to_string() },
-        ToolInfo { name: "swarm_auth_cert_issue".to_string(), description: "Issue an application-layer client/code certificate bundle".to_string() },
-        ToolInfo { name: "swarm_auth_cert_list".to_string(), description: "List application-layer certificates for the caller".to_string() },
-        ToolInfo { name: "swarm_auth_cert_revoke".to_string(), description: "Revoke an application-layer certificate".to_string() },
-        ToolInfo { name: "swarm_auth_cert_rotate".to_string(), description: "Rotate Auth intermediate CA or caller certificate material".to_string() },
-        ToolInfo { name: "swarm_auth_device_list".to_string(), description: "List registered Auth devices for the caller".to_string() },
-        ToolInfo { name: "swarm_auth_device_register".to_string(), description: "Register an Auth device and key label".to_string() },
-        ToolInfo { name: "swarm_get_world_config".to_string(), description: "Get world-level Auth and rules configuration metadata".to_string() },
-        ToolInfo {
-            name: "swarm_list_modules".to_string(),
-            description: "List all deployed WASM modules across all players".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_deploy".to_string(),
-            description: "Deploy a WASM module for a player".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_get_deploy_status".to_string(),
-            description: "Inspect status and object-store pointer for a deployed module".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_list_deployments".to_string(),
-            description: "List deployments, optionally filtered by player".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_validate_module".to_string(),
-            description: "Validate a WASM module before deployment".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_tournament_precommit".to_string(),
-            description:
-            "Lock a previously deployed WASM module for an AI tournament before match start"
-                .to_string(),
-        },
-        ToolInfo {
-        name: "swarm_admin_challenge".to_string(),
-        description: "Verify an admin challenge response and grant admin scope".to_string(),
-        },
-        ToolInfo {
-        name: "swarm_admin_set_world_config".to_string(),
-        description: "Accept an admin world configuration update".to_string(),
-        },
-        ToolInfo {
-        name: "swarm_admin_rollback".to_string(),
-        description: "Queue an admin rollback to a target tick".to_string(),
-        },
-        ToolInfo {
-        name: "swarm_admin_ban_player".to_string(),
-        description: "Apply an admin player ban".to_string(),
-        },
-        ToolInfo {
-        name: "swarm_admin_force_gc".to_string(),
-        description: "Run admin garbage collection for a requested scope".to_string(),
-        },
-        ToolInfo {
-        name: "swarm_admin_get_audit_log".to_string(),
-        description: "Read admin audit log entries".to_string(),
-        },
-        ToolInfo {
-        name: "swarm_tournament_status".to_string(),
-        description: "Inspect AI tournament preparation and locked-code status".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_tournament_create".to_string(),
-            description: "Create and schedule a single- or double-elimination AI tournament from precommitted modules".to_string(),
-        },
-        ToolInfo {
-            name: "swarm_match_result".to_string(),
-            description: "Record a scheduled tournament match winner and advance the bracket".to_string(),
-        },
+        tool_info(
+            "swarm_get_snapshot",
+            "Get the visible world state for a player at the current tick",
+        ),
+        tool_info("swarm_get_terrain", "Get terrain type at room coordinates"),
+        tool_info(
+            "swarm_get_world_rules",
+            "Get the world rules and mods configuration",
+        ),
+        tool_info("swarm_get_schema", "Get the CommandIntent JSON Schema"),
+        tool_info(
+            "swarm_get_available_actions",
+            "List all WASM actions and MCP tools available to the player",
+        ),
+        tool_info(
+            "swarm_explain_last_tick",
+            "Explain the last tick's results for a player",
+        ),
+        tool_info(
+            "swarm_get_tick_trace",
+            "Get commands, state diff, rejections, and metrics for a tick",
+        ),
+        tool_info(
+            "swarm_get_engine_stats",
+            "Get engine tick, memory, CPU, and sandbox cache statistics",
+        ),
+        tool_info(
+            "swarm_get_state_checksum",
+            "Get deterministic world state checksum for current or traced tick",
+        ),
+        tool_info(
+            "swarm_get_sandbox_profile",
+            "Get sandbox fuel, host call, memory, and execution profile for a drone",
+        ),
+        tool_info(
+            "swarm_list_errors",
+            "List command rejections collected from tick traces",
+        ),
+        tool_info(
+            "swarm_get_drone",
+            "Get full state for an owned or visible drone",
+        ),
+        tool_info("swarm_get_room", "Get a room visible to the player"),
+        tool_info("swarm_get_structure", "Get visible structure state by id"),
+        tool_info("swarm_get_controller", "Get visible controller state by id"),
+        tool_info("swarm_get_code", "Get deployed code metadata for a drone"),
+        tool_info("swarm_get_visibility", "Get visible rooms and entities"),
+        tool_info(
+            "swarm_get_path",
+            "Return a simple path between visible positions",
+        ),
+        tool_info("swarm_get_resources", "Get visible player resources"),
+        tool_info("swarm_get_info", "Get world metadata"),
+        tool_info("swarm_list_drones", "List visible drones"),
+        tool_info("swarm_list_rooms", "List visible rooms"),
+        tool_info("swarm_list_structures", "List visible structures"),
+        tool_info("swarm_list_controllers", "List visible controllers"),
+        tool_info("swarm_get_events", "Get visible events"),
+        tool_info("swarm_get_messages", "Get drone messages"),
+        tool_info("swarm_profile", "Profile a player's current world state"),
+        tool_info(
+            "swarm_get_economy",
+            "Summarize player economy income, expenses, storage tax, and maintenance",
+        ),
+        tool_info(
+            "swarm_get_economy_trend",
+            "Return deterministic economy trend points for recent ticks",
+        ),
+        tool_info(
+            "swarm_get_drone_efficiency",
+            "Estimate a drone efficiency percentage from fatigue, health, spawning, and carry state",
+        ),
+        tool_info(
+            "swarm_get_leaderboard",
+            "Return leaderboard entries from ranking state and live world counts",
+        ),
+        tool_info(
+            "swarm_sdk_fetch",
+            "Fetch a minimal SDK starter package for bot development",
+        ),
+        tool_info(
+            "swarm_dry_run",
+            "Dry-run commands without mutating the world",
+        ),
+        tool_info(
+            "swarm_simulate",
+            "Predict future ticks from a visible world snapshot without mutating live state",
+        ),
+        tool_info(
+            "swarm_get_replay",
+            "Retrieve replay data as entity-change deltas between two ticks, anchored on the nearest keyframe",
+        ),
+        tool_info(
+            "swarm_get_docs",
+            "Get Swarm documentation and reference material",
+        ),
+        tool_info("resources/list", "List available resource types"),
+        tool_info("resources/read", "Read resource definitions"),
+        tool_info("swarm_auth_revoke", "Revoke a session or certificate"),
+        tool_info(
+            "swarm_auth_login",
+            "Authenticate a user or agent against the Auth control plane",
+        ),
+        tool_info(
+            "swarm_auth_logout",
+            "Terminate an Auth control-plane session",
+        ),
+        tool_info(
+            "swarm_auth_refresh",
+            "Refresh Auth control-plane session credentials",
+        ),
+        tool_info(
+            "swarm_auth_check",
+            "Check Auth control-plane session or certificate status",
+        ),
+        tool_info(
+            "swarm_auth_cert_issue",
+            "Issue an application-layer client/code certificate bundle",
+        ),
+        tool_info(
+            "swarm_auth_cert_list",
+            "List application-layer certificates for the caller",
+        ),
+        tool_info(
+            "swarm_auth_cert_revoke",
+            "Revoke an application-layer certificate",
+        ),
+        tool_info(
+            "swarm_auth_cert_rotate",
+            "Rotate Auth intermediate CA or caller certificate material",
+        ),
+        tool_info(
+            "swarm_auth_device_list",
+            "List registered Auth devices for the caller",
+        ),
+        tool_info(
+            "swarm_auth_device_register",
+            "Register an Auth device and key label",
+        ),
+        tool_info(
+            "swarm_get_world_config",
+            "Get world-level Auth and rules configuration metadata",
+        ),
+        tool_info(
+            "swarm_list_modules",
+            "List all deployed WASM modules across all players",
+        ),
+        tool_info("swarm_deploy", "Deploy a WASM module for a player"),
+        tool_info(
+            "swarm_get_deploy_status",
+            "Inspect status and object-store pointer for a deployed module",
+        ),
+        tool_info(
+            "swarm_list_deployments",
+            "List deployments, optionally filtered by player",
+        ),
+        tool_info(
+            "swarm_validate_module",
+            "Validate a WASM module before deployment",
+        ),
+        tool_info(
+            "swarm_tournament_precommit",
+            "Lock a previously deployed WASM module for an AI tournament before match start",
+        ),
+        tool_info(
+            "swarm_admin_challenge",
+            "Verify an admin challenge response and grant admin scope",
+        ),
+        tool_info(
+            "swarm_admin_set_world_config",
+            "Accept an admin world configuration update",
+        ),
+        tool_info(
+            "swarm_admin_rollback",
+            "Queue an admin rollback to a target tick",
+        ),
+        tool_info("swarm_admin_ban_player", "Apply an admin player ban"),
+        tool_info(
+            "swarm_admin_force_gc",
+            "Run admin garbage collection for a requested scope",
+        ),
+        tool_info("swarm_admin_get_audit_log", "Read admin audit log entries"),
+        tool_info(
+            "swarm_tournament_status",
+            "Inspect AI tournament preparation and locked-code status",
+        ),
+        tool_info(
+            "swarm_tournament_create",
+            "Create and schedule a single- or double-elimination AI tournament from precommitted modules",
+        ),
+        tool_info(
+            "swarm_match_result",
+            "Record a scheduled tournament match winner and advance the bracket",
+        ),
     ]
 }
 
@@ -2113,35 +2138,47 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_get_drone_efficiency"
         | "swarm_get_leaderboard"
         | "swarm_sdk_fetch"
-        | "swarm_get_drone"
-        | "swarm_get_room"
         | "swarm_get_tick_trace"
         | "swarm_get_engine_stats"
         | "swarm_get_state_checksum"
         | "swarm_get_sandbox_profile"
         | "swarm_list_errors"
-        | "swarm_profile"
         | "swarm_get_docs"
         | "resources/list"
         | "resources/read"
         | "swarm_auth_revoke"
+        | "swarm_auth_login"
+        | "swarm_auth_logout"
+        | "swarm_auth_refresh"
+        | "swarm_auth_check"
+        | "swarm_auth_cert_issue"
+        | "swarm_auth_cert_list"
+        | "swarm_auth_cert_revoke"
+        | "swarm_auth_cert_rotate"
+        | "swarm_auth_device_list"
+        | "swarm_auth_device_register"
+        | "swarm_get_world_config"
         | "swarm_tournament_status"
-        | "swarm_match_result" => Some(CommandSource::McpQuery),
-
-        "swarm_match_result" => Some(CommandSource::McpQuery),
-        "swarm_dry_run" => Some(CommandSource::DryRun),
-
-        "swarm_simulate" => Some(CommandSource::Simulate),
-        "swarm_list_modules"
+        | "swarm_match_result"
+        | "swarm_list_modules"
         | "swarm_get_deploy_status"
         | "swarm_list_deployments"
-        | "swarm_get_replay" => Some(CommandSource::McpQuery),
-
-        "swarm_get_replay" | "swarm_get_deploy_status" | "swarm_list_deployments" => {
-            Some(CommandSource::McpQuery)
-        }
-
+        | "swarm_get_replay"
+        | "swarm_get_terrain" => Some(CommandSource::McpQuery),
+        "swarm_dry_run" => Some(CommandSource::DryRun),
+        "swarm_simulate" => Some(CommandSource::Simulate),
         _ => None,
+    }
+}
+
+fn mcp_tool_auth_mode(tool: &str) -> Option<AuthMode> {
+    match mcp_tool_source(tool)? {
+        CommandSource::Admin => Some(AuthMode::AdminCertRequired),
+        CommandSource::McpDeploy | CommandSource::DryRun | CommandSource::Simulate => {
+            Some(AuthMode::AppCertRequired)
+        }
+        CommandSource::McpQuery => Some(AuthMode::WebSessionOk),
+        _ => Some(AuthMode::AppCertRequired),
     }
 }
 
@@ -2648,7 +2685,7 @@ pub fn swarm_get_drone(
             entity_ref.get::<crate::components::Resource>().cloned(),
             entity_ref.get::<Terrain>().copied(),
             entity_ref.get::<Controller>().cloned(),
-            entity_ref.contains::<MarkedForDeath>(),
+            entity_ref.contains::<DeathMark>(),
         )
     };
     let visible = position

@@ -7,11 +7,11 @@ use std::collections::HashSet;
 use crate::components::*;
 use crate::onboarding::{OnboardingEvent, send_onboarding_event};
 use crate::resources::{
-    GlobalStorageConfig, GlobalTransferDirection, PendingGlobalTransfer, PendingGlobalTransfers,
-    PlayerGlobalStorage, PlayerLocalStorage, ResourceCost, ResourceRegistry,
-    ALLIED_TRANSFER_COOLDOWN, ALLIED_TRANSFER_DELAY, ALLIED_TRANSFER_FEE_BP,
-    ALLIED_DAILY_CAP, NEW_PLAYER_TRANSFER_LOCK, PendingAlliedTransfer, PendingAlliedTransfers,
-    AlliedTransferCooldowns, AlliedTransferDailyUsage, CurrentTick,
+    ALLIED_DAILY_CAP, ALLIED_TRANSFER_COOLDOWN, ALLIED_TRANSFER_DELAY, ALLIED_TRANSFER_FEE_BP,
+    AlliedTransferCooldowns, AlliedTransferDailyUsage, CurrentTick, GlobalStorageConfig,
+    GlobalTransferDirection, NEW_PLAYER_TRANSFER_LOCK, PendingAlliedTransfer,
+    PendingAlliedTransfers, PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage,
+    PlayerLocalStorage, ResourceCost, ResourceRegistry,
 };
 use crate::systems::{
     PendingControllerUpgrade, PendingDamage, PendingHeal, PendingSpawn, PendingSpawnQueue,
@@ -582,7 +582,9 @@ pub enum RejectionReason {
     SafeModeActive,
     TargetFortifyCooldown,
     TargetOverloadCooldown,
-    DisruptedResisted { part: BodyPart },
+    DisruptedResisted {
+        part: BodyPart,
+    },
     InternalError,
     ServerOverloaded,
     SnapshotOverBudget,
@@ -639,15 +641,12 @@ pub const CANONICAL_REJECTION_REASONS: &[&str] = &[
     "CommandBufferFull",
     "ServerOverloaded",
     "InternalError",
-    "InvalidCertificate",
-    "NotAuthorized",
     "CertExpired",
     "DeviceNotRegistered",
     "SessionLimitReached",
     "RefreshTokenInvalid",
     "ScopeInsufficient",
     "TokenRevoked",
-    "RateLimited",
     "MultiDeviceConflict",
     "UnknownCredential",
     "InternalAuthError",
@@ -2967,8 +2966,7 @@ fn validate_allied_transfer(
     }
 
     // Check new player transfer lock: target must have been in world ≥ NEW_PLAYER_TRANSFER_LOCK ticks
-    let first_spawn = world
-        .resource::<crate::systems::PlayerFirstSpawnTick>();
+    let first_spawn = world.resource::<crate::systems::PlayerFirstSpawnTick>();
     let current_tick = world.resource::<CurrentTick>().0;
     if let Some(spawn_tick) = first_spawn.0.get(&to_player) {
         let elapsed = current_tick.saturating_sub(*spawn_tick);
@@ -3037,10 +3035,10 @@ fn apply_allied_transfer(
 
     // Apply cooldown
     let current_tick = world.resource::<CurrentTick>().0;
-    world
-        .resource_mut::<AlliedTransferCooldowns>()
-        .0
-        .insert((from_player, to_player), current_tick + ALLIED_TRANSFER_COOLDOWN);
+    world.resource_mut::<AlliedTransferCooldowns>().0.insert(
+        (from_player, to_player),
+        current_tick + ALLIED_TRANSFER_COOLDOWN,
+    );
 
     // Track daily usage
     world
@@ -3434,8 +3432,12 @@ fn tile_has_any_object(world: &mut World, position: Position) -> bool {
             .entries
             .iter()
             .any(|entry| match &entry.kind {
-                PendingEntityKind::Drone { position: pending, .. }
-                | PendingEntityKind::Structure { position: pending, .. } => *pending == position,
+                PendingEntityKind::Drone {
+                    position: pending, ..
+                }
+                | PendingEntityKind::Structure {
+                    position: pending, ..
+                } => *pending == position,
             })
         || world
             .query::<(&Position, &Structure)>()

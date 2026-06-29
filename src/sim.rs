@@ -4,9 +4,9 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::command::Tick;
-use crate::components::{BodyPart, Controller, Drone, Source, Structure, PlayerId, RoomId};
-use crate::world::{SwarmWorld, create_world};
+use crate::components::{BodyPart, Controller, Drone, PlayerId, RoomId, Source, Structure};
 use crate::visibility::is_visible_to;
+use crate::world::{SwarmWorld, create_world};
 
 // ═══════════════════════════════════════════════════════════════════
 // Snapshot data types (P0-6)
@@ -158,9 +158,9 @@ fn hex_distance(a: &crate::components::Position, b: &crate::components::Position
 /// Classify an entity into a SnapshotEntity
 fn classify_entity(world: &World, entity: Entity) -> Option<SnapshotEntity> {
     let entity_id = format!("{:?}", entity);
-    let position = world.get::<crate::components::Position>(entity).map(|p| {
-        (p.room.0, p.x, p.y)
-    });
+    let position = world
+        .get::<crate::components::Position>(entity)
+        .map(|p| (p.room.0, p.x, p.y));
 
     if let Some(drone) = world.get::<Drone>(entity) {
         Some(SnapshotEntity {
@@ -219,7 +219,9 @@ pub fn build_snapshot(
     tick: Tick,
     config: &SnapshotConfig,
 ) -> PerDroneSnapshot {
-    let drone_pos = world.get::<crate::components::Position>(drone_entity).copied();
+    let drone_pos = world
+        .get::<crate::components::Position>(drone_entity)
+        .copied();
 
     // Collect all visible entities with distance bucket + entity_id sort key
     let mut sortable_entities: Vec<(SortKey, SnapshotEntity)> = Vec::new();
@@ -251,15 +253,12 @@ pub fn build_snapshot(
     }
 
     // Deterministic sort: distance bucket asc, then entity_id lexicographic (§1.3)
-    sortable_entities.sort_by(|a, b| {
-        a.0.0.cmp(&b.0.0).then_with(|| a.0.1.cmp(&b.0.1))
-    });
+    sortable_entities.sort_by(|a, b| a.0.0.cmp(&b.0.0).then_with(|| a.0.1.cmp(&b.0.1)));
 
     // Separate critical entities (never truncated) from non-critical (§1.4)
     let drone_eid = format!("{:?}", drone_entity);
-    let (critical, truncatable): (Vec<_>, Vec<_>) = sortable_entities
-        .into_iter()
-        .partition(|(_, e)| {
+    let (critical, truncatable): (Vec<_>, Vec<_>) =
+        sortable_entities.into_iter().partition(|(_, e)| {
             e.entity_id == drone_eid // own drone
                 || e.entity_type == "controller" // room controllers
                 || e.entity_type.starts_with("structure") // structures
@@ -272,8 +271,7 @@ pub fn build_snapshot(
         serde_json::to_string(entities).unwrap_or_default().len()
     };
 
-    let mut kept_entities: Vec<SnapshotEntity> =
-        critical.iter().map(|(_, e)| e.clone()).collect();
+    let mut kept_entities: Vec<SnapshotEntity> = critical.iter().map(|(_, e)| e.clone()).collect();
     let mut omitted_count = 0usize;
     let mut degraded = false;
 
@@ -304,8 +302,8 @@ pub fn build_snapshot(
         degraded,
         omitted_categories: OmittedCategories {
             entities: omitted_count,
-            resources: 0,  // resources tracked separately in ledger
-            events: 0,     // events not yet in snapshot scope
+            resources: 0, // resources tracked separately in ledger
+            events: 0,    // events not yet in snapshot scope
         },
         entities: kept_entities,
         resources: Vec::new(),
@@ -415,7 +413,12 @@ mod tests {
     fn create_test_world() -> SwarmWorld {
         let mut world = create_world();
         // Spawn a drone for player 1
-        world.spawn_drone(1, 5, 5, vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry]);
+        world.spawn_drone(
+            1,
+            5,
+            5,
+            vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
+        );
         // Spawn a drone for player 2 (far away)
         world.spawn_drone(2, 50, 50, vec![BodyPart::Move]);
         world
@@ -426,7 +429,8 @@ mod tests {
         let mut world = create_test_world();
         let tick = 1;
         let w = world.app.world_mut();
-        let entities: Vec<Entity> = w.query::<(Entity, &Drone)>()
+        let entities: Vec<Entity> = w
+            .query::<(Entity, &Drone)>()
             .iter(w)
             .map(|(e, _)| e)
             .collect();
@@ -441,9 +445,14 @@ mod tests {
         assert_eq!(snapshot.tick, tick);
         assert!(!snapshot.drone_entity_id.is_empty());
         // Own drone should be in entities
-        assert!(!snapshot.entities.is_empty(), "snapshot should contain entities");
-        assert!(snapshot.entities.iter().any(|e| e.entity_type == "drone"),
-            "snapshot should contain drone entities");
+        assert!(
+            !snapshot.entities.is_empty(),
+            "snapshot should contain entities"
+        );
+        assert!(
+            snapshot.entities.iter().any(|e| e.entity_type == "drone"),
+            "snapshot should contain drone entities"
+        );
         // No truncation expected for small world
         assert!(!snapshot.truncated);
         assert_eq!(snapshot.omitted_categories, OmittedCategories::all_zero());
@@ -466,14 +475,20 @@ mod tests {
         // Player 2's drone at (50,50) should be out of fog range
         let drone2 = entities.iter().find(|(_, owner)| *owner == 2).unwrap();
 
-        let config = SnapshotConfig { fog_of_war: true, ..Default::default() };
+        let config = SnapshotConfig {
+            fog_of_war: true,
+            ..Default::default()
+        };
         let w2 = world.app.world_mut();
         let snapshot = build_snapshot(w2, drone1.0, 1, 1, &config);
 
         // Player 2's drone at distance ~45 should NOT be visible
         let drone2_id = format!("{:?}", drone2.0);
         let has_drone2 = snapshot.entities.iter().any(|e| e.entity_id == drone2_id);
-        assert!(!has_drone2, "distant enemy drone should be filtered by fog_of_war");
+        assert!(
+            !has_drone2,
+            "distant enemy drone should be filtered by fog_of_war"
+        );
     }
 
     #[test]
@@ -487,12 +502,23 @@ mod tests {
             .collect();
         let drone1 = entities.iter().find(|(_, d)| d.owner == 1).unwrap().0;
 
-        let config = SnapshotConfig { fog_of_war: false, ..Default::default() };
+        let config = SnapshotConfig {
+            fog_of_war: false,
+            ..Default::default()
+        };
         let snapshot = build_snapshot(w, drone1, 1, 1, &config);
 
         // With fog disabled, should see enemy drone too
-        let drone_count = snapshot.entities.iter().filter(|e| e.entity_type == "drone").count();
-        assert!(drone_count >= 2, "fog disabled should show all drones, got {}", drone_count);
+        let drone_count = snapshot
+            .entities
+            .iter()
+            .filter(|e| e.entity_type == "drone")
+            .count();
+        assert!(
+            drone_count >= 2,
+            "fog disabled should show all drones, got {}",
+            drone_count
+        );
     }
 
     #[test]
@@ -518,7 +544,10 @@ mod tests {
         assert_eq!(s1.entities.len(), s2.entities.len());
         // Entity order must be identical
         for (a, b) in s1.entities.iter().zip(s2.entities.iter()) {
-            assert_eq!(a.entity_id, b.entity_id, "entity order must be deterministic");
+            assert_eq!(
+                a.entity_id, b.entity_id,
+                "entity order must be deterministic"
+            );
         }
     }
 
@@ -535,12 +564,17 @@ mod tests {
         let drone1_eid = format!("{:?}", drone1);
 
         // Tiny max_size to force truncation
-        let config = SnapshotConfig { max_size_bytes: 50, fog_of_war: false };
+        let config = SnapshotConfig {
+            max_size_bytes: 50,
+            fog_of_war: false,
+        };
         let snapshot = build_snapshot(w, drone1, 1, 1, &config);
 
         // Own drone must always be present
-        assert!(snapshot.entities.iter().any(|e| e.entity_id == drone1_eid),
-            "own drone must never be truncated");
+        assert!(
+            snapshot.entities.iter().any(|e| e.entity_id == drone1_eid),
+            "own drone must never be truncated"
+        );
     }
 
     #[test]
@@ -555,14 +589,24 @@ mod tests {
             .query::<(Entity, &Drone)>()
             .iter(w)
             .find(|(_, d)| d.owner == 1)
-            .unwrap().0;
+            .unwrap()
+            .0;
 
         // Small max_size forces truncation
-        let config = SnapshotConfig { max_size_bytes: 200, fog_of_war: false };
+        let config = SnapshotConfig {
+            max_size_bytes: 200,
+            fog_of_war: false,
+        };
         let snapshot = build_snapshot(w, drone1, 1, 1, &config);
 
-        assert!(snapshot.truncated, "snapshot should be truncated with tiny max_size");
-        assert!(snapshot.omitted_categories.entities > 0, "omitted_count should be > 0");
+        assert!(
+            snapshot.truncated,
+            "snapshot should be truncated with tiny max_size"
+        );
+        assert!(
+            snapshot.omitted_categories.entities > 0,
+            "omitted_count should be > 0"
+        );
         // Schema stability: all categories present even if zero
         let _ = snapshot.omitted_categories.resources;
         let _ = snapshot.omitted_categories.events;
@@ -580,15 +624,21 @@ mod tests {
             .query::<(Entity, &Drone)>()
             .iter(w)
             .find(|(_, d)| d.owner == 1)
-            .unwrap().0;
+            .unwrap()
+            .0;
 
         // Tiny max_size will remove nearby entities
-        let config = SnapshotConfig { max_size_bytes: 100, fog_of_war: false };
+        let config = SnapshotConfig {
+            max_size_bytes: 100,
+            fog_of_war: false,
+        };
         let snapshot = build_snapshot(w, drone1, 1, 1, &config);
 
         if snapshot.truncated {
-            assert!(snapshot.degraded,
-                "removing nearby (≤8) entities should mark tick as degraded");
+            assert!(
+                snapshot.degraded,
+                "removing nearby (≤8) entities should mark tick as degraded"
+            );
         }
     }
 
@@ -605,7 +655,10 @@ mod tests {
         assert_eq!(DistanceBucket::from_distance(16.0), DistanceBucket::Far);
         assert_eq!(DistanceBucket::from_distance(20.0), DistanceBucket::VeryFar);
         assert_eq!(DistanceBucket::from_distance(32.0), DistanceBucket::VeryFar);
-        assert_eq!(DistanceBucket::from_distance(100.0), DistanceBucket::OutOfSight);
+        assert_eq!(
+            DistanceBucket::from_distance(100.0),
+            DistanceBucket::OutOfSight
+        );
     }
 
     #[test]
@@ -616,7 +669,8 @@ mod tests {
             .query::<(Entity, &Drone)>()
             .iter(w)
             .find(|(_, d)| d.owner == 1)
-            .unwrap().0;
+            .unwrap()
+            .0;
 
         let config = SnapshotConfig::default(); // 256KB
         let snapshot = build_snapshot(w, drone1, 1, 1, &config);
@@ -633,11 +687,15 @@ mod tests {
 
         let snapshots = collect_snapshots(w, &[1, 2], 1, &config);
 
-        assert!(!snapshots.is_empty(), "should build snapshots for players with drones");
+        assert!(
+            !snapshots.is_empty(),
+            "should build snapshots for players with drones"
+        );
         // Player 1 has 1 drone
-        let p1_count = snapshots.iter().filter(|s| {
-            s.entities.iter().any(|e| e.owner == Some(1))
-        }).count();
+        let p1_count = snapshots
+            .iter()
+            .filter(|s| s.entities.iter().any(|e| e.owner == Some(1)))
+            .count();
         assert!(p1_count >= 1, "player 1's drone should have a snapshot");
     }
 }

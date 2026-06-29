@@ -349,6 +349,8 @@ mod tests {
             rejections: Vec::new(),
             metrics: crate::TickMetrics::default(),
             state_checksum: world.state_checksum(),
+            system_manifest_hash: [0; 32],
+            action_manifest_hash: [0; 32],
             security_alerts: Vec::new(),
         };
         let replay_entities = replay_visible_entities(&trace, 1);

@@ -122,18 +122,13 @@ pub struct WorldDelta {
 
 impl WorldDelta {
     pub fn between(
-        _before: &crate::tick::WorldSnapshot,
-        _after: &crate::tick::WorldSnapshot,
+        before: &crate::tick::WorldSnapshot,
+        after: &crate::tick::WorldSnapshot,
         from_tick: Tick,
         to_tick: Tick,
         commands: Vec<crate::command::RawCommand>,
     ) -> Self {
-        Self {
-            from_tick,
-            to_tick,
-            entity_changes: Vec::new(),
-            commands,
-        }
+        before.delta_to(after, from_tick, to_tick, commands)
     }
 }
 

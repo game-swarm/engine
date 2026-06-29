@@ -16,9 +16,9 @@ pub enum SpecialAttackKind {
     Hack = 8,
 }
 
-/// Raw incoming special attack intent, populated by command processing or S11-S13 combat.
+/// Raw incoming status action intent, populated by command processing.
 #[derive(Debug, Clone)]
-pub struct SpecialAttackIntent {
+pub struct StatusActionIntent {
     pub kind: SpecialAttackKind,
     pub source: Entity,
     pub target: Entity,
@@ -26,12 +26,10 @@ pub struct SpecialAttackIntent {
     pub amount: u32,
 }
 
-pub type StatusActionIntent = SpecialAttackIntent;
-
 /// Buffer of pending special attack intents before reduction.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct PendingSpecialAttack {
-    pub intents: Vec<SpecialAttackIntent>,
+    pub intents: Vec<StatusActionIntent>,
 }
 
 /// Resolved intent ready for S22 status_advance_system to process.
@@ -72,12 +70,7 @@ impl From<(Entity, u32, String)> for PendingDamageEntry {
 }
 
 impl PendingDamage {
-    pub fn push(
-        &mut self,
-        target: Entity,
-        amount: u32,
-        damage_type: impl Into<String>,
-    ) {
+    pub fn push(&mut self, target: Entity, amount: u32, damage_type: impl Into<String>) {
         self.entries.push(PendingDamageEntry {
             target,
             amount,
@@ -121,7 +114,7 @@ pub fn special_attack_reducer(
     }
 
     // 1. Drain all intents
-    let mut raw: Vec<SpecialAttackIntent> = std::mem::take(&mut pending.intents);
+    let mut raw: Vec<StatusActionIntent> = std::mem::take(&mut pending.intents);
 
     // 2. Canonical sort: (priority DESC, source, target)
     raw.sort_by(|a, b| {
@@ -133,21 +126,19 @@ pub fn special_attack_reducer(
 
     // 3. Reducer resolve: same target → highest priority wins
     // Group by target, keep only the highest-priority intent per target
-    let resolved: Vec<ResolvedIntent> = raw
-        .into_iter()
-        .fold(Vec::new(), |mut acc, intent| {
-            if let Some(_existing) = acc.iter_mut().find(|r| r.target == intent.target) {
-                // Keep the one with higher priority (already sorted, so first in group wins)
-                // The first in a target group has highest priority due to sort
-            } else {
-                acc.push(ResolvedIntent {
-                    kind: intent.kind,
-                    target: intent.target,
-                    amount: intent.amount,
-                });
-            }
-            acc
-        });
+    let resolved: Vec<ResolvedIntent> = raw.into_iter().fold(Vec::new(), |mut acc, intent| {
+        if let Some(_existing) = acc.iter_mut().find(|r| r.target == intent.target) {
+            // Keep the one with higher priority (already sorted, so first in group wins)
+            // The first in a target group has highest priority due to sort
+        } else {
+            acc.push(ResolvedIntent {
+                kind: intent.kind,
+                target: intent.target,
+                amount: intent.amount,
+            });
+        }
+        acc
+    });
 
     // 4. Deliver to S22
     intents.intents = resolved;
@@ -162,14 +153,14 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(PendingSpecialAttack {
             intents: vec![
-                SpecialAttackIntent {
+                StatusActionIntent {
                     kind: SpecialAttackKind::Fortify,
                     source: Entity::from_raw(1),
                     target: Entity::from_raw(10),
                     owner: 1,
                     amount: 5,
                 },
-                SpecialAttackIntent {
+                StatusActionIntent {
                     kind: SpecialAttackKind::Hack,
                     source: Entity::from_raw(2),
                     target: Entity::from_raw(10),
@@ -184,8 +175,16 @@ mod tests {
         app.update();
 
         let intents = app.world().resource::<PendingIntents>();
-        assert_eq!(intents.intents.len(), 1, "same target → only one intent survives");
-        assert_eq!(intents.intents[0].kind, SpecialAttackKind::Hack, "Hack > Fortify");
+        assert_eq!(
+            intents.intents.len(),
+            1,
+            "same target → only one intent survives"
+        );
+        assert_eq!(
+            intents.intents[0].kind,
+            SpecialAttackKind::Hack,
+            "Hack > Fortify"
+        );
         assert_eq!(intents.intents[0].amount, 10);
     }
 
@@ -194,14 +193,14 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(PendingSpecialAttack {
             intents: vec![
-                SpecialAttackIntent {
+                StatusActionIntent {
                     kind: SpecialAttackKind::Drain,
                     source: Entity::from_raw(1),
                     target: Entity::from_raw(10),
                     owner: 1,
                     amount: 3,
                 },
-                SpecialAttackIntent {
+                StatusActionIntent {
                     kind: SpecialAttackKind::Drain,
                     source: Entity::from_raw(2),
                     target: Entity::from_raw(10),
@@ -216,7 +215,11 @@ mod tests {
         app.update();
 
         let intents = app.world().resource::<PendingIntents>();
-        assert_eq!(intents.intents.len(), 1, "same priority same target → one intent");
+        assert_eq!(
+            intents.intents.len(),
+            1,
+            "same priority same target → one intent"
+        );
         // First in sort order wins (lower source entity)
         assert_eq!(intents.intents[0].amount, 3);
     }
@@ -226,14 +229,14 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(PendingSpecialAttack {
             intents: vec![
-                SpecialAttackIntent {
+                StatusActionIntent {
                     kind: SpecialAttackKind::Hack,
                     source: Entity::from_raw(1),
                     target: Entity::from_raw(10),
                     owner: 1,
                     amount: 5,
                 },
-                SpecialAttackIntent {
+                StatusActionIntent {
                     kind: SpecialAttackKind::Drain,
                     source: Entity::from_raw(2),
                     target: Entity::from_raw(20),
@@ -248,7 +251,11 @@ mod tests {
         app.update();
 
         let intents = app.world().resource::<PendingIntents>();
-        assert_eq!(intents.intents.len(), 2, "different targets → both preserved");
+        assert_eq!(
+            intents.intents.len(),
+            2,
+            "different targets → both preserved"
+        );
     }
 
     #[test]

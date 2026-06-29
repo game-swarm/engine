@@ -11,10 +11,12 @@ use crate::command::{
 };
 use crate::components::*;
 use crate::replay_storage::WorldDelta;
+use crate::resource_ledger::ResourceLedger;
 use crate::resources::{
     CurrentTick, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
 };
 use crate::rule_module::{RhaiRuleModules, run_tick_start_scripts};
+use crate::scheduler::{SYSTEM_MANIFEST, manifest_hash};
 use crate::security::{SecurityAlert, SecurityAuditor};
 use crate::sim::{SnapshotConfig, collect_snapshots};
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
@@ -197,6 +199,10 @@ pub struct TickTrace {
     pub metrics: TickMetrics,
     pub state_checksum: u64,
     #[serde(default)]
+    pub system_manifest_hash: [u8; 32],
+    #[serde(default)]
+    pub action_manifest_hash: [u8; 32],
+    #[serde(default)]
     pub security_alerts: Vec<SecurityAlert>,
 }
 
@@ -204,6 +210,18 @@ impl TickTrace {
     pub fn accepted(&self) -> &[RawCommand] {
         &self.commands
     }
+}
+
+fn system_manifest_hash() -> [u8; 32] {
+    *manifest_hash(SYSTEM_MANIFEST).as_bytes()
+}
+
+fn action_manifest_hash() -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    for action in crate::command::CORE_COMMAND_ACTIONS {
+        hasher.update(action.as_bytes());
+    }
+    *hasher.finalize().as_bytes()
 }
 
 pub type TickCommitRecord = TickTrace;
@@ -848,6 +866,8 @@ where
                 rejections: rejections.clone(),
                 metrics: self.metrics.clone(),
                 state_checksum: checksum,
+                system_manifest_hash: system_manifest_hash(),
+                action_manifest_hash: action_manifest_hash(),
                 security_alerts: Vec::new(),
             };
             trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
@@ -1026,6 +1046,8 @@ where
                 rejections: rejections.clone(),
                 metrics: self.metrics.clone(),
                 state_checksum: checksum,
+                system_manifest_hash: system_manifest_hash(),
+                action_manifest_hash: action_manifest_hash(),
                 security_alerts: Vec::new(),
             };
             trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
@@ -1552,6 +1574,7 @@ pub struct WorldSnapshot {
     local_storage: PlayerLocalStorage,
     global_storage: PlayerGlobalStorage,
     pending_global_transfers: PendingGlobalTransfers,
+    resource_ledger: ResourceLedger,
     starting_resources_granted: crate::systems::StartingResourcesGranted,
     player_first_spawn_tick: crate::systems::PlayerFirstSpawnTick,
     /// Per-tick event log for feedback loop replay fidelity.
@@ -1578,6 +1601,22 @@ pub struct EntitySnapshot {
     drone_env: Option<DroneEnv>,
     code_version: Option<CodeVersion>,
     projectile: Option<crate::systems::Projectile>,
+    hack_state: Option<HackState>,
+    drain_state: Option<DrainState>,
+    overload_state: Option<OverloadState>,
+    debilitate_state: Option<DebilitateState>,
+    disrupt_state: Option<DisruptState>,
+    fortify_state: Option<FortifyState>,
+    leech_state: Option<LeechState>,
+    fabricate_state: Option<FabricateState>,
+    hack_buffer: Option<HackBuffer>,
+    drain_buffer: Option<DrainBuffer>,
+    overload_buffer: Option<OverloadBuffer>,
+    debilitate_buffer: Option<DebilitateBuffer>,
+    disrupt_buffer: Option<DisruptBuffer>,
+    fortify_buffer: Option<FortifyBuffer>,
+    leech_buffer: Option<LeechBuffer>,
+    fabricate_buffer: Option<FabricateBuffer>,
 }
 
 impl WorldSnapshot {
@@ -1587,15 +1626,45 @@ impl WorldSnapshot {
 
     pub fn delta_to(
         &self,
-        _after: &WorldSnapshot,
+        after: &WorldSnapshot,
         from_tick: Tick,
         to_tick: Tick,
         commands: Vec<RawCommand>,
     ) -> WorldDelta {
+        let mut entity_changes = Vec::new();
+        let mut ids = self
+            .entities
+            .keys()
+            .chain(after.entities.keys())
+            .copied()
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+
+        for id in ids {
+            match (self.entities.get(&id), after.entities.get(&id)) {
+                (None, Some(snapshot)) => {
+                    entity_changes.push(crate::replay_storage::EntityChange::Created {
+                        entity_id: id.0,
+                        component_data: serialize_entity_snapshot(snapshot),
+                    })
+                }
+                (Some(_), None) => entity_changes
+                    .push(crate::replay_storage::EntityChange::Removed { entity_id: id.0 }),
+                (Some(before), Some(after)) if before != after => {
+                    entity_changes.push(crate::replay_storage::EntityChange::Modified {
+                        entity_id: id.0,
+                        component_data: serialize_entity_snapshot(after),
+                    });
+                }
+                _ => {}
+            }
+        }
+
         WorldDelta {
             from_tick,
             to_tick,
-            entity_changes: Vec::new(),
+            entity_changes,
             commands,
         }
     }
@@ -1629,17 +1698,39 @@ impl WorldSnapshot {
                     owner: world.entity(entity).get::<Owner>().copied(),
                     drone: world.entity(entity).get::<Drone>().cloned(),
                     structure: world.entity(entity).get::<Structure>().cloned(),
-                    resource: world.entity(entity).get::<crate::components::Resource>().cloned(),
+                    resource: world
+                        .entity(entity)
+                        .get::<crate::components::Resource>()
+                        .cloned(),
                     source: world.entity(entity).get::<Source>().cloned(),
                     terrain: world.entity(entity).get::<Terrain>().copied(),
                     controller: world.entity(entity).get::<Controller>().cloned(),
-                    marked_for_death: world.entity(entity).get::<MarkedForDeath>().is_some(),
+                    marked_for_death: world.entity(entity).get::<DeathMark>().is_some(),
                     spawning_grace: world.entity(entity).get::<SpawningGrace>().copied(),
                     attributes: world.entity(entity).get::<Attributes>().cloned(),
                     entity_flags: world.entity(entity).get::<EntityFlags>().cloned(),
                     drone_env: world.entity(entity).get::<DroneEnv>().cloned(),
                     code_version: world.entity(entity).get::<CodeVersion>().copied(),
-                    projectile: world.entity(entity).get::<crate::systems::Projectile>().cloned(),
+                    projectile: world
+                        .entity(entity)
+                        .get::<crate::systems::Projectile>()
+                        .cloned(),
+                    hack_state: world.entity(entity).get::<HackState>().cloned(),
+                    drain_state: world.entity(entity).get::<DrainState>().cloned(),
+                    overload_state: world.entity(entity).get::<OverloadState>().cloned(),
+                    debilitate_state: world.entity(entity).get::<DebilitateState>().cloned(),
+                    disrupt_state: world.entity(entity).get::<DisruptState>().cloned(),
+                    fortify_state: world.entity(entity).get::<FortifyState>().cloned(),
+                    leech_state: world.entity(entity).get::<LeechState>().cloned(),
+                    fabricate_state: world.entity(entity).get::<FabricateState>().cloned(),
+                    hack_buffer: world.entity(entity).get::<HackBuffer>().cloned(),
+                    drain_buffer: world.entity(entity).get::<DrainBuffer>().cloned(),
+                    overload_buffer: world.entity(entity).get::<OverloadBuffer>().cloned(),
+                    debilitate_buffer: world.entity(entity).get::<DebilitateBuffer>().cloned(),
+                    disrupt_buffer: world.entity(entity).get::<DisruptBuffer>().cloned(),
+                    fortify_buffer: world.entity(entity).get::<FortifyBuffer>().cloned(),
+                    leech_buffer: world.entity(entity).get::<LeechBuffer>().cloned(),
+                    fabricate_buffer: world.entity(entity).get::<FabricateBuffer>().cloned(),
                 };
                 snapshot
                     .has_any()
@@ -1657,8 +1748,13 @@ impl WorldSnapshot {
             local_storage: world.resource::<PlayerLocalStorage>().clone(),
             global_storage: world.resource::<PlayerGlobalStorage>().clone(),
             pending_global_transfers: world.resource::<PendingGlobalTransfers>().clone(),
-            starting_resources_granted: world.resource::<crate::systems::StartingResourcesGranted>().clone(),
-            player_first_spawn_tick: world.resource::<crate::systems::PlayerFirstSpawnTick>().clone(),
+            resource_ledger: world.resource::<ResourceLedger>().clone(),
+            starting_resources_granted: world
+                .resource::<crate::systems::StartingResourcesGranted>()
+                .clone(),
+            player_first_spawn_tick: world
+                .resource::<crate::systems::PlayerFirstSpawnTick>()
+                .clone(),
             event_log: world.resource::<EventLog>().clone(),
             entity_total_count: allocator.total_count() as u32,
             entity_alive_count: allocator.len(),
@@ -1689,7 +1785,7 @@ impl WorldSnapshot {
             if snapshot.marked_for_death {
                 entity_mut.insert(DeathMark);
             } else {
-                entity_mut.remove::<MarkedForDeath>();
+                entity_mut.remove::<DeathMark>();
             }
             restore_component(&mut entity_mut, snapshot.spawning_grace);
             restore_component(&mut entity_mut, snapshot.attributes);
@@ -1697,6 +1793,22 @@ impl WorldSnapshot {
             restore_component(&mut entity_mut, snapshot.drone_env);
             restore_component(&mut entity_mut, snapshot.code_version);
             restore_component(&mut entity_mut, snapshot.projectile);
+            restore_component(&mut entity_mut, snapshot.hack_state);
+            restore_component(&mut entity_mut, snapshot.drain_state);
+            restore_component(&mut entity_mut, snapshot.overload_state);
+            restore_component(&mut entity_mut, snapshot.debilitate_state);
+            restore_component(&mut entity_mut, snapshot.disrupt_state);
+            restore_component(&mut entity_mut, snapshot.fortify_state);
+            restore_component(&mut entity_mut, snapshot.leech_state);
+            restore_component(&mut entity_mut, snapshot.fabricate_state);
+            restore_component(&mut entity_mut, snapshot.hack_buffer);
+            restore_component(&mut entity_mut, snapshot.drain_buffer);
+            restore_component(&mut entity_mut, snapshot.overload_buffer);
+            restore_component(&mut entity_mut, snapshot.debilitate_buffer);
+            restore_component(&mut entity_mut, snapshot.disrupt_buffer);
+            restore_component(&mut entity_mut, snapshot.fortify_buffer);
+            restore_component(&mut entity_mut, snapshot.leech_buffer);
+            restore_component(&mut entity_mut, snapshot.fabricate_buffer);
         }
 
         *world.resource_mut::<RoomTerrains>() = self.terrains;
@@ -1706,7 +1818,9 @@ impl WorldSnapshot {
         *world.resource_mut::<PlayerLocalStorage>() = self.local_storage;
         *world.resource_mut::<PlayerGlobalStorage>() = self.global_storage;
         *world.resource_mut::<PendingGlobalTransfers>() = self.pending_global_transfers;
-        *world.resource_mut::<crate::systems::StartingResourcesGranted>() = self.starting_resources_granted;
+        *world.resource_mut::<ResourceLedger>() = self.resource_ledger;
+        *world.resource_mut::<crate::systems::StartingResourcesGranted>() =
+            self.starting_resources_granted;
         *world.resource_mut::<crate::systems::PlayerFirstSpawnTick>() =
             self.player_first_spawn_tick;
         *world.resource_mut::<EventLog>() = self.event_log;
@@ -1732,17 +1846,39 @@ impl WorldSnapshot {
                     || world.entity(entity).get::<Owner>().is_some()
                     || world.entity(entity).get::<Drone>().is_some()
                     || world.entity(entity).get::<Structure>().is_some()
-                    || world.entity(entity).get::<crate::components::Resource>().is_some()
+                    || world
+                        .entity(entity)
+                        .get::<crate::components::Resource>()
+                        .is_some()
                     || world.entity(entity).get::<Source>().is_some()
                     || world.entity(entity).get::<Terrain>().is_some()
                     || world.entity(entity).get::<Controller>().is_some()
-                    || world.entity(entity).get::<MarkedForDeath>().is_some()
+                    || world.entity(entity).get::<DeathMark>().is_some()
                     || world.entity(entity).get::<SpawningGrace>().is_some()
                     || world.entity(entity).get::<Attributes>().is_some()
                     || world.entity(entity).get::<EntityFlags>().is_some()
                     || world.entity(entity).get::<DroneEnv>().is_some()
                     || world.entity(entity).get::<CodeVersion>().is_some()
-                    || world.entity(entity).get::<crate::systems::Projectile>().is_some()
+                    || world
+                        .entity(entity)
+                        .get::<crate::systems::Projectile>()
+                        .is_some()
+                    || world.entity(entity).get::<HackState>().is_some()
+                    || world.entity(entity).get::<DrainState>().is_some()
+                    || world.entity(entity).get::<OverloadState>().is_some()
+                    || world.entity(entity).get::<DebilitateState>().is_some()
+                    || world.entity(entity).get::<DisruptState>().is_some()
+                    || world.entity(entity).get::<FortifyState>().is_some()
+                    || world.entity(entity).get::<LeechState>().is_some()
+                    || world.entity(entity).get::<FabricateState>().is_some()
+                    || world.entity(entity).get::<HackBuffer>().is_some()
+                    || world.entity(entity).get::<DrainBuffer>().is_some()
+                    || world.entity(entity).get::<OverloadBuffer>().is_some()
+                    || world.entity(entity).get::<DebilitateBuffer>().is_some()
+                    || world.entity(entity).get::<DisruptBuffer>().is_some()
+                    || world.entity(entity).get::<FortifyBuffer>().is_some()
+                    || world.entity(entity).get::<LeechBuffer>().is_some()
+                    || world.entity(entity).get::<FabricateBuffer>().is_some()
             })
             .collect()
     }
@@ -1777,7 +1913,27 @@ impl EntitySnapshot {
             || self.drone_env.is_some()
             || self.code_version.is_some()
             || self.projectile.is_some()
+            || self.hack_state.is_some()
+            || self.drain_state.is_some()
+            || self.overload_state.is_some()
+            || self.debilitate_state.is_some()
+            || self.disrupt_state.is_some()
+            || self.fortify_state.is_some()
+            || self.leech_state.is_some()
+            || self.fabricate_state.is_some()
+            || self.hack_buffer.is_some()
+            || self.drain_buffer.is_some()
+            || self.overload_buffer.is_some()
+            || self.debilitate_buffer.is_some()
+            || self.disrupt_buffer.is_some()
+            || self.fortify_buffer.is_some()
+            || self.leech_buffer.is_some()
+            || self.fabricate_buffer.is_some()
     }
+}
+
+fn serialize_entity_snapshot(snapshot: &EntitySnapshot) -> Vec<u8> {
+    serde_json::to_vec(snapshot).expect("entity snapshots must serialize")
 }
 
 fn add_player_resource_totals(
@@ -1922,6 +2078,8 @@ mod tests {
                 ..Default::default()
             },
             state_checksum: world.state_checksum(),
+            system_manifest_hash: system_manifest_hash(),
+            action_manifest_hash: action_manifest_hash(),
             security_alerts: Vec::new(),
         }
     }
@@ -2143,6 +2301,8 @@ mod tests {
             rejections: Vec::new(),
             metrics,
             state_checksum: 99,
+            system_manifest_hash: system_manifest_hash(),
+            action_manifest_hash: action_manifest_hash(),
             security_alerts: Vec::new(),
         };
 
@@ -2207,6 +2367,8 @@ mod tests {
             rejections: Vec::new(),
             metrics,
             state_checksum: world.state_checksum(),
+            system_manifest_hash: system_manifest_hash(),
+            action_manifest_hash: action_manifest_hash(),
             security_alerts: Vec::new(),
         }
     }

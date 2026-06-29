@@ -4,37 +4,37 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arena_admin::ArenaRoomAdmin;
 use crate::command::{
-    apply_command, source_gate, validate_command, CommandIntent, CommandResult, CommandSource,
-    RawCommand, Tick,
+    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
+    validate_command,
 };
 use crate::components::*;
 use crate::dragonfly::DragonflyCache;
 use crate::fdb::FoundationDbStore;
-use crate::npc::events::{event_effect_system, world_event_system, EventConfig, EventState};
+use crate::npc::events::{EventConfig, EventState, event_effect_system, world_event_system};
 use crate::npc::loot::{BlueprintRegistry, NpcLootTables};
 use crate::npc::strongholds::{
-    stronghold_production_system, stronghold_spawn_system, SpawnedStrongholdRooms,
-    StrongholdSpawnConfig,
+    SpawnedStrongholdRooms, StrongholdSpawnConfig, stronghold_production_system,
+    stronghold_spawn_system,
 };
-use crate::npc::{npc_ai_system, npc_combat_system, npc_spawn_system, NpcSpawnState};
+use crate::npc::{NpcSpawnState, npc_ai_system, npc_combat_system, npc_spawn_system};
 use crate::onboarding::{
-    onboarding_system, send_onboarding_event, OnboardingConfig, OnboardingEvent,
-    OnboardingProgress, OnboardingSwarmEvent,
+    OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
+    send_onboarding_event,
 };
 use crate::pve::{
-    zone_definition_for_room, zone_for_room, DifficultyZone, PveBudget, PveBudgetConfig,
-    WorldPveConfig, ZoneDefinition,
+    DifficultyZone, PveBudget, PveBudgetConfig, WorldPveConfig, ZoneDefinition,
+    zone_definition_for_room, zone_for_room,
 };
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::replay_storage::ReplayStore;
+use crate::resource_ledger::{ResourceLedger, resource_ledger_system};
 use crate::resources::{
     CurrentTick, GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
 };
-use crate::resource_ledger::{ResourceLedger, resource_ledger_system};
 use crate::rule_module::{
-    rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system, run_init_scripts,
-    RhaiRuleModules,
+    RhaiRuleModules, rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system,
+    run_init_scripts,
 };
 use crate::scheduler::SystemSchedulerManifest;
 use crate::systems::*;
@@ -152,24 +152,39 @@ pub struct EmpireUpkeepConfig {
 
 impl EmpireUpkeepConfig {
     pub fn standard() -> Self {
-        Self { base_upkeep: 50, room_soft_cap: 10, ..Self::default() }
+        Self {
+            base_upkeep: 50,
+            room_soft_cap: 10,
+            ..Self::default()
+        }
     }
 
     pub fn vanilla() -> Self {
-        Self { base_upkeep: 30, room_soft_cap: 15, ..Self::default() }
+        Self {
+            base_upkeep: 30,
+            room_soft_cap: 15,
+            ..Self::default()
+        }
     }
 
     pub fn tutorial() -> Self {
-        Self { base_upkeep: 10, room_soft_cap: 20, ..Self::default() }
+        Self {
+            base_upkeep: 10,
+            room_soft_cap: 20,
+            ..Self::default()
+        }
     }
 
     pub fn upkeep_cost(&self, rooms: u32) -> u32 {
-        if !self.enabled || rooms == 0 || self.room_soft_cap == 0 { return 0; }
+        if !self.enabled || rooms == 0 || self.room_soft_cap == 0 {
+            return 0;
+        }
         let rooms = u64::from(rooms);
         let soft_cap = u64::from(self.room_soft_cap);
         let cost = u64::from(self.base_upkeep)
             .saturating_mul(rooms)
-            .saturating_mul(soft_cap.saturating_add(rooms)) / soft_cap;
+            .saturating_mul(soft_cap.saturating_add(rooms))
+            / soft_cap;
         cost.min(u64::from(u32::MAX)) as u32
     }
 
@@ -179,22 +194,43 @@ impl EmpireUpkeepConfig {
             .saturating_add(u64::from(distance).saturating_mul(u64::from(self.distance_decay_bp)));
         let cost = u64::from(body_cost)
             .saturating_mul(u64::from(unrepaired_bp))
-            .saturating_mul(distance_bp) / 100_000_000;
+            .saturating_mul(distance_bp)
+            / 100_000_000;
         cost.min(u64::from(u32::MAX)) as u32
     }
 
-    pub fn recycle_refund_rate_bp(&self, age: u32, lifespan: u32, tick: Tick, tutorial: bool) -> u32 {
-        if tutorial && tick < self.tutorial_recycle_refund_full_ticks { return 10_000; }
-        if lifespan == 0 { return self.recycle_refund_min.min(self.recycle_refund_base); }
+    pub fn recycle_refund_rate_bp(
+        &self,
+        age: u32,
+        lifespan: u32,
+        tick: Tick,
+        tutorial: bool,
+    ) -> u32 {
+        if tutorial && tick < self.tutorial_recycle_refund_full_ticks {
+            return 10_000;
+        }
+        if lifespan == 0 {
+            return self.recycle_refund_min.min(self.recycle_refund_base);
+        }
         let remaining = lifespan.saturating_sub(age);
         let rate = u64::from(remaining).saturating_mul(u64::from(self.recycle_refund_base))
             / u64::from(lifespan);
-        rate.max(u64::from(self.recycle_refund_min)).min(u64::from(self.recycle_refund_base)).min(10_000) as u32
+        rate.max(u64::from(self.recycle_refund_min))
+            .min(u64::from(self.recycle_refund_base))
+            .min(10_000) as u32
     }
 
-    pub fn recycle_refund_amount(&self, body_cost: u32, age: u32, lifespan: u32, tick: Tick, tutorial: bool) -> u32 {
+    pub fn recycle_refund_amount(
+        &self,
+        body_cost: u32,
+        age: u32,
+        lifespan: u32,
+        tick: Tick,
+        tutorial: bool,
+    ) -> u32 {
         let rate = self.recycle_refund_rate_bp(age, lifespan, tick, tutorial);
-        (u64::from(body_cost).saturating_mul(u64::from(rate)) / 10_000).min(u64::from(u32::MAX)) as u32
+        (u64::from(body_cost).saturating_mul(u64::from(rate)) / 10_000).min(u64::from(u32::MAX))
+            as u32
     }
 }
 
@@ -836,11 +872,7 @@ impl WorldConfig {
                 .after(spawn_system)
                 .before(regeneration_system),
         );
-        app.add_systems(
-            Update,
-            stronghold_spawn_system
-                .before(npc_spawn_system),
-        );
+        app.add_systems(Update, stronghold_spawn_system.before(npc_spawn_system));
         app.add_systems(
             Update,
             stronghold_production_system
@@ -849,18 +881,13 @@ impl WorldConfig {
         );
         app.add_systems(
             Update,
-            npc_ai_system
-                .after(spawn_system)
-                .before(npc_combat_system),
+            npc_ai_system.after(spawn_system).before(npc_combat_system),
         );
         app.add_systems(
             Update,
             npc_combat_system.after(npc_ai_system).before(combat_system),
         );
-        app.add_systems(
-            Update,
-            npc_spawn_system.before(spawn_system),
-        );
+        app.add_systems(Update, npc_spawn_system.before(spawn_system));
         app.add_systems(
             Update,
             (
@@ -2089,18 +2116,22 @@ cost = { Energy = 33 }
                 .update_cooldown,
             5
         );
-        assert!(world
-            .app
-            .world()
-            .resource::<SpecialEffectRegistry>()
-            .get("hack")
-            .is_some());
-        assert!(world
-            .app
-            .world()
-            .resource::<CustomActionRegistry>()
-            .get("Hack")
-            .is_some());
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<SpecialEffectRegistry>()
+                .get("hack")
+                .is_some()
+        );
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<CustomActionRegistry>()
+                .get("Hack")
+                .is_some()
+        );
     }
 
     fn test_command(player_id: PlayerId) -> RawCommand {

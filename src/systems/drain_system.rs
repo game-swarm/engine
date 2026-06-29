@@ -33,13 +33,25 @@ mod tests {
     fn drain_reduces_player_local_storage() {
         let mut app = App::new();
         let mut storage = PlayerLocalStorage(IndexMap::new());
-        storage.0.entry(1).or_default().insert("energy".to_string(), 500);
+        storage
+            .0
+            .entry(1)
+            .or_default()
+            .insert("energy".to_string(), 500);
         app.insert_resource(storage);
 
         app.world_mut().spawn((
-            DrainState { resource: "energy".into(), amount_per_tick: 50, remaining_ticks: 3 },
+            DrainState {
+                resource: "energy".into(),
+                amount_per_tick: 50,
+                remaining_ticks: 3,
+            },
             Owner(1),
-            Position { x: 0, y: 0, room: crate::components::RoomId(0) },
+            Position {
+                x: 0,
+                y: 0,
+                room: crate::components::RoomId(0),
+            },
         ));
 
         app.add_systems(Update, drain_system);
@@ -47,20 +59,36 @@ mod tests {
 
         let storage = app.world().resource::<PlayerLocalStorage>();
         let player = storage.0.get(&1).unwrap();
-        assert_eq!(player.get("energy").copied().unwrap_or(0), 450, "should drain 50 energy");
+        assert_eq!(
+            player.get("energy").copied().unwrap_or(0),
+            450,
+            "should drain 50 energy"
+        );
     }
 
     #[test]
     fn drain_stops_when_remaining_ticks_zero() {
         let mut app = App::new();
         let mut storage = PlayerLocalStorage(IndexMap::new());
-        storage.0.entry(1).or_default().insert("energy".to_string(), 500);
+        storage
+            .0
+            .entry(1)
+            .or_default()
+            .insert("energy".to_string(), 500);
         app.insert_resource(storage);
 
         app.world_mut().spawn((
-            DrainState { resource: "energy".into(), amount_per_tick: 50, remaining_ticks: 0 },
+            DrainState {
+                resource: "energy".into(),
+                amount_per_tick: 50,
+                remaining_ticks: 0,
+            },
             Owner(1),
-            Position { x: 0, y: 0, room: crate::components::RoomId(0) },
+            Position {
+                x: 0,
+                y: 0,
+                room: crate::components::RoomId(0),
+            },
         ));
 
         app.add_systems(Update, drain_system);
@@ -68,6 +96,10 @@ mod tests {
 
         let storage = app.world().resource::<PlayerLocalStorage>();
         let player = storage.0.get(&1).unwrap();
-        assert_eq!(player.get("energy").copied().unwrap_or(0), 500, "should not drain when ticks=0");
+        assert_eq!(
+            player.get("energy").copied().unwrap_or(0),
+            500,
+            "should not drain when ticks=0"
+        );
     }
 }

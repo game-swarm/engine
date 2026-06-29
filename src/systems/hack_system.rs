@@ -7,9 +7,7 @@ use crate::components::{Drone, HackState, Owner, Position};
 /// Reads HackState (written by S22 status_advance_system) and produces
 /// control effects: owner changed to 0 (neutral), fatigue set, slow/root.
 /// Runs in Status Effects Parallel Set B (disjoint from other status systems).
-pub fn hack_system(
-    mut drones: Query<(Entity, &mut Drone, &mut HackState, &Owner, &Position)>,
-) {
+pub fn hack_system(mut drones: Query<(Entity, &mut Drone, &mut HackState, &Owner, &Position)>) {
     for (_entity, mut drone, mut state, owner, _pos) in drones.iter_mut() {
         if state.remaining_ticks == 0 {
             continue;
@@ -67,12 +65,22 @@ mod tests {
     #[test]
     fn hack_stage_0_sets_owner_to_neutral_and_fatigue() {
         let mut app = App::new();
-        let drone = app.world_mut().spawn((
-            test_drone(),
-            HackState { stage: 0, remaining_ticks: 5 },
-            Owner(1),
-            Position { x: 0, y: 0, room: crate::components::RoomId(0) },
-        )).id();
+        let drone = app
+            .world_mut()
+            .spawn((
+                test_drone(),
+                HackState {
+                    stage: 0,
+                    remaining_ticks: 5,
+                },
+                Owner(1),
+                Position {
+                    x: 0,
+                    y: 0,
+                    room: crate::components::RoomId(0),
+                },
+            ))
+            .id();
 
         app.add_systems(Update, hack_system);
         app.update();
@@ -87,12 +95,25 @@ mod tests {
     #[test]
     fn hack_slow_ticks_add_fatigue() {
         let mut app = App::new();
-        let drone = app.world_mut().spawn((
-            Drone { fatigue: 0, ..test_drone() },
-            HackState { stage: 1, remaining_ticks: 3 },
-            Owner(0),
-            Position { x: 0, y: 0, room: crate::components::RoomId(0) },
-        )).id();
+        let drone = app
+            .world_mut()
+            .spawn((
+                Drone {
+                    fatigue: 0,
+                    ..test_drone()
+                },
+                HackState {
+                    stage: 1,
+                    remaining_ticks: 3,
+                },
+                Owner(0),
+                Position {
+                    x: 0,
+                    y: 0,
+                    room: crate::components::RoomId(0),
+                },
+            ))
+            .id();
 
         app.add_systems(Update, hack_system);
         app.update();
