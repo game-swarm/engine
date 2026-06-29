@@ -1,4 +1,4 @@
-FROM rust:1.85-slim AS build
+FROM rust:latest AS build
 
 ARG FDB_VERSION=7.3.59
 
