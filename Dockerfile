@@ -1,20 +1,11 @@
 FROM rust:latest AS build
 
-ARG FDB_VERSION=7.4.6
-
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        curl \
         libasound2-dev \
-        libssl-dev \
         libudev-dev \
         pkg-config \
-    && arch="$(dpkg --print-architecture)" \
-    && curl -fsSL -o /tmp/foundationdb-clients.deb \
-        "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_${arch}.deb" \
-    && apt-get install -y --no-install-recommends /tmp/foundationdb-clients.deb \
-    && rm -f /tmp/foundationdb-clients.deb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -23,17 +14,10 @@ RUN cargo build --release
 
 FROM debian:trixie-slim AS runtime
 
-ARG FDB_VERSION=7.4.6
-
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
-    && arch="$(dpkg --print-architecture)" \
-    && curl -fsSL -o /tmp/foundationdb-clients.deb \
-        "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_${arch}.deb" \
-    && apt-get install -y --no-install-recommends /tmp/foundationdb-clients.deb \
-    && rm -f /tmp/foundationdb-clients.deb \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/target/release/swarm-engine /usr/local/bin/swarm-engine

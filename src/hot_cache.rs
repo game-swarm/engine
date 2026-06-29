@@ -36,7 +36,7 @@ impl CachedSnapshot {
     }
 }
 
-pub trait FoundationDbSnapshotStore {
+pub trait TiKVSnapshotStore {
     fn get_snapshot(&self, key: SnapshotKey) -> Option<CachedSnapshot>;
     fn put_snapshot(&mut self, key: SnapshotKey, snapshot: CachedSnapshot);
 }
@@ -60,7 +60,7 @@ pub fn read_through_dragonfly<C, S>(
 ) -> Option<VisibleWorldSnapshot>
 where
     C: DragonflySnapshotCache,
-    S: FoundationDbSnapshotStore,
+    S: TiKVSnapshotStore,
 {
     let authoritative = store.get_snapshot(key)?;
     if let Some(cached) = cache.get_snapshot(key) {
@@ -82,8 +82,8 @@ fn snapshot_fingerprint(snapshot: &VisibleWorldSnapshot) -> [u8; 32] {
 mod tests {
     use super::*;
     use crate::dragonfly::DragonflyCache;
-    use crate::fdb::FoundationDbStore;
     use crate::mcp::VisibleWorldSnapshot;
+    use crate::tikv::TiKVStore;
 
     fn snapshot(tick: Tick, player_id: PlayerId, room_id: u32) -> VisibleWorldSnapshot {
         VisibleWorldSnapshot {
@@ -103,7 +103,7 @@ mod tests {
     fn dragonfly_hit_returns_cached_snapshot_when_consistent() {
         let key = SnapshotKey::new(1, 7);
         let authoritative = CachedSnapshot::new(snapshot(7, 1, 0));
-        let mut store = FoundationDbStore::unavailable("test degraded mode");
+        let mut store = TiKVStore::unavailable("test degraded mode");
         store.put_snapshot(key, authoritative.clone());
         let mut cache = DragonflyCache::in_process();
         cache.put_snapshot(key, authoritative.clone());
@@ -117,10 +117,10 @@ mod tests {
     }
 
     #[test]
-    fn dragonfly_miss_reads_fdb_and_backfills_cache() {
+    fn dragonfly_miss_reads_tikv_and_backfills_cache() {
         let key = SnapshotKey::new(1, 7);
         let authoritative = CachedSnapshot::new(snapshot(7, 1, 0));
-        let mut store = FoundationDbStore::unavailable("test degraded mode");
+        let mut store = TiKVStore::unavailable("test degraded mode");
         store.put_snapshot(key, authoritative.clone());
         let mut cache = DragonflyCache::in_process();
 
@@ -133,11 +133,11 @@ mod tests {
     }
 
     #[test]
-    fn dragonfly_stale_or_inconsistent_entry_is_replaced_by_fdb() {
+    fn dragonfly_stale_or_inconsistent_entry_is_replaced_by_tikv() {
         let key = SnapshotKey::new(1, 7);
         let authoritative = CachedSnapshot::new(snapshot(7, 1, 0));
         let stale = CachedSnapshot::new(snapshot(7, 1, 99));
-        let mut store = FoundationDbStore::unavailable("test degraded mode");
+        let mut store = TiKVStore::unavailable("test degraded mode");
         store.put_snapshot(key, authoritative.clone());
         let mut cache = DragonflyCache::in_process();
         cache.put_snapshot(key, stale);

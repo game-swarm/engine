@@ -6,7 +6,6 @@ pub mod command;
 pub mod components;
 pub mod dragonfly;
 pub mod economy;
-pub mod fdb;
 pub mod hot_cache;
 pub mod idl;
 pub mod mcp;
@@ -26,6 +25,7 @@ pub mod security;
 pub mod sim;
 pub mod systems;
 pub mod tick;
+pub mod tikv;
 pub mod tutorial;
 pub mod visibility;
 pub mod world;
@@ -38,7 +38,6 @@ pub use command::*;
 pub use components::*;
 pub use dragonfly::*;
 pub use economy::*;
-pub use fdb::*;
 pub use hot_cache::*;
 pub use mcp::{
     DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer,
@@ -59,6 +58,7 @@ pub use replay_storage::*;
 pub use resources::*;
 pub use rule_module::*;
 pub use tick::*;
+pub use tikv::*;
 pub use visibility::*;
 pub use world::{SwarmWorld, create_world, create_world_with_mode};
 

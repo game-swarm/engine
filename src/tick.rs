@@ -1149,11 +1149,11 @@ pub trait AtomicTickStore {
 }
 
 #[derive(Debug, Clone)]
-pub struct FoundationDbTickCommitter<S> {
+pub struct TiKVTickCommitter<S> {
     store: S,
 }
 
-impl<S> FoundationDbTickCommitter<S> {
+impl<S> TiKVTickCommitter<S> {
     pub fn new(store: S) -> Self {
         Self { store }
     }
@@ -1163,7 +1163,7 @@ impl<S> FoundationDbTickCommitter<S> {
     }
 }
 
-impl<S> TickCommitter for FoundationDbTickCommitter<S>
+impl<S> TickCommitter for TiKVTickCommitter<S>
 where
     S: AtomicTickStore,
 {
@@ -2043,7 +2043,7 @@ mod tests {
         fn atomic_commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), CommitError> {
             if self.fail_next {
                 self.fail_next = false;
-                return Err(CommitError::Failed("fake fdb commit failed".to_string()));
+                return Err(CommitError::Failed("fake tikv commit failed".to_string()));
             }
 
             for (key, value) in writes {
@@ -2074,9 +2074,9 @@ mod tests {
     }
 
     #[test]
-    fn fdb_tick_committer_writes_required_tick_keys_atomically() {
+    fn tikv_tick_committer_writes_required_tick_keys_atomically() {
         let trace = sample_trace();
-        let mut committer = FoundationDbTickCommitter::new(FakeAtomicStore::default());
+        let mut committer = TiKVTickCommitter::new(FakeAtomicStore::default());
 
         committer
             .commit(trace)
@@ -2111,9 +2111,9 @@ mod tests {
     }
 
     #[test]
-    fn fdb_tick_committer_does_not_write_partial_trace_on_commit_failure() {
+    fn tikv_tick_committer_does_not_write_partial_trace_on_commit_failure() {
         let trace = sample_trace();
-        let mut committer = FoundationDbTickCommitter::new(FakeAtomicStore {
+        let mut committer = TiKVTickCommitter::new(FakeAtomicStore {
             fail_next: true,
             ..Default::default()
         });

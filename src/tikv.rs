@@ -4,12 +4,12 @@ use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::command::Tick;
-use crate::hot_cache::{CachedSnapshot, FoundationDbSnapshotStore, SnapshotKey};
+use crate::hot_cache::{CachedSnapshot, SnapshotKey, TiKVSnapshotStore};
 use crate::mcp::VisibleWorldSnapshot;
 use crate::tick::{AtomicTickStore, CommitError, TickState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FoundationDbError {
+pub enum TiKVError {
     Unavailable(String),
     Encode(String),
     Decode(String),
@@ -18,22 +18,22 @@ pub enum FoundationDbError {
     NotFound(String),
 }
 
-impl std::fmt::Display for FoundationDbError {
+impl std::fmt::Display for TiKVError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unavailable(message) => write!(formatter, "foundationdb unavailable: {message}"),
-            Self::Encode(message) => write!(formatter, "foundationdb encode failed: {message}"),
-            Self::Decode(message) => write!(formatter, "foundationdb decode failed: {message}"),
-            Self::Commit(message) => write!(formatter, "foundationdb commit failed: {message}"),
+            Self::Unavailable(message) => write!(formatter, "tikv unavailable: {message}"),
+            Self::Encode(message) => write!(formatter, "tikv encode failed: {message}"),
+            Self::Decode(message) => write!(formatter, "tikv decode failed: {message}"),
+            Self::Commit(message) => write!(formatter, "tikv commit failed: {message}"),
             Self::Integrity(message) => {
-                write!(formatter, "foundationdb integrity check failed: {message}")
+                write!(formatter, "tikv integrity check failed: {message}")
             }
-            Self::NotFound(message) => write!(formatter, "foundationdb row not found: {message}"),
+            Self::NotFound(message) => write!(formatter, "tikv row not found: {message}"),
         }
     }
 }
 
-impl std::error::Error for FoundationDbError {}
+impl std::error::Error for TiKVError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UploadStatus {
@@ -112,29 +112,42 @@ pub struct RecoveryPoint {
 }
 
 #[derive(Resource, Debug)]
-pub struct FoundationDbStore {
-    backend: FoundationDbBackend,
+pub struct TiKVStore {
+    backend: TiKVBackend,
     snapshots: BTreeMap<SnapshotKey, CachedSnapshot>,
 }
 
 #[derive(Debug)]
-enum FoundationDbBackend {
+enum TiKVBackend {
     Unavailable(String),
     #[cfg(test)]
-    InMemory(InMemoryFoundationDb),
-    #[cfg(feature = "fdb")]
-    Connected(foundationdb::Database),
+    InMemory(InMemoryTiKV),
+    #[cfg(feature = "tikv")]
+    Connected(TiKVConnection),
 }
 
-impl Default for FoundationDbStore {
+#[cfg(feature = "tikv")]
+struct TiKVConnection {
+    client: tikv_client::TransactionClient,
+    runtime: tokio::runtime::Runtime,
+}
+
+#[cfg(feature = "tikv")]
+impl std::fmt::Debug for TiKVConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TiKVConnection")
+    }
+}
+
+impl Default for TiKVStore {
     fn default() -> Self {
         Self::unavailable("not connected")
     }
 }
 
-impl FoundationDbStore {
-    pub fn connect(cluster_file: Option<&str>) -> Result<Self, FoundationDbError> {
-        connect_backend(cluster_file).map(|backend| Self {
+impl TiKVStore {
+    pub fn connect(pd_endpoints: Option<&str>) -> Result<Self, TiKVError> {
+        connect_backend(pd_endpoints).map(|backend| Self {
             backend,
             snapshots: BTreeMap::new(),
         })
@@ -142,7 +155,7 @@ impl FoundationDbStore {
 
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self {
-            backend: FoundationDbBackend::Unavailable(reason.into()),
+            backend: TiKVBackend::Unavailable(reason.into()),
             snapshots: BTreeMap::new(),
         }
     }
@@ -150,7 +163,7 @@ impl FoundationDbStore {
     #[cfg(test)]
     pub fn in_memory() -> Self {
         Self {
-            backend: FoundationDbBackend::InMemory(InMemoryFoundationDb::default()),
+            backend: TiKVBackend::InMemory(InMemoryTiKV::default()),
             snapshots: BTreeMap::new(),
         }
     }
@@ -158,7 +171,7 @@ impl FoundationDbStore {
     #[cfg(test)]
     pub fn in_memory_failing_commit() -> Self {
         Self {
-            backend: FoundationDbBackend::InMemory(InMemoryFoundationDb {
+            backend: TiKVBackend::InMemory(InMemoryTiKV {
                 fail_next_commit: true,
                 ..Default::default()
             }),
@@ -168,21 +181,21 @@ impl FoundationDbStore {
 
     pub fn is_available(&self) -> bool {
         match self.backend {
-            FoundationDbBackend::Unavailable(_) => false,
+            TiKVBackend::Unavailable(_) => false,
             #[cfg(test)]
-            FoundationDbBackend::InMemory(_) => true,
-            #[cfg(feature = "fdb")]
-            FoundationDbBackend::Connected(_) => true,
+            TiKVBackend::InMemory(_) => true,
+            #[cfg(feature = "tikv")]
+            TiKVBackend::Connected(_) => true,
         }
     }
 
     pub fn unavailable_reason(&self) -> Option<&str> {
         match &self.backend {
-            FoundationDbBackend::Unavailable(reason) => Some(reason),
+            TiKVBackend::Unavailable(reason) => Some(reason),
             #[cfg(test)]
-            FoundationDbBackend::InMemory(_) => None,
-            #[cfg(feature = "fdb")]
-            FoundationDbBackend::Connected(_) => None,
+            TiKVBackend::InMemory(_) => None,
+            #[cfg(feature = "tikv")]
+            TiKVBackend::Connected(_) => None,
         }
     }
 
@@ -193,30 +206,25 @@ impl FoundationDbStore {
         cached
     }
 
-    pub fn commit_tick_writes(
-        &mut self,
-        writes: Vec<(Vec<u8>, Vec<u8>)>,
-    ) -> Result<(), FoundationDbError> {
-        #[cfg(not(any(feature = "fdb", test)))]
+    pub fn commit_tick_writes(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), TiKVError> {
+        #[cfg(not(any(feature = "tikv", test)))]
         let _ = &writes;
 
         match &mut self.backend {
-            FoundationDbBackend::Unavailable(reason) => {
-                Err(FoundationDbError::Unavailable(format!(
-                    "{reason}; enable the fdb Cargo feature and install FoundationDB client libraries"
-                )))
-            }
+            TiKVBackend::Unavailable(reason) => Err(TiKVError::Unavailable(format!(
+                "{reason}; enable the tikv Cargo feature"
+            ))),
             #[cfg(test)]
-            FoundationDbBackend::InMemory(backend) => backend.commit(writes),
-            #[cfg(feature = "fdb")]
-            FoundationDbBackend::Connected(database) => commit_writes(database, writes),
+            TiKVBackend::InMemory(backend) => backend.commit(writes),
+            #[cfg(feature = "tikv")]
+            TiKVBackend::Connected(connection) => commit_writes(connection, writes),
         }
     }
 
     pub fn commit_tick_payload(
         &mut self,
         payload: TickCommitPayload,
-    ) -> Result<RecoveryPoint, FoundationDbError> {
+    ) -> Result<RecoveryPoint, TiKVError> {
         let previous_chain_hash = self
             .read_hash_chain(payload.tick.saturating_sub(1))?
             .map(|row| row.chain_hash)
@@ -275,7 +283,7 @@ impl FoundationDbStore {
         })
     }
 
-    pub fn write_snapshot(&mut self, row: SnapshotRow) -> Result<(), FoundationDbError> {
+    pub fn write_snapshot(&mut self, row: SnapshotRow) -> Result<(), TiKVError> {
         verify_snapshot_row(&row)?;
         self.commit_tick_writes(vec![(
             snapshot_state_key(row.tick),
@@ -283,27 +291,27 @@ impl FoundationDbStore {
         )])
     }
 
-    pub fn read_verified_snapshot(&self, tick: Tick) -> Result<SnapshotRow, FoundationDbError> {
+    pub fn read_verified_snapshot(&self, tick: Tick) -> Result<SnapshotRow, TiKVError> {
         let row: SnapshotRow = self
             .read_json(&snapshot_state_key(tick))?
-            .ok_or_else(|| FoundationDbError::NotFound(format!("snapshot tick {tick}")))?;
+            .ok_or_else(|| TiKVError::NotFound(format!("snapshot tick {tick}")))?;
         verify_snapshot_row(&row)?;
         Ok(row)
     }
 
-    pub fn verify_tick(&self, tick: Tick) -> Result<RecoveryPoint, FoundationDbError> {
+    pub fn verify_tick(&self, tick: Tick) -> Result<RecoveryPoint, TiKVError> {
         let head = self
             .read_tick_head(tick)?
-            .ok_or_else(|| FoundationDbError::NotFound(format!("tick_head {tick}")))?;
+            .ok_or_else(|| TiKVError::NotFound(format!("tick_head {tick}")))?;
         let manifest = self
             .read_tick_manifest(tick)?
-            .ok_or_else(|| FoundationDbError::NotFound(format!("tick_manifest {tick}")))?;
+            .ok_or_else(|| TiKVError::NotFound(format!("tick_manifest {tick}")))?;
         let chain = self
             .read_hash_chain(tick)?
-            .ok_or_else(|| FoundationDbError::NotFound(format!("tick_hash_chain {tick}")))?;
+            .ok_or_else(|| TiKVError::NotFound(format!("tick_hash_chain {tick}")))?;
 
         if head.tick != tick || manifest.tick != tick || chain.tick != tick {
-            return Err(FoundationDbError::Integrity(format!(
+            return Err(TiKVError::Integrity(format!(
                 "tick row mismatch for {tick}"
             )));
         }
@@ -314,7 +322,7 @@ impl FoundationDbStore {
             head.terminal_state,
         );
         if head.tick_head_hash != expected_head_hash {
-            return Err(FoundationDbError::Integrity(format!(
+            return Err(TiKVError::Integrity(format!(
                 "tick_head hash mismatch at tick {tick}"
             )));
         }
@@ -323,13 +331,13 @@ impl FoundationDbStore {
             .map(|row| row.chain_hash)
             .unwrap_or([0; 32]);
         if chain.previous_chain_hash != expected_previous {
-            return Err(FoundationDbError::Integrity(format!(
+            return Err(TiKVError::Integrity(format!(
                 "hash chain previous mismatch at tick {tick}"
             )));
         }
         let expected_chain_hash = chain_hash(chain.previous_chain_hash, head.tick_head_hash);
         if chain.chain_hash != expected_chain_hash {
-            return Err(FoundationDbError::Integrity(format!(
+            return Err(TiKVError::Integrity(format!(
                 "hash chain mismatch at tick {tick}"
             )));
         }
@@ -343,13 +351,13 @@ impl FoundationDbStore {
         })
     }
 
-    pub fn recover_latest(&self) -> Result<Option<RecoveryPoint>, FoundationDbError> {
+    pub fn recover_latest(&self) -> Result<Option<RecoveryPoint>, TiKVError> {
         let mut latest = None;
         for tick in self.committed_ticks()? {
             let mut point = self.verify_tick(tick)?;
             if let Ok(snapshot) = self.read_verified_snapshot(tick) {
                 if snapshot.state_checksum != point.head.state_checksum {
-                    return Err(FoundationDbError::Integrity(format!(
+                    return Err(TiKVError::Integrity(format!(
                         "snapshot checksum does not match tick_head at tick {tick}"
                     )));
                 }
@@ -360,49 +368,43 @@ impl FoundationDbStore {
         Ok(latest)
     }
 
-    pub fn read_tick_head(&self, tick: Tick) -> Result<Option<TickHeadRow>, FoundationDbError> {
+    pub fn read_tick_head(&self, tick: Tick) -> Result<Option<TickHeadRow>, TiKVError> {
         self.read_json(&tick_head_key(tick))
     }
 
-    pub fn read_tick_manifest(
-        &self,
-        tick: Tick,
-    ) -> Result<Option<TickManifestRow>, FoundationDbError> {
+    pub fn read_tick_manifest(&self, tick: Tick) -> Result<Option<TickManifestRow>, TiKVError> {
         self.read_json(&tick_manifest_key(tick))
     }
 
-    pub fn read_hash_chain(
-        &self,
-        tick: Tick,
-    ) -> Result<Option<TickHashChainRow>, FoundationDbError> {
+    pub fn read_hash_chain(&self, tick: Tick) -> Result<Option<TickHashChainRow>, TiKVError> {
         self.read_json(&tick_hash_chain_key(tick))
     }
 
-    fn read_json<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>, FoundationDbError> {
+    fn read_json<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>, TiKVError> {
         self.read_key(key)?
             .map(|value| decode(&value, std::str::from_utf8(key).unwrap_or("key")))
             .transpose()
     }
 
-    fn read_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, FoundationDbError> {
+    fn read_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, TiKVError> {
         match &self.backend {
-            FoundationDbBackend::Unavailable(reason) => Err(FoundationDbError::Unavailable(
-                format!("{reason}; cannot read key"),
-            )),
+            TiKVBackend::Unavailable(reason) => {
+                Err(TiKVError::Unavailable(format!("{reason}; cannot read key")))
+            }
             #[cfg(test)]
-            FoundationDbBackend::InMemory(backend) => Ok(backend.data.get(key).cloned()),
-            #[cfg(feature = "fdb")]
-            FoundationDbBackend::Connected(database) => read_key(database, key),
+            TiKVBackend::InMemory(backend) => Ok(backend.data.get(key).cloned()),
+            #[cfg(feature = "tikv")]
+            TiKVBackend::Connected(connection) => read_key(connection, key),
         }
     }
 
-    fn committed_ticks(&self) -> Result<Vec<Tick>, FoundationDbError> {
+    fn committed_ticks(&self) -> Result<Vec<Tick>, TiKVError> {
         match &self.backend {
-            FoundationDbBackend::Unavailable(reason) => Err(FoundationDbError::Unavailable(
-                format!("{reason}; cannot scan ticks"),
-            )),
+            TiKVBackend::Unavailable(reason) => Err(TiKVError::Unavailable(format!(
+                "{reason}; cannot scan ticks"
+            ))),
             #[cfg(test)]
-            FoundationDbBackend::InMemory(backend) => {
+            TiKVBackend::InMemory(backend) => {
                 let mut ticks = backend
                     .data
                     .keys()
@@ -411,15 +413,15 @@ impl FoundationDbStore {
                 ticks.sort_unstable();
                 Ok(ticks)
             }
-            #[cfg(feature = "fdb")]
-            FoundationDbBackend::Connected(_) => Err(FoundationDbError::Unavailable(
-                "tick scan requires an index in production FDB backend".to_string(),
+            #[cfg(feature = "tikv")]
+            TiKVBackend::Connected(_) => Err(TiKVError::Unavailable(
+                "tick scan requires an index in production TiKV backend".to_string(),
             )),
         }
     }
 }
 
-impl FoundationDbSnapshotStore for FoundationDbStore {
+impl TiKVSnapshotStore for TiKVStore {
     fn get_snapshot(&self, key: SnapshotKey) -> Option<CachedSnapshot> {
         self.snapshots.get(&key).cloned()
     }
@@ -431,18 +433,18 @@ impl FoundationDbSnapshotStore for FoundationDbStore {
             match serde_json::to_vec(&snapshot) {
                 Ok(value) => {
                     if let Err(error) = self.commit_tick_writes(vec![(key_bytes, value)]) {
-                        eprintln!("foundationdb snapshot write failed key={key:?} error={error}");
+                        eprintln!("tikv snapshot write failed key={key:?} error={error}");
                     }
                 }
                 Err(error) => {
-                    eprintln!("foundationdb snapshot encode failed key={key:?} error={error}")
+                    eprintln!("tikv snapshot encode failed key={key:?} error={error}")
                 }
             }
         }
     }
 }
 
-impl AtomicTickStore for FoundationDbStore {
+impl AtomicTickStore for TiKVStore {
     fn atomic_commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), CommitError> {
         self.commit_tick_writes(writes)
             .map_err(|error| CommitError::Failed(error.to_string()))
@@ -451,19 +453,17 @@ impl AtomicTickStore for FoundationDbStore {
 
 #[cfg(test)]
 #[derive(Debug, Default)]
-struct InMemoryFoundationDb {
+struct InMemoryTiKV {
     data: BTreeMap<Vec<u8>, Vec<u8>>,
     fail_next_commit: bool,
 }
 
 #[cfg(test)]
-impl InMemoryFoundationDb {
-    fn commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), FoundationDbError> {
+impl InMemoryTiKV {
+    fn commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), TiKVError> {
         if self.fail_next_commit {
             self.fail_next_commit = false;
-            return Err(FoundationDbError::Commit(
-                "in-memory commit failed".to_string(),
-            ));
+            return Err(TiKVError::Commit("in-memory commit failed".to_string()));
         }
         let mut next = self.data.clone();
         for (key, value) in writes {
@@ -474,14 +474,12 @@ impl InMemoryFoundationDb {
     }
 }
 
-fn encode<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, FoundationDbError> {
-    serde_json::to_vec(value)
-        .map_err(|error| FoundationDbError::Encode(format!("{label}: {error}")))
+fn encode<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, TiKVError> {
+    serde_json::to_vec(value).map_err(|error| TiKVError::Encode(format!("{label}: {error}")))
 }
 
-fn decode<T: DeserializeOwned>(value: &[u8], label: &str) -> Result<T, FoundationDbError> {
-    serde_json::from_slice(value)
-        .map_err(|error| FoundationDbError::Decode(format!("{label}: {error}")))
+fn decode<T: DeserializeOwned>(value: &[u8], label: &str) -> Result<T, TiKVError> {
+    serde_json::from_slice(value).map_err(|error| TiKVError::Decode(format!("{label}: {error}")))
 }
 
 fn visible_snapshot_key(key: SnapshotKey) -> Vec<u8> {
@@ -535,18 +533,18 @@ fn chain_hash(previous: [u8; 32], tick_head_hash: [u8; 32]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn snapshot_content_hash(state: &TickState) -> Result<[u8; 32], FoundationDbError> {
+fn snapshot_content_hash(state: &TickState) -> Result<[u8; 32], TiKVError> {
     let value = serde_json::to_value(state)
-        .map_err(|error| FoundationDbError::Encode(format!("snapshot state: {error}")))?;
+        .map_err(|error| TiKVError::Encode(format!("snapshot state: {error}")))?;
     let bytes = serde_json::to_vec(&value)
-        .map_err(|error| FoundationDbError::Encode(format!("snapshot state: {error}")))?;
+        .map_err(|error| TiKVError::Encode(format!("snapshot state: {error}")))?;
     Ok(content_hash(&bytes))
 }
 
-fn verify_snapshot_row(row: &SnapshotRow) -> Result<(), FoundationDbError> {
+fn verify_snapshot_row(row: &SnapshotRow) -> Result<(), TiKVError> {
     let expected = snapshot_content_hash(&row.state)?;
     if row.content_hash != expected {
-        return Err(FoundationDbError::Integrity(format!(
+        return Err(TiKVError::Integrity(format!(
             "snapshot content hash mismatch at tick {}",
             row.tick
         )));
@@ -554,66 +552,73 @@ fn verify_snapshot_row(row: &SnapshotRow) -> Result<(), FoundationDbError> {
     Ok(())
 }
 
-#[cfg(not(feature = "fdb"))]
-fn connect_backend(_cluster_file: Option<&str>) -> Result<FoundationDbBackend, FoundationDbError> {
-    Err(FoundationDbError::Unavailable(
-        "compiled without the fdb Cargo feature".to_string(),
+#[cfg(not(feature = "tikv"))]
+fn connect_backend(_pd_endpoints: Option<&str>) -> Result<TiKVBackend, TiKVError> {
+    Err(TiKVError::Unavailable(
+        "compiled without the tikv Cargo feature".to_string(),
     ))
 }
 
-#[cfg(feature = "fdb")]
-fn connect_backend(cluster_file: Option<&str>) -> Result<FoundationDbBackend, FoundationDbError> {
-    boot_network_once();
-    let database = match cluster_file {
-        Some(path) => foundationdb::Database::from_path(path),
-        None => foundationdb::Database::default(),
-    }
-    .map_err(|error| FoundationDbError::Unavailable(error.to_string()))?;
-    Ok(FoundationDbBackend::Connected(database))
+#[cfg(feature = "tikv")]
+fn connect_backend(pd_endpoints: Option<&str>) -> Result<TiKVBackend, TiKVError> {
+    let endpoints = parse_pd_endpoints(pd_endpoints);
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|error| TiKVError::Unavailable(error.to_string()))?;
+    let client = runtime
+        .block_on(tikv_client::TransactionClient::new(endpoints))
+        .map_err(|error| TiKVError::Unavailable(error.to_string()))?;
+    Ok(TiKVBackend::Connected(TiKVConnection { client, runtime }))
 }
 
-#[cfg(feature = "fdb")]
-fn boot_network_once() {
-    static BOOT: std::sync::Once = std::sync::Once::new();
-    BOOT.call_once(|| {
-        let _network = Box::leak(Box::new(unsafe { foundationdb::boot() }));
-    });
+#[cfg(feature = "tikv")]
+fn parse_pd_endpoints(pd_endpoints: Option<&str>) -> Vec<String> {
+    pd_endpoints
+        .unwrap_or("127.0.0.1:2379")
+        .split(',')
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
-#[cfg(feature = "fdb")]
+#[cfg(feature = "tikv")]
 fn commit_writes(
-    database: &foundationdb::Database,
+    connection: &TiKVConnection,
     writes: Vec<(Vec<u8>, Vec<u8>)>,
-) -> Result<(), FoundationDbError> {
-    futures::executor::block_on(async {
-        let transaction = database
-            .create_trx()
-            .map_err(|error| FoundationDbError::Commit(error.to_string()))?;
+) -> Result<(), TiKVError> {
+    connection.runtime.block_on(async {
+        let mut transaction = connection
+            .client
+            .begin_pessimistic()
+            .await
+            .map_err(|error| TiKVError::Commit(error.to_string()))?;
         for (key, value) in writes {
-            transaction.set(&key, &value);
+            transaction
+                .put(key, value)
+                .await
+                .map_err(|error| TiKVError::Commit(error.to_string()))?;
         }
         transaction
             .commit()
             .await
-            .map_err(|error| FoundationDbError::Commit(error.to_string()))?;
+            .map_err(|error| TiKVError::Commit(error.to_string()))?;
         Ok(())
     })
 }
 
-#[cfg(feature = "fdb")]
-fn read_key(
-    database: &foundationdb::Database,
-    key: &[u8],
-) -> Result<Option<Vec<u8>>, FoundationDbError> {
-    futures::executor::block_on(async {
-        let transaction = database
-            .create_trx()
-            .map_err(|error| FoundationDbError::Commit(error.to_string()))?;
+#[cfg(feature = "tikv")]
+fn read_key(connection: &TiKVConnection, key: &[u8]) -> Result<Option<Vec<u8>>, TiKVError> {
+    connection.runtime.block_on(async {
+        let mut transaction = connection
+            .client
+            .begin_pessimistic()
+            .await
+            .map_err(|error| TiKVError::Commit(error.to_string()))?;
         transaction
-            .get(key, false)
+            .get(key.to_vec())
             .await
             .map(|value| value.map(|bytes| bytes.to_vec()))
-            .map_err(|error| FoundationDbError::Commit(error.to_string()))
+            .map_err(|error| TiKVError::Commit(error.to_string()))
     })
 }
 
@@ -670,14 +675,14 @@ mod tests {
 
     #[test]
     fn unavailable_connector_reports_runtime_requirement() {
-        let error = FoundationDbStore::connect(Some("/missing/fdb.cluster")).unwrap_err();
+        let error = TiKVStore::connect(Some("127.0.0.1:0")).unwrap_err();
 
-        assert!(error.to_string().contains("foundationdb unavailable"));
+        assert!(error.to_string().contains("tikv unavailable"));
     }
 
     #[test]
     fn degraded_store_keeps_visible_snapshots_available_in_process() {
-        let mut store = FoundationDbStore::unavailable("test degraded mode");
+        let mut store = TiKVStore::unavailable("test degraded mode");
         let key = SnapshotKey::new(1, 7);
         let cached = store.write_visible_snapshot(visible_snapshot(7, 1, 0));
 
@@ -687,19 +692,19 @@ mod tests {
 
     #[test]
     fn degraded_atomic_commit_reports_unavailable_without_partial_success() {
-        let mut store = FoundationDbStore::unavailable("test degraded mode");
+        let mut store = TiKVStore::unavailable("test degraded mode");
 
         let error = store
             .atomic_commit(vec![(b"/tick/1/state".to_vec(), b"{}".to_vec())])
             .unwrap_err();
 
         let CommitError::Failed(message) = error;
-        assert!(message.contains("foundationdb unavailable"));
+        assert!(message.contains("tikv unavailable"));
     }
 
     #[test]
     fn tick_payload_commit_writes_head_manifest_and_hash_chain_atomically() {
-        let mut store = FoundationDbStore::in_memory();
+        let mut store = TiKVStore::in_memory();
 
         let point = store.commit_tick_payload(payload(1, 42)).unwrap();
 
@@ -712,11 +717,11 @@ mod tests {
 
     #[test]
     fn failed_tick_payload_commit_rolls_back_every_row() {
-        let mut store = FoundationDbStore::in_memory_failing_commit();
+        let mut store = TiKVStore::in_memory_failing_commit();
 
         let error = store.commit_tick_payload(payload(2, 44)).unwrap_err();
 
-        assert!(matches!(error, FoundationDbError::Commit(_)));
+        assert!(matches!(error, TiKVError::Commit(_)));
         assert!(store.read_tick_head(2).unwrap().is_none());
         assert!(store.read_tick_manifest(2).unwrap().is_none());
         assert!(store.read_hash_chain(2).unwrap().is_none());
@@ -725,7 +730,7 @@ mod tests {
 
     #[test]
     fn hash_chain_continuity_links_to_previous_tick() {
-        let mut store = FoundationDbStore::in_memory();
+        let mut store = TiKVStore::in_memory();
         let first = store.commit_tick_payload(payload(1, 11)).unwrap();
         let second = store.commit_tick_payload(payload(2, 22)).unwrap();
 
@@ -735,18 +740,18 @@ mod tests {
 
     #[test]
     fn snapshot_read_rejects_content_hash_mismatch() {
-        let mut store = FoundationDbStore::in_memory();
+        let mut store = TiKVStore::in_memory();
         let mut row = snapshot_row(5, 55);
         row.content_hash = [9; 32];
 
         let error = store.write_snapshot(row).unwrap_err();
 
-        assert!(matches!(error, FoundationDbError::Integrity(_)));
+        assert!(matches!(error, TiKVError::Integrity(_)));
     }
 
     #[test]
     fn recovery_uses_latest_verified_tick_and_snapshot() {
-        let mut store = FoundationDbStore::in_memory();
+        let mut store = TiKVStore::in_memory();
         store.commit_tick_payload(payload(1, 11)).unwrap();
         store.commit_tick_payload(payload(2, 22)).unwrap();
         store.write_snapshot(snapshot_row(2, 22)).unwrap();

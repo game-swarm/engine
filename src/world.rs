@@ -9,7 +9,6 @@ use crate::command::{
 };
 use crate::components::*;
 use crate::dragonfly::DragonflyCache;
-use crate::fdb::FoundationDbStore;
 use crate::npc::events::{EventConfig, EventState, event_effect_system, world_event_system};
 use crate::npc::loot::{BlueprintRegistry, NpcLootTables};
 use crate::npc::strongholds::{
@@ -38,6 +37,7 @@ use crate::rule_module::{
 };
 use crate::scheduler::SystemSchedulerManifest;
 use crate::systems::*;
+use crate::tikv::TiKVStore;
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -1268,7 +1268,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<PveBudget>();
     app.init_resource::<CurrentTick>();
     app.init_resource::<RhaiRuleModules>();
-    app.init_resource::<FoundationDbStore>();
+    app.init_resource::<TiKVStore>();
     app.init_resource::<DragonflyCache>();
     app.init_resource::<RankingState>();
     app.init_resource::<ShardConfig>();

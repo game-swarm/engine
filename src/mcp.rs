@@ -375,7 +375,7 @@ pub struct DeployStatusResult {
     pub status: String,
     pub errors: Vec<String>,
     pub deployed_at: String,
-    pub fdb_version_counter: u64,
+    pub tikv_version_counter: u64,
     pub object_store_key: String,
     pub module_hash: String,
     pub load_after_tick: Tick,
@@ -395,7 +395,7 @@ pub struct DeploymentInfo {
     pub player_id: PlayerId,
     pub status: String,
     pub at: String,
-    pub fdb_version_counter: u64,
+    pub tikv_version_counter: u64,
     pub object_store_key: String,
     pub hash: String,
     pub language: String,
@@ -2331,7 +2331,7 @@ fn deploy_status_for_module(module: &StoredModule) -> DeployStatusResult {
         status: "pending_next_tick".to_string(),
         errors: Vec::new(),
         deployed_at: module.deployed_at.clone(),
-        fdb_version_counter: module.load_after_tick,
+        tikv_version_counter: module.load_after_tick,
         object_store_key: module_object_store_key(module),
         module_hash: module.wasm_hash.clone(),
         load_after_tick: module.load_after_tick,
@@ -2346,7 +2346,7 @@ fn deployment_info_for_module(module: &StoredModule) -> DeploymentInfo {
         player_id: module.player_id,
         status: "pending_next_tick".to_string(),
         at: module.deployed_at.clone(),
-        fdb_version_counter: module.load_after_tick,
+        tikv_version_counter: module.load_after_tick,
         object_store_key: module_object_store_key(module),
         hash: module.wasm_hash.clone(),
         language: module.language.clone(),
@@ -3329,7 +3329,7 @@ pub fn swarm_get_snapshot(world: &mut SwarmWorld, context: McpContext) -> Visibl
     world
         .app
         .world_mut()
-        .resource_mut::<crate::fdb::FoundationDbStore>()
+        .resource_mut::<crate::tikv::TiKVStore>()
         .write_visible_snapshot(snapshot.clone());
 
     world
@@ -3337,7 +3337,7 @@ pub fn swarm_get_snapshot(world: &mut SwarmWorld, context: McpContext) -> Visibl
         .world_mut()
         .resource_scope(
             |ecs, mut cache: Mut<'_, crate::dragonfly::DragonflyCache>| {
-                let store = ecs.resource::<crate::fdb::FoundationDbStore>();
+                let store = ecs.resource::<crate::tikv::TiKVStore>();
                 read_through_dragonfly(&mut *cache, key, store)
             },
         )
@@ -4307,7 +4307,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_get_snapshot_uses_dragonfly_cache_after_fdb_backfill() {
+    fn swarm_get_snapshot_uses_dragonfly_cache_after_tikv_backfill() {
         let mut world = create_world();
         world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         let context = McpContext {

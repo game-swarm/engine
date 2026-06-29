@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env,
     io::{Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     sync::{
@@ -86,8 +86,8 @@ fn main() {
         }
     }
 
-    let fdb_cluster_file = env::var("FDB_CLUSTER_FILE")
-        .unwrap_or_else(|_| "/etc/foundationdb/fdb.cluster".to_string());
+    let tikv_pd_endpoints =
+        env::var("TIKV_PD_ENDPOINTS").unwrap_or_else(|_| "127.0.0.1:2379".to_string());
     let dragonfly_url = env::var("DRAGONFLY_URL")
         .or_else(|_| env::var("REDIS_URL"))
         .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
@@ -107,28 +107,28 @@ fn main() {
     let healthy = Arc::new(AtomicBool::new(false));
     start_health_server(health_addr, Arc::clone(&healthy));
 
-    let fdb_store = swarm_engine::FoundationDbStore::connect(Some(&fdb_cluster_file));
+    let tikv_store = swarm_engine::TiKVStore::connect(Some(&tikv_pd_endpoints));
     let dragonfly_cache = swarm_engine::DragonflyCache::connect(&dragonfly_url);
-    let fdb_endpoint = read_fdb_endpoint(&fdb_cluster_file);
+    let tikv_endpoint = parse_tikv_endpoint(&tikv_pd_endpoints);
     let dragonfly_endpoint = parse_dragonfly_endpoint(&dragonfly_url);
     let nats_endpoint = parse_nats_endpoint(&nats_url);
 
-    let fdb_connected = fdb_store.is_ok();
-    match &fdb_store {
-        Ok(_) => println!("fdb connected cluster_file={fdb_cluster_file}"),
-        Err(error) => eprintln!("fdb unavailable: {error}"),
+    let tikv_connected = tikv_store.is_ok();
+    match &tikv_store {
+        Ok(_) => println!("tikv connected pd_endpoints={tikv_pd_endpoints}"),
+        Err(error) => eprintln!("tikv unavailable: {error}"),
     }
     match &dragonfly_cache {
         Ok(_) => println!("dragonfly configured url={dragonfly_url}"),
         Err(error) => eprintln!("dragonfly unavailable: {error}"),
     }
 
-    match &fdb_endpoint {
+    match &tikv_endpoint {
         Ok(endpoint) => println!(
-            "fdb cluster file loaded path={} coordinator={}:{}",
-            fdb_cluster_file, endpoint.host, endpoint.port
+            "tikv pd configured endpoints={} probe={}:{}",
+            tikv_pd_endpoints, endpoint.host, endpoint.port
         ),
-        Err(error) => eprintln!("fdb coordinator probe unavailable: {error}"),
+        Err(error) => eprintln!("tikv pd probe unavailable: {error}"),
     }
 
     match &nats_endpoint {
@@ -140,7 +140,7 @@ fn main() {
     }
 
     let mut world = create_world_with_mode(mode);
-    if let Ok(store) = fdb_store {
+    if let Ok(store) = tikv_store {
         world.app.insert_resource(store);
     }
     if let Ok(cache) = dragonfly_cache {
@@ -155,8 +155,8 @@ fn main() {
 
     let mut tick: u64 = 0;
     loop {
-        let fdb_ok = fdb_connected
-            && fdb_endpoint
+        let tikv_ok = tikv_connected
+            && tikv_endpoint
                 .as_ref()
                 .map(|endpoint| tcp_check(endpoint))
                 .unwrap_or(false);
@@ -168,11 +168,11 @@ fn main() {
             .as_ref()
             .map(|endpoint| tcp_check(endpoint))
             .unwrap_or(false);
-        healthy.store(fdb_ok && dragonfly_ok && nats_ok, Ordering::Relaxed);
+        healthy.store(tikv_ok && dragonfly_ok && nats_ok, Ordering::Relaxed);
 
-        if !fdb_ok {
+        if !tikv_ok {
             eprintln!(
-                "tick={tick} dependency=fdb status=degraded action=continue_without_persistence"
+                "tick={tick} dependency=tikv status=degraded action=continue_without_persistence"
             );
         }
         if !nats_ok {
@@ -188,10 +188,10 @@ fn main() {
 
         world.run_tick();
         println!(
-            "tick={} state_checksum={} fdb={} dragonfly={} nats={}",
+            "tick={} state_checksum={} tikv={} dragonfly={} nats={}",
             tick,
             world.state_checksum(),
-            status(fdb_ok),
+            status(tikv_ok),
             status(dragonfly_ok),
             status(nats_ok)
         );
@@ -252,7 +252,7 @@ fn run_sim(args: &[String]) -> Result<(), String> {
     }
 
     println!(
-        "mode=local-sim caveat=training-only-not-authoritative-no-fdb-no-nats ticks={ticks} speed={speed}"
+        "mode=local-sim caveat=training-only-not-authoritative-no-tikv-no-nats ticks={ticks} speed={speed}"
     );
     let started_at = std::time::Instant::now();
     let mut world = create_local_simulation_world();
@@ -337,15 +337,13 @@ fn respond_health(stream: &mut TcpStream, healthy: bool) {
     let _ = stream.write_all(response.as_bytes());
 }
 
-fn read_fdb_endpoint(path: &str) -> Result<Endpoint, String> {
-    let contents =
-        fs::read_to_string(path).map_err(|error| format!("cluster_file={path} error={error}"))?;
-    let coordinator = contents
-        .trim()
-        .rsplit('@')
-        .next()
-        .ok_or_else(|| format!("cluster_file={path} has no coordinator"))?;
-    parse_host_port(coordinator, 4500)
+fn parse_tikv_endpoint(endpoints: &str) -> Result<Endpoint, String> {
+    let first = endpoints
+        .split(',')
+        .map(str::trim)
+        .find(|endpoint| !endpoint.is_empty())
+        .ok_or_else(|| "TIKV_PD_ENDPOINTS has no endpoint".to_string())?;
+    parse_host_port(first, 2379)
 }
 
 fn parse_nats_endpoint(url: &str) -> Result<Endpoint, String> {
