@@ -19,3 +19,6 @@
 [submodule "mods/depot-storage"]
 	path = mods/depot-storage
 	url = git@git.kagurazakalan.com:swarm/mod-depot-storage.git
+[submodule "sandbox"]
+	path = sandbox
+	url = git@git.kagurazakalan.com:swarm/sandbox.git

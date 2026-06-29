@@ -16,10 +16,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY engine/ ./engine/
-COPY sandbox/ ./sandbox/
-
-WORKDIR /app/engine
+COPY . .
 RUN cargo build --release
 
 FROM debian:bookworm-slim AS runtime
@@ -37,10 +34,10 @@ RUN apt-get update \
     && rm -f /tmp/foundationdb-clients.deb \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app/engine
-COPY --from=build /app/engine/target/release/swarm-engine /usr/local/bin/swarm-engine
-COPY --from=build /app/engine/world.toml ./world.toml
-COPY --from=build /app/engine/mods/ ./mods/
+COPY --from=build /app/target/release/swarm-engine /usr/local/bin/swarm-engine
+COPY --from=build /app/world.toml /app/world.toml
+COPY --from=build /app/mods/ /app/mods/
+WORKDIR /app
 
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=2s --start-period=10s --retries=6 \
