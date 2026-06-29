@@ -86,8 +86,7 @@ fn main() {
         }
     }
 
-    let tikv_pd_endpoints =
-        env::var("TIKV_PD_ENDPOINTS").unwrap_or_else(|_| "127.0.0.1:2379".to_string());
+    let redb_path = env::var("REDB_PATH").unwrap_or_else(|_| "swarm.redb".to_string());
     let dragonfly_url = env::var("DRAGONFLY_URL")
         .or_else(|_| env::var("REDIS_URL"))
         .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
@@ -107,28 +106,19 @@ fn main() {
     let healthy = Arc::new(AtomicBool::new(false));
     start_health_server(health_addr, Arc::clone(&healthy));
 
-    let tikv_store = swarm_engine::TiKVStore::connect(Some(&tikv_pd_endpoints));
+    let tikv_store = swarm_engine::TiKVStore::open(&redb_path);
     let dragonfly_cache = swarm_engine::DragonflyCache::connect(&dragonfly_url);
-    let tikv_endpoint = parse_tikv_endpoint(&tikv_pd_endpoints);
     let dragonfly_endpoint = parse_dragonfly_endpoint(&dragonfly_url);
     let nats_endpoint = parse_nats_endpoint(&nats_url);
 
     let tikv_connected = tikv_store.is_ok();
     match &tikv_store {
-        Ok(_) => println!("tikv connected pd_endpoints={tikv_pd_endpoints}"),
-        Err(error) => eprintln!("tikv unavailable: {error}"),
+        Ok(_) => println!("redb opened path={redb_path}"),
+        Err(error) => eprintln!("redb unavailable: {error}"),
     }
     match &dragonfly_cache {
         Ok(_) => println!("dragonfly configured url={dragonfly_url}"),
         Err(error) => eprintln!("dragonfly unavailable: {error}"),
-    }
-
-    match &tikv_endpoint {
-        Ok(endpoint) => println!(
-            "tikv pd configured endpoints={} probe={}:{}",
-            tikv_pd_endpoints, endpoint.host, endpoint.port
-        ),
-        Err(error) => eprintln!("tikv pd probe unavailable: {error}"),
     }
 
     match &nats_endpoint {
@@ -155,11 +145,7 @@ fn main() {
 
     let mut tick: u64 = 0;
     loop {
-        let tikv_ok = tikv_connected
-            && tikv_endpoint
-                .as_ref()
-                .map(|endpoint| tcp_check(endpoint))
-                .unwrap_or(false);
+        let tikv_ok = tikv_connected;
         let nats_ok = nats_endpoint
             .as_ref()
             .map(|endpoint| tcp_check(endpoint))
@@ -172,7 +158,7 @@ fn main() {
 
         if !tikv_ok {
             eprintln!(
-                "tick={tick} dependency=tikv status=degraded action=continue_without_persistence"
+                "tick={tick} dependency=redb status=degraded action=continue_without_persistence"
             );
         }
         if !nats_ok {
@@ -188,7 +174,7 @@ fn main() {
 
         world.run_tick();
         println!(
-            "tick={} state_checksum={} tikv={} dragonfly={} nats={}",
+            "tick={} state_checksum={} redb={} dragonfly={} nats={}",
             tick,
             world.state_checksum(),
             status(tikv_ok),
@@ -252,7 +238,7 @@ fn run_sim(args: &[String]) -> Result<(), String> {
     }
 
     println!(
-        "mode=local-sim caveat=training-only-not-authoritative-no-tikv-no-nats ticks={ticks} speed={speed}"
+        "mode=local-sim caveat=training-only-not-authoritative-no-redb-no-nats ticks={ticks} speed={speed}"
     );
     let started_at = std::time::Instant::now();
     let mut world = create_local_simulation_world();
@@ -335,15 +321,6 @@ fn respond_health(stream: &mut TcpStream, healthy: bool) {
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
-}
-
-fn parse_tikv_endpoint(endpoints: &str) -> Result<Endpoint, String> {
-    let first = endpoints
-        .split(',')
-        .map(str::trim)
-        .find(|endpoint| !endpoint.is_empty())
-        .ok_or_else(|| "TIKV_PD_ENDPOINTS has no endpoint".to_string())?;
-    parse_host_port(first, 2379)
 }
 
 fn parse_nats_endpoint(url: &str) -> Result<Endpoint, String> {

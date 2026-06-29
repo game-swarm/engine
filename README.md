@@ -12,8 +12,8 @@ docker compose up --build
 
 The compose stack starts:
 
-- `tikv`: TiKV distributed KV store, exposed on `localhost:2379` (PD) and `localhost:20160` (KV)
+- the engine with an embedded `redb` database at `REDB_PATH` (defaults to `swarm.redb`)
 
-The TiKV cluster provides distributed, transactional key-value storage accessed via the pure-Rust `tikv-client` crate — no C dependencies or system libraries required.
+`redb` provides pure-Rust embedded ACID key-value storage with no external database service and no C dependencies.
 
-Missing TiKV or NATS does not crash the process. The engine logs the dependency as `status=degraded`, keeps ticking without persistence or broadcast, and returns `503` from `/healthz` until both services are reachable.
+Missing redb access or NATS does not crash the process. The engine logs the dependency as `status=degraded`, keeps ticking without persistence or broadcast, and returns `503` from `/healthz` until required dependencies are reachable.

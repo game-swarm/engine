@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 
 use bevy::prelude::Resource;
+use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::command::Tick;
 use crate::hot_cache::{CachedSnapshot, SnapshotKey, TiKVSnapshotStore};
 use crate::mcp::VisibleWorldSnapshot;
 use crate::tick::{AtomicTickStore, CommitError, TickState};
+
+const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TiKVError {
@@ -113,30 +116,15 @@ pub struct RecoveryPoint {
 
 #[derive(Resource, Debug)]
 pub struct TiKVStore {
+    pub db: Option<Database>,
+    pub snapshots: BTreeMap<SnapshotKey, CachedSnapshot>,
     backend: TiKVBackend,
-    snapshots: BTreeMap<SnapshotKey, CachedSnapshot>,
 }
 
 #[derive(Debug)]
-enum TiKVBackend {
+pub enum TiKVBackend {
     Unavailable(String),
-    #[cfg(test)]
     InMemory(InMemoryTiKV),
-    #[cfg(feature = "tikv")]
-    Connected(TiKVConnection),
-}
-
-#[cfg(feature = "tikv")]
-struct TiKVConnection {
-    client: tikv_client::TransactionClient,
-    runtime: tokio::runtime::Runtime,
-}
-
-#[cfg(feature = "tikv")]
-impl std::fmt::Debug for TiKVConnection {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("TiKVConnection")
-    }
 }
 
 impl Default for TiKVStore {
@@ -146,56 +134,75 @@ impl Default for TiKVStore {
 }
 
 impl TiKVStore {
-    pub fn connect(pd_endpoints: Option<&str>) -> Result<Self, TiKVError> {
-        connect_backend(pd_endpoints).map(|backend| Self {
-            backend,
+    pub fn open(path: &str) -> Result<Self, TiKVError> {
+        let db =
+            Database::create(path).map_err(|error| TiKVError::Unavailable(error.to_string()))?;
+        {
+            let txn = db
+                .begin_write()
+                .map_err(|error| TiKVError::Unavailable(error.to_string()))?;
+            {
+                txn.open_table(KV_TABLE)
+                    .map_err(|error| TiKVError::Unavailable(error.to_string()))?;
+            }
+            txn.commit()
+                .map_err(|error| TiKVError::Unavailable(error.to_string()))?;
+        }
+        Ok(Self {
+            db: Some(db),
             snapshots: BTreeMap::new(),
+            backend: TiKVBackend::Unavailable("redb database connected".to_string()),
         })
     }
 
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self {
-            backend: TiKVBackend::Unavailable(reason.into()),
+            db: None,
             snapshots: BTreeMap::new(),
+            backend: TiKVBackend::Unavailable(reason.into()),
         }
     }
 
     #[cfg(test)]
     pub fn in_memory() -> Self {
         Self {
-            backend: TiKVBackend::InMemory(InMemoryTiKV::default()),
+            db: None,
             snapshots: BTreeMap::new(),
+            backend: TiKVBackend::InMemory(InMemoryTiKV::default()),
         }
     }
 
     #[cfg(test)]
     pub fn in_memory_failing_commit() -> Self {
         Self {
+            db: None,
+            snapshots: BTreeMap::new(),
             backend: TiKVBackend::InMemory(InMemoryTiKV {
                 fail_next_commit: true,
                 ..Default::default()
             }),
-            snapshots: BTreeMap::new(),
         }
     }
 
     pub fn is_available(&self) -> bool {
-        match self.backend {
-            TiKVBackend::Unavailable(_) => false,
-            #[cfg(test)]
-            TiKVBackend::InMemory(_) => true,
-            #[cfg(feature = "tikv")]
-            TiKVBackend::Connected(_) => true,
+        if self.db.is_some() {
+            true
+        } else {
+            match self.backend {
+                TiKVBackend::Unavailable(_) => false,
+                TiKVBackend::InMemory(_) => true,
+            }
         }
     }
 
     pub fn unavailable_reason(&self) -> Option<&str> {
-        match &self.backend {
-            TiKVBackend::Unavailable(reason) => Some(reason),
-            #[cfg(test)]
-            TiKVBackend::InMemory(_) => None,
-            #[cfg(feature = "tikv")]
-            TiKVBackend::Connected(_) => None,
+        if self.db.is_some() {
+            None
+        } else {
+            match &self.backend {
+                TiKVBackend::Unavailable(reason) => Some(reason),
+                TiKVBackend::InMemory(_) => None,
+            }
         }
     }
 
@@ -207,17 +214,12 @@ impl TiKVStore {
     }
 
     pub fn commit_tick_writes(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), TiKVError> {
-        #[cfg(not(any(feature = "tikv", test)))]
-        let _ = &writes;
-
+        if let Some(db) = &self.db {
+            return commit_writes(db, writes);
+        }
         match &mut self.backend {
-            TiKVBackend::Unavailable(reason) => Err(TiKVError::Unavailable(format!(
-                "{reason}; enable the tikv Cargo feature"
-            ))),
-            #[cfg(test)]
+            TiKVBackend::Unavailable(reason) => Err(TiKVError::Unavailable(reason.clone())),
             TiKVBackend::InMemory(backend) => backend.commit(writes),
-            #[cfg(feature = "tikv")]
-            TiKVBackend::Connected(connection) => commit_writes(connection, writes),
         }
     }
 
@@ -387,23 +389,25 @@ impl TiKVStore {
     }
 
     fn read_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, TiKVError> {
+        if let Some(db) = &self.db {
+            return read_key(db, key);
+        }
         match &self.backend {
             TiKVBackend::Unavailable(reason) => {
                 Err(TiKVError::Unavailable(format!("{reason}; cannot read key")))
             }
-            #[cfg(test)]
             TiKVBackend::InMemory(backend) => Ok(backend.data.get(key).cloned()),
-            #[cfg(feature = "tikv")]
-            TiKVBackend::Connected(connection) => read_key(connection, key),
         }
     }
 
     fn committed_ticks(&self) -> Result<Vec<Tick>, TiKVError> {
+        if let Some(db) = &self.db {
+            return committed_ticks(db);
+        }
         match &self.backend {
             TiKVBackend::Unavailable(reason) => Err(TiKVError::Unavailable(format!(
                 "{reason}; cannot scan ticks"
             ))),
-            #[cfg(test)]
             TiKVBackend::InMemory(backend) => {
                 let mut ticks = backend
                     .data
@@ -413,10 +417,6 @@ impl TiKVStore {
                 ticks.sort_unstable();
                 Ok(ticks)
             }
-            #[cfg(feature = "tikv")]
-            TiKVBackend::Connected(_) => Err(TiKVError::Unavailable(
-                "tick scan requires an index in production TiKV backend".to_string(),
-            )),
         }
     }
 }
@@ -451,14 +451,12 @@ impl AtomicTickStore for TiKVStore {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Default)]
-struct InMemoryTiKV {
+pub struct InMemoryTiKV {
     data: BTreeMap<Vec<u8>, Vec<u8>>,
     fail_next_commit: bool,
 }
 
-#[cfg(test)]
 impl InMemoryTiKV {
     fn commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), TiKVError> {
         if self.fail_next_commit {
@@ -552,74 +550,56 @@ fn verify_snapshot_row(row: &SnapshotRow) -> Result<(), TiKVError> {
     Ok(())
 }
 
-#[cfg(not(feature = "tikv"))]
-fn connect_backend(_pd_endpoints: Option<&str>) -> Result<TiKVBackend, TiKVError> {
-    Err(TiKVError::Unavailable(
-        "compiled without the tikv Cargo feature".to_string(),
-    ))
-}
-
-#[cfg(feature = "tikv")]
-fn connect_backend(pd_endpoints: Option<&str>) -> Result<TiKVBackend, TiKVError> {
-    let endpoints = parse_pd_endpoints(pd_endpoints);
-    let runtime = tokio::runtime::Runtime::new()
-        .map_err(|error| TiKVError::Unavailable(error.to_string()))?;
-    let client = runtime
-        .block_on(tikv_client::TransactionClient::new(endpoints))
-        .map_err(|error| TiKVError::Unavailable(error.to_string()))?;
-    Ok(TiKVBackend::Connected(TiKVConnection { client, runtime }))
-}
-
-#[cfg(feature = "tikv")]
-fn parse_pd_endpoints(pd_endpoints: Option<&str>) -> Vec<String> {
-    pd_endpoints
-        .unwrap_or("127.0.0.1:2379")
-        .split(',')
-        .map(str::trim)
-        .filter(|endpoint| !endpoint.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-#[cfg(feature = "tikv")]
-fn commit_writes(
-    connection: &TiKVConnection,
-    writes: Vec<(Vec<u8>, Vec<u8>)>,
-) -> Result<(), TiKVError> {
-    connection.runtime.block_on(async {
-        let mut transaction = connection
-            .client
-            .begin_pessimistic()
-            .await
+fn commit_writes(db: &Database, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), TiKVError> {
+    let txn = db
+        .begin_write()
+        .map_err(|error| TiKVError::Commit(error.to_string()))?;
+    {
+        let mut table = txn
+            .open_table(KV_TABLE)
             .map_err(|error| TiKVError::Commit(error.to_string()))?;
         for (key, value) in writes {
-            transaction
-                .put(key, value)
-                .await
+            table
+                .insert(key.as_slice(), value.as_slice())
                 .map_err(|error| TiKVError::Commit(error.to_string()))?;
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| TiKVError::Commit(error.to_string()))?;
-        Ok(())
-    })
+    }
+    txn.commit()
+        .map_err(|error| TiKVError::Commit(error.to_string()))
 }
 
-#[cfg(feature = "tikv")]
-fn read_key(connection: &TiKVConnection, key: &[u8]) -> Result<Option<Vec<u8>>, TiKVError> {
-    connection.runtime.block_on(async {
-        let mut transaction = connection
-            .client
-            .begin_pessimistic()
-            .await
-            .map_err(|error| TiKVError::Commit(error.to_string()))?;
-        transaction
-            .get(key.to_vec())
-            .await
-            .map(|value| value.map(|bytes| bytes.to_vec()))
-            .map_err(|error| TiKVError::Commit(error.to_string()))
-    })
+fn read_key(db: &Database, key: &[u8]) -> Result<Option<Vec<u8>>, TiKVError> {
+    let txn = db
+        .begin_read()
+        .map_err(|error| TiKVError::Commit(error.to_string()))?;
+    let table = txn
+        .open_table(KV_TABLE)
+        .map_err(|error| TiKVError::Commit(error.to_string()))?;
+    table
+        .get(key)
+        .map(|value| value.map(|bytes| bytes.value().to_vec()))
+        .map_err(|error| TiKVError::Commit(error.to_string()))
+}
+
+fn committed_ticks(db: &Database) -> Result<Vec<Tick>, TiKVError> {
+    let txn = db
+        .begin_read()
+        .map_err(|error| TiKVError::Commit(error.to_string()))?;
+    let table = txn
+        .open_table(KV_TABLE)
+        .map_err(|error| TiKVError::Commit(error.to_string()))?;
+    let mut ticks = Vec::new();
+    for entry in table
+        .iter()
+        .map_err(|error| TiKVError::Commit(error.to_string()))?
+    {
+        let (key, _) = entry.map_err(|error| TiKVError::Commit(error.to_string()))?;
+        if let Some(tick) = parse_tick_head_key(key.value()) {
+            ticks.push(tick);
+        }
+    }
+    ticks.sort_unstable();
+    Ok(ticks)
 }
 
 #[cfg(test)]
@@ -674,10 +654,24 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_connector_reports_runtime_requirement() {
-        let error = TiKVStore::connect(Some("127.0.0.1:0")).unwrap_err();
+    fn open_reports_database_errors() {
+        let error = TiKVStore::open("/tmp").unwrap_err();
 
         assert!(error.to_string().contains("tikv unavailable"));
+    }
+
+    #[test]
+    fn redb_store_persists_atomic_tick_payloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("swarm.redb");
+        let path = path.to_str().unwrap();
+        let mut store = TiKVStore::open(path).unwrap();
+
+        let point = store.commit_tick_payload(payload(1, 42)).unwrap();
+
+        assert_eq!(point.head.state_checksum, 42);
+        assert!(store.read_key(b"/tick/1/state").unwrap().is_some());
+        assert_eq!(store.recover_latest().unwrap().unwrap().tick, 1);
     }
 
     #[test]
