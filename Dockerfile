@@ -2,6 +2,7 @@ FROM rust:1.85-slim
 
 ARG FDB_VERSION=7.3.59
 ENV CARGO_HTTP_MULTIPLEXING=false
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -20,7 +21,9 @@ RUN apt-get update \
     && ln -sf /usr/local/cargo/bin/rustup /usr/local/bin/rustup
 
 WORKDIR /app
-COPY . .
+COPY engine/ .
+COPY sandbox/ /sandbox/
+COPY engine/mods/ mods/
 RUN cargo build --release
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=2s --start-period=10s --retries=6 \
