@@ -1,6 +1,6 @@
 FROM rust:latest AS build
 
-ARG FDB_VERSION=7.3.69
+ARG FDB_VERSION=7.4.6
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -22,7 +22,7 @@ RUN cargo build --release
 
 FROM debian:trixie-slim AS runtime
 
-ARG FDB_VERSION=7.3.69
+ARG FDB_VERSION=7.4.6
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
