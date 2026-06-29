@@ -6,6 +6,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        libasound2-dev \
         libssl-dev \
         pkg-config \
     && arch="$(dpkg --print-architecture)" \
