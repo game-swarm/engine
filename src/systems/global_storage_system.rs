@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::components::{Drone, Owner, Position};
+use crate::resource_ledger::compute_continuous_storage_tax;
 use crate::resources::{
     GlobalStorageConfig, GlobalTransferDirection, PendingAlliedTransfers, PendingGlobalTransfers,
     PlayerGlobalStorage, PlayerLocalStorage, ResourceCost, ResourceName,
@@ -51,7 +52,7 @@ pub fn global_storage_system(
     }
 
     for storage in global_storage.0.values_mut() {
-        apply_progressive_tax(storage, config.capacity, &config.tax_tiers);
+        apply_continuous_tax(storage, &config);
     }
 }
 
@@ -116,17 +117,13 @@ fn add_resource(storage: &mut ResourceCost, resource: ResourceName, amount: u32)
     *storage.entry(resource).or_default() += amount;
 }
 
-fn apply_progressive_tax(
-    storage: &mut ResourceCost,
-    capacity: u32,
-    tiers: &[crate::resources::GlobalStorageTaxTier],
-) {
-    if capacity == 0 || tiers.is_empty() {
+fn apply_continuous_tax(storage: &mut ResourceCost, config: &GlobalStorageConfig) {
+    if config.capacity == 0 {
         return;
     }
 
     let total: u32 = storage.values().sum();
-    let tax = progressive_tax(total, capacity, tiers);
+    let tax = compute_continuous_storage_tax(total, config.capacity, config);
     if tax == 0 {
         return;
     }
@@ -142,49 +139,17 @@ fn apply_progressive_tax(
     }
 }
 
-fn progressive_tax(
-    total: u32,
-    capacity: u32,
-    tiers: &[crate::resources::GlobalStorageTaxTier],
-) -> u32 {
-    let mut previous_limit = 0_u32;
-    let mut tax = 0_u32;
-
-    for tier in tiers {
-        let limit =
-            ((capacity as u64 * tier.up_to_percent as u64) / 100).min(u32::MAX as u64) as u32;
-        if total > previous_limit {
-            let taxable = total.min(limit).saturating_sub(previous_limit);
-            tax = tax.saturating_add(taxable.saturating_mul(tier.rate_per_10_000) / 10_000);
-        }
-        previous_limit = limit;
-    }
-
-    if total > previous_limit {
-        let rate = tiers
-            .last()
-            .map(|tier| tier.rate_per_10_000)
-            .unwrap_or_default();
-        tax =
-            tax.saturating_add(total.saturating_sub(previous_limit).saturating_mul(rate) / 10_000);
-    }
-
-    tax.min(total)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::resources::GlobalStorageConfig;
 
     #[test]
-    fn progressive_tax_uses_configured_tiers() {
-        let tiers = GlobalStorageConfig::default().tax_tiers;
+    fn continuous_tax_uses_configured_anchors() {
+        let config = GlobalStorageConfig::default();
 
-        assert_eq!(progressive_tax(30_000, 100_000, &tiers), 0);
-        assert_eq!(progressive_tax(60_000, 100_000, &tiers), 3);
-        assert_eq!(progressive_tax(85_000, 100_000, &tiers), 15);
-        assert_eq!(progressive_tax(100_000, 100_000, &tiers), 45);
+        assert_eq!(compute_continuous_storage_tax(30_000, 100_000, &config), 0);
+        assert_eq!(compute_continuous_storage_tax(100_000, 100_000, &config), 24);
     }
 }
 

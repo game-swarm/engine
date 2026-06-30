@@ -7,6 +7,7 @@ use crate::command::{ObjectId, Tick, object_id};
 use crate::components::{Controller, Drone, PlayerId, Position, RoomId, Source};
 use crate::mcp::{McpError, StoredModule};
 use crate::ranking::RankingState;
+use crate::resource_ledger::{compute_continuous_storage_tax, marginal_storage_tax_rate_bp};
 use crate::resources::{
     GlobalStorageConfig, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
 };
@@ -34,8 +35,8 @@ pub struct EconomySnapshot {
 pub struct StorageTaxSummary {
     pub stored: u32,
     pub capacity: u32,
-    pub utilization_percent: u32,
-    pub rate_per_10_000: u32,
+    pub utilization_pct: u32,
+    pub effective_rate: u32,
     pub estimated_tax_per_tick: u32,
 }
 
@@ -505,23 +506,19 @@ fn maintenance_for_player(world: &mut SwarmWorld, player_id: PlayerId) -> Resour
 fn storage_tax(world: &SwarmWorld, global_storage: &ResourceCost) -> StorageTaxSummary {
     let config = world.app.world().resource::<GlobalStorageConfig>();
     let stored = resource_total(global_storage);
-    let utilization_percent = if config.capacity == 0 {
+    let utilization_ppm = if config.capacity == 0 {
         0
     } else {
-        stored.saturating_mul(100) / config.capacity
+        ((stored as u64).saturating_mul(1_000_000) / config.capacity as u64).min(1_000_000) as u32
     };
-    let rate_per_10_000 = config
-        .tax_tiers
-        .iter()
-        .find(|tier| utilization_percent <= tier.up_to_percent)
-        .map(|tier| tier.rate_per_10_000)
-        .unwrap_or(0);
+    let estimated_tax_per_tick = compute_continuous_storage_tax(stored, config.capacity, config);
+    let effective_rate = marginal_storage_tax_rate_bp(utilization_ppm, config);
     StorageTaxSummary {
         stored,
         capacity: config.capacity,
-        utilization_percent,
-        rate_per_10_000,
-        estimated_tax_per_tick: stored.saturating_mul(rate_per_10_000) / 10_000,
+        utilization_pct: utilization_ppm / 10_000,
+        effective_rate,
+        estimated_tax_per_tick,
     }
 }
 
@@ -639,7 +636,7 @@ mod tests {
         assert_eq!(snapshot.player_id, 7);
         assert_eq!(snapshot.income.get("Energy"), Some(&1));
         assert_eq!(snapshot.maintenance.get("Energy"), Some(&2));
-        assert!(snapshot.storage_tax.rate_per_10_000 > 0);
+        assert!(snapshot.storage_tax.effective_rate > 0);
     }
 
     #[test]

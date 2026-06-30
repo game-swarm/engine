@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::command::Tick;
 use crate::components::PlayerId;
 use crate::resources::{
-    GlobalStorageConfig, GlobalStorageTaxTier, PendingGlobalTransfer, PendingGlobalTransfers,
+    GlobalStorageConfig, PendingGlobalTransfer, PendingGlobalTransfers,
     PlayerGlobalStorage, PlayerLocalStorage, ResourceAmount, ResourceCost, ResourceName,
 };
 
@@ -222,60 +222,80 @@ pub fn execute_global_withdraw(
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Tiered Storage Tax (§2.2)
+// Continuous Storage Tax (§2.2)
 // ═══════════════════════════════════════════════════════════════════
 
-/// Compute tiered storage tax using progressive brackets
-/// Formula: Σ over each tier i where storage_pct > tier_threshold[i]:
-///   taxable_in_tier_pct = min(storage_pct - tier_threshold[i], tier_width[i])
-///   tax += taxable_in_tier_pct × tier_rate[i] × capacity / 10000 / 100
-pub fn compute_tiered_storage_tax(
+pub fn compute_continuous_storage_tax(
     stored_total: ResourceAmount,
     capacity: ResourceAmount,
-    tiers: &[GlobalStorageTaxTier],
+    config: &GlobalStorageConfig,
 ) -> ResourceAmount {
-    if capacity == 0 || stored_total == 0 || tiers.is_empty() {
+    if capacity == 0 || stored_total == 0 {
         return 0;
     }
 
-    let utilization_pct = (stored_total as u64 * 100 / capacity as u64) as u32;
-    let mut tax: u64 = 0;
-    let mut prev_threshold: u32 = 0;
+    let utilization_ppm = ((stored_total as u128)
+        .saturating_mul(1_000_000)
+        .checked_div(capacity as u128)
+        .unwrap_or_default())
+    .min(1_000_000) as u32;
+    let mut weighted_sum = 0_u128;
+    let mut ppm = 0_u32;
 
-    for tier in tiers {
-        let tier_threshold = tier.up_to_percent;
-
-        if utilization_pct <= prev_threshold {
-            break;
-        }
-
-        // Storage in this tier = min(remaining pct, tier width)
-        let tier_width = tier_threshold.saturating_sub(prev_threshold);
-        let stored_in_tier_pct = (utilization_pct.saturating_sub(prev_threshold)).min(tier_width);
-
-        // taxable amount = stored_pct% × capacity / 100
-        let taxable_amount = stored_in_tier_pct as u64 * capacity as u64 / 100;
-
-        // tax = taxable × rate_bps / 10000
-        let tier_tax = taxable_amount * tier.rate_per_10_000 as u64 / 10000;
-        tax += tier_tax;
-
-        prev_threshold = tier_threshold;
+    while ppm < utilization_ppm {
+        let next = ppm.saturating_add(1_000).min(utilization_ppm);
+        let width = next - ppm;
+        let amount = (capacity as u128).saturating_mul(width as u128) / 1_000_000;
+        weighted_sum = weighted_sum
+            .saturating_add(amount.saturating_mul(marginal_storage_tax_rate_bp(ppm, config) as u128));
+        ppm = next;
     }
 
-    tax as ResourceAmount
+    (weighted_sum / 10_000).min(ResourceAmount::MAX as u128) as ResourceAmount
+}
+
+pub fn marginal_storage_tax_rate_bp(utilization_ppm: u32, config: &GlobalStorageConfig) -> u32 {
+    let anchors = &config.tax_anchors;
+    if utilization_ppm <= anchors[0].utilization_ppm {
+        return anchors[0].marginal_rate_bp;
+    }
+
+    for window in anchors.windows(2) {
+        let left = window[0];
+        let right = window[1];
+        if utilization_ppm <= right.utilization_ppm {
+            let span = right.utilization_ppm.saturating_sub(left.utilization_ppm);
+            if span == 0 {
+                return right.marginal_rate_bp;
+            }
+            let offset = utilization_ppm.saturating_sub(left.utilization_ppm);
+            let t = (offset as u128).saturating_mul(1_000_000) / span as u128;
+            let smooth = 3_u128
+                .saturating_mul(t)
+                .saturating_mul(t)
+                .saturating_sub(2_u128.saturating_mul(t).saturating_mul(t).saturating_mul(t) / 1_000_000)
+                / 1_000_000;
+            let delta = right
+                .marginal_rate_bp
+                .saturating_sub(left.marginal_rate_bp) as u128;
+            return left
+                .marginal_rate_bp
+                .saturating_add((delta.saturating_mul(smooth) / 1_000_000) as u32);
+        }
+    }
+
+    anchors[anchors.len() - 1].marginal_rate_bp
 }
 
 /// Execute storage tax deduction for one player
 pub fn execute_storage_tax(
     global_storage: &mut PlayerGlobalStorage,
     player_id: PlayerId,
-    capacity: ResourceAmount,
-    tiers: &[GlobalStorageTaxTier],
+    config: &GlobalStorageConfig,
 ) -> TransferResult {
     let storage = global_storage.0.entry(player_id).or_default();
     let total_stored: ResourceAmount = storage.values().copied().sum();
-    let tax_total = compute_tiered_storage_tax(total_stored, capacity, tiers);
+    let tax_total = compute_continuous_storage_tax(total_stored, config.capacity, config);
 
     if tax_total == 0 {
         return TransferResult {
@@ -425,27 +445,12 @@ pub fn resource_ledger_system(mut ledger: ResMut<ResourceLedger>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::GlobalStorageTaxTier;
 
-    fn tiers_spec_compliant() -> Vec<GlobalStorageTaxTier> {
-        vec![
-            GlobalStorageTaxTier {
-                up_to_percent: 30,
-                rate_per_10_000: 0,
-            },
-            GlobalStorageTaxTier {
-                up_to_percent: 60,
-                rate_per_10_000: 1,
-            },
-            GlobalStorageTaxTier {
-                up_to_percent: 85,
-                rate_per_10_000: 5,
-            },
-            GlobalStorageTaxTier {
-                up_to_percent: 100,
-                rate_per_10_000: 20,
-            },
-        ]
+    fn anchors_spec_compliant() -> GlobalStorageConfig {
+        GlobalStorageConfig {
+            capacity: 1_000_000,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -459,41 +464,26 @@ mod tests {
     }
 
     #[test]
-    fn tiered_storage_tax_empty_storage() {
-        let tiers = tiers_spec_compliant();
-        assert_eq!(compute_tiered_storage_tax(0, 1_000_000, &tiers), 0);
+    fn continuous_storage_tax_empty_storage() {
+        let config = anchors_spec_compliant();
+        assert_eq!(compute_continuous_storage_tax(0, 1_000_000, &config), 0);
     }
 
     #[test]
-    fn tiered_storage_tax_below_30_percent_is_free() {
-        let tiers = tiers_spec_compliant();
-        // 200k / 1M = 20% → tier 0, rate 0
-        assert_eq!(compute_tiered_storage_tax(200_000, 1_000_000, &tiers), 0);
+    fn continuous_storage_tax_boundaries() {
+        let config = anchors_spec_compliant();
+        assert_eq!(compute_continuous_storage_tax(300_000, 1_000_000, &config), 0);
+        assert_eq!(compute_continuous_storage_tax(500_000, 1_000_000, &config), 0);
+        assert_eq!(compute_continuous_storage_tax(750_000, 1_000_000, &config), 24);
+        assert_eq!(compute_continuous_storage_tax(1_000_000, 1_000_000, &config), 241);
     }
 
     #[test]
-    fn tiered_storage_tax_spec_example_75_percent() {
-        let tiers = tiers_spec_compliant();
-        // Per spec §2.2 example: 750k / 1M = 75%
-        // Tier 0 (0-30%): 300k × 0 = 0
-        // Tier 1 (30-60%): 300k × 1bp = 30
-        // Tier 2 (60-75%): 150k × 5bp = 75
-        // Total = 105
-        let tax = compute_tiered_storage_tax(750_000, 1_000_000, &tiers);
-        assert_eq!(tax, 105, "spec example: 750k/1M should be 105");
-    }
-
-    #[test]
-    fn tiered_storage_tax_100_percent_full() {
-        let tiers = tiers_spec_compliant();
-        // 1M / 1M = 100%
-        // Tier 0: 300k × 0 = 0
-        // Tier 1: 300k × 1 = 30
-        // Tier 2: 250k × 5 = 125
-        // Tier 3: 150k × 20 = 300
-        // Total = 455
-        let tax = compute_tiered_storage_tax(1_000_000, 1_000_000, &tiers);
-        assert!(tax > 400, "100% full should have high tax, got {tax}");
+    fn continuous_storage_tax_monotonic() {
+        let config = anchors_spec_compliant();
+        let tax_75 = compute_continuous_storage_tax(750_000, 1_000_000, &config);
+        let tax_100 = compute_continuous_storage_tax(1_000_000, 1_000_000, &config);
+        assert!(tax_100 > tax_75);
     }
 
     #[test]

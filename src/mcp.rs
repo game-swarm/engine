@@ -20,7 +20,7 @@ use crate::command::{
 };
 use crate::components::*;
 use crate::economy::*;
-use crate::hot_cache::{SnapshotKey, read_through_dragonfly};
+use crate::hot_cache::{SnapshotKey, read_through_snapshot_cache};
 use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use crate::tick::{TickTrace, tick_key};
 use crate::visibility::{
@@ -375,7 +375,7 @@ pub struct DeployStatusResult {
     pub status: String,
     pub errors: Vec<String>,
     pub deployed_at: String,
-    pub tikv_version_counter: u64,
+    pub redb_version_counter: u64,
     pub object_store_key: String,
     pub module_hash: String,
     pub load_after_tick: Tick,
@@ -395,7 +395,7 @@ pub struct DeploymentInfo {
     pub player_id: PlayerId,
     pub status: String,
     pub at: String,
-    pub tikv_version_counter: u64,
+    pub redb_version_counter: u64,
     pub object_store_key: String,
     pub hash: String,
     pub language: String,
@@ -2331,7 +2331,7 @@ fn deploy_status_for_module(module: &StoredModule) -> DeployStatusResult {
         status: "pending_next_tick".to_string(),
         errors: Vec::new(),
         deployed_at: module.deployed_at.clone(),
-        tikv_version_counter: module.load_after_tick,
+        redb_version_counter: module.load_after_tick,
         object_store_key: module_object_store_key(module),
         module_hash: module.wasm_hash.clone(),
         load_after_tick: module.load_after_tick,
@@ -2346,7 +2346,7 @@ fn deployment_info_for_module(module: &StoredModule) -> DeploymentInfo {
         player_id: module.player_id,
         status: "pending_next_tick".to_string(),
         at: module.deployed_at.clone(),
-        tikv_version_counter: module.load_after_tick,
+        redb_version_counter: module.load_after_tick,
         object_store_key: module_object_store_key(module),
         hash: module.wasm_hash.clone(),
         language: module.language.clone(),
@@ -3329,16 +3329,16 @@ pub fn swarm_get_snapshot(world: &mut SwarmWorld, context: McpContext) -> Visibl
     world
         .app
         .world_mut()
-        .resource_mut::<crate::tikv::TiKVStore>()
+        .resource_mut::<crate::redb_store::RedbStore>()
         .write_visible_snapshot(snapshot.clone());
 
     world
         .app
         .world_mut()
         .resource_scope(
-            |ecs, mut cache: Mut<'_, crate::dragonfly::DragonflyCache>| {
-                let store = ecs.resource::<crate::tikv::TiKVStore>();
-                read_through_dragonfly(&mut *cache, key, store)
+            |ecs, mut cache: Mut<'_, crate::hot_cache::InMemorySnapshotCache>| {
+                let store = ecs.resource::<crate::redb_store::RedbStore>();
+                read_through_snapshot_cache(&mut *cache, key, store)
             },
         )
         .unwrap_or(snapshot)
@@ -3876,7 +3876,7 @@ pub struct ReplayResult {
     pub to_tick: Tick,
     pub tick_count: u32,
     pub commands: Vec<crate::command::RawCommand>,
-    pub entity_changes: Vec<crate::replay_storage::EntityChange>,
+    pub entity_changes: Vec<crate::tick::EntityChange>,
     pub message: String,
 }
 
@@ -3885,7 +3885,7 @@ pub fn swarm_get_replay(
     _context: McpContext,
     params: GetReplayParams,
 ) -> Result<ReplayResult, McpError> {
-    use crate::replay_storage::ReplayStore;
+    use crate::tick::ReplayStore;
 
     let store = world
         .app
@@ -3908,7 +3908,7 @@ pub fn swarm_get_replay(
     // Collect deltas from keyframe+1 to to_tick
     let deltas = store.deltas_in_range(keyframe_tick, params.to_tick);
 
-    let mut entity_changes: Vec<crate::replay_storage::EntityChange> = Vec::new();
+    let mut entity_changes: Vec<crate::tick::EntityChange> = Vec::new();
     let commands: Vec<crate::command::RawCommand> = Vec::new();
 
     for delta in &deltas {
@@ -4307,7 +4307,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_get_snapshot_uses_dragonfly_cache_after_tikv_backfill() {
+    fn swarm_get_snapshot_uses_snapshot_cache_after_redb_backfill() {
         let mut world = create_world();
         world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         let context = McpContext {
@@ -4319,7 +4319,7 @@ mod tests {
         let stats = world
             .app
             .world()
-            .resource::<crate::dragonfly::DragonflyCache>()
+            .resource::<crate::hot_cache::InMemorySnapshotCache>()
             .stats();
         assert_eq!(stats.misses, 1);
         assert_eq!(stats.refreshes, 1);
@@ -4328,7 +4328,7 @@ mod tests {
         let stats = world
             .app
             .world()
-            .resource::<crate::dragonfly::DragonflyCache>()
+            .resource::<crate::hot_cache::InMemorySnapshotCache>()
             .stats();
         assert_eq!(second, first);
         assert_eq!(stats.hits, 1);

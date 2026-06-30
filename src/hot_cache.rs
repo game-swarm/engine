@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::command::Tick;
 use crate::components::PlayerId;
@@ -36,31 +37,64 @@ impl CachedSnapshot {
     }
 }
 
-pub trait TiKVSnapshotStore {
+pub trait RedbSnapshotStore {
     fn get_snapshot(&self, key: SnapshotKey) -> Option<CachedSnapshot>;
     fn put_snapshot(&mut self, key: SnapshotKey, snapshot: CachedSnapshot);
 }
 
-pub trait DragonflySnapshotCache {
+pub trait SnapshotCache {
     fn get_snapshot(&mut self, key: SnapshotKey) -> Option<CachedSnapshot>;
     fn put_snapshot(&mut self, key: SnapshotKey, snapshot: CachedSnapshot);
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct DragonflyStats {
+pub struct SnapshotCacheStats {
     pub hits: u64,
     pub misses: u64,
     pub refreshes: u64,
 }
 
-pub fn read_through_dragonfly<C, S>(
+#[derive(bevy::prelude::Resource, Debug, Clone, Default)]
+pub struct InMemorySnapshotCache {
+    snapshots: BTreeMap<SnapshotKey, CachedSnapshot>,
+    stats: SnapshotCacheStats,
+}
+
+impl InMemorySnapshotCache {
+    pub fn in_process() -> Self {
+        Self::default()
+    }
+
+    pub fn stats(&self) -> SnapshotCacheStats {
+        self.stats
+    }
+}
+
+impl SnapshotCache for InMemorySnapshotCache {
+    fn get_snapshot(&mut self, key: SnapshotKey) -> Option<CachedSnapshot> {
+        let snapshot = self.snapshots.get(&key).cloned();
+        if snapshot.is_some() {
+            self.stats.hits += 1;
+        } else {
+            self.stats.misses += 1;
+        }
+        snapshot
+    }
+
+    fn put_snapshot(&mut self, key: SnapshotKey, snapshot: CachedSnapshot) {
+        self.snapshots.insert(key, snapshot);
+        self.stats.refreshes += 1;
+    }
+}
+
+pub fn read_through_snapshot_cache<C, S>(
     cache: &mut C,
     key: SnapshotKey,
     store: &S,
 ) -> Option<VisibleWorldSnapshot>
 where
-    C: DragonflySnapshotCache,
-    S: TiKVSnapshotStore,
+    C: SnapshotCache,
+    S: RedbSnapshotStore,
 {
     let authoritative = store.get_snapshot(key)?;
     if let Some(cached) = cache.get_snapshot(key) {
@@ -81,9 +115,9 @@ fn snapshot_fingerprint(snapshot: &VisibleWorldSnapshot) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dragonfly::DragonflyCache;
+    use crate::hot_cache::InMemorySnapshotCache;
     use crate::mcp::VisibleWorldSnapshot;
-    use crate::tikv::TiKVStore;
+    use crate::redb_store::RedbStore;
 
     fn snapshot(tick: Tick, player_id: PlayerId, room_id: u32) -> VisibleWorldSnapshot {
         VisibleWorldSnapshot {
@@ -100,15 +134,15 @@ mod tests {
     }
 
     #[test]
-    fn dragonfly_hit_returns_cached_snapshot_when_consistent() {
+    fn snapshot_cache_hit_returns_cached_snapshot_when_consistent() {
         let key = SnapshotKey::new(1, 7);
         let authoritative = CachedSnapshot::new(snapshot(7, 1, 0));
-        let mut store = TiKVStore::unavailable("test degraded mode");
+        let mut store = RedbStore::unavailable("test degraded mode");
         store.put_snapshot(key, authoritative.clone());
-        let mut cache = DragonflyCache::in_process();
+        let mut cache = InMemorySnapshotCache::in_process();
         cache.put_snapshot(key, authoritative.clone());
 
-        let result = read_through_dragonfly(&mut cache, key, &store).unwrap();
+        let result = read_through_snapshot_cache(&mut cache, key, &store).unwrap();
 
         assert_eq!(result, authoritative.snapshot);
         assert_eq!(cache.stats().hits, 1);
@@ -117,14 +151,14 @@ mod tests {
     }
 
     #[test]
-    fn dragonfly_miss_reads_tikv_and_backfills_cache() {
+    fn snapshot_cache_miss_reads_redb_and_backfills_cache() {
         let key = SnapshotKey::new(1, 7);
         let authoritative = CachedSnapshot::new(snapshot(7, 1, 0));
-        let mut store = TiKVStore::unavailable("test degraded mode");
+        let mut store = RedbStore::unavailable("test degraded mode");
         store.put_snapshot(key, authoritative.clone());
-        let mut cache = DragonflyCache::in_process();
+        let mut cache = InMemorySnapshotCache::in_process();
 
-        let result = read_through_dragonfly(&mut cache, key, &store).unwrap();
+        let result = read_through_snapshot_cache(&mut cache, key, &store).unwrap();
 
         assert_eq!(result, authoritative.snapshot);
         assert_eq!(cache.stats().misses, 1);
@@ -133,16 +167,16 @@ mod tests {
     }
 
     #[test]
-    fn dragonfly_stale_or_inconsistent_entry_is_replaced_by_tikv() {
+    fn snapshot_cache_stale_or_inconsistent_entry_is_replaced_by_redb() {
         let key = SnapshotKey::new(1, 7);
         let authoritative = CachedSnapshot::new(snapshot(7, 1, 0));
         let stale = CachedSnapshot::new(snapshot(7, 1, 99));
-        let mut store = TiKVStore::unavailable("test degraded mode");
+        let mut store = RedbStore::unavailable("test degraded mode");
         store.put_snapshot(key, authoritative.clone());
-        let mut cache = DragonflyCache::in_process();
+        let mut cache = InMemorySnapshotCache::in_process();
         cache.put_snapshot(key, stale);
 
-        let result = read_through_dragonfly(&mut cache, key, &store).unwrap();
+        let result = read_through_snapshot_cache(&mut cache, key, &store).unwrap();
 
         assert_eq!(result, authoritative.snapshot);
         assert_eq!(cache.stats().hits, 1);

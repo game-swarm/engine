@@ -7,12 +7,11 @@ mod tests {
     use swarm_engine::command::Tick;
     use swarm_engine::components::PlayerId;
     use swarm_engine::resource_ledger::{
-        ResourceLedger, ResourceOperation, compute_fee, compute_tiered_storage_tax,
+        ResourceLedger, ResourceOperation, compute_continuous_storage_tax, compute_fee,
         execute_global_deposit, execute_global_withdraw, execute_storage_tax,
     };
     use swarm_engine::resources::{
-        GlobalStorageConfig, GlobalStorageTaxTier, PendingGlobalTransfers, PlayerGlobalStorage,
-        PlayerLocalStorage,
+        GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
     };
 
     fn default_global_config() -> GlobalStorageConfig {
@@ -26,24 +25,7 @@ mod tests {
             transfer_from_global_fee_per_10_000: 100, // 1.0%
             transfer_to_global_ticks: 0,              // instant
             transfer_from_global_ticks: 0,            // instant
-            tax_tiers: vec![
-                GlobalStorageTaxTier {
-                    up_to_percent: 30,
-                    rate_per_10_000: 0,
-                },
-                GlobalStorageTaxTier {
-                    up_to_percent: 60,
-                    rate_per_10_000: 1,
-                },
-                GlobalStorageTaxTier {
-                    up_to_percent: 85,
-                    rate_per_10_000: 5,
-                },
-                GlobalStorageTaxTier {
-                    up_to_percent: 100,
-                    rate_per_10_000: 20,
-                },
-            ],
+            ..Default::default()
         }
     }
 
@@ -52,16 +34,16 @@ mod tests {
     #[test]
     fn storage_tax_zero_below_30_percent_utilization() {
         let config = default_global_config();
-        let tax = compute_tiered_storage_tax(250_000, config.capacity, &config.tax_tiers);
+        let tax = compute_continuous_storage_tax(250_000, config.capacity, &config);
         assert_eq!(tax, 0, "storage under 30% should be tax-free");
     }
 
     #[test]
     fn storage_tax_increases_with_utilization() {
         let config = default_global_config();
-        let tax_50 = compute_tiered_storage_tax(500_000, config.capacity, &config.tax_tiers);
-        let tax_80 = compute_tiered_storage_tax(800_000, config.capacity, &config.tax_tiers);
-        assert!(tax_80 > tax_50, "tax should be progressive");
+        let tax_75 = compute_continuous_storage_tax(750_000, config.capacity, &config);
+        let tax_100 = compute_continuous_storage_tax(1_000_000, config.capacity, &config);
+        assert!(tax_100 > tax_75, "tax should be progressive");
     }
 
     #[test]
@@ -74,7 +56,7 @@ mod tests {
             .or_default()
             .insert("energy".to_string(), 1_000_000);
 
-        let result = execute_storage_tax(&mut storage, 1, config.capacity, &config.tax_tiers);
+        let result = execute_storage_tax(&mut storage, 1, &config);
         assert!(result.success);
         assert!(result.amount_delivered > 0, "full storage should incur tax");
         let remaining: u32 = storage.0[&1].values().copied().sum();

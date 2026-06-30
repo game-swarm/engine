@@ -77,13 +77,13 @@ pub struct GlobalStorageConfig {
     pub transfer_from_global_ticks: Tick,
     pub transfer_to_global_fee_per_10_000: u32,
     pub transfer_from_global_fee_per_10_000: u32,
-    pub tax_tiers: Vec<GlobalStorageTaxTier>,
+    pub tax_anchors: [StorageTaxAnchor; 4],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GlobalStorageTaxTier {
-    pub up_to_percent: u32,
-    pub rate_per_10_000: u32,
+pub struct StorageTaxAnchor {
+    pub utilization_ppm: u32,
+    pub marginal_rate_bp: u32,
 }
 
 #[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,22 +152,22 @@ impl Default for GlobalStorageConfig {
             transfer_from_global_ticks: TRANSFER_FROM_GLOBAL_TICKS,
             transfer_to_global_fee_per_10_000: TRANSFER_TO_GLOBAL_FEE_PER_10_000,
             transfer_from_global_fee_per_10_000: TRANSFER_FROM_GLOBAL_FEE_PER_10_000,
-            tax_tiers: vec![
-                GlobalStorageTaxTier {
-                    up_to_percent: 30,
-                    rate_per_10_000: 0,
+            tax_anchors: [
+                StorageTaxAnchor {
+                    utilization_ppm: 300_000,
+                    marginal_rate_bp: 0,
                 },
-                GlobalStorageTaxTier {
-                    up_to_percent: 60,
-                    rate_per_10_000: 1,
+                StorageTaxAnchor {
+                    utilization_ppm: 600_000,
+                    marginal_rate_bp: 1,
                 },
-                GlobalStorageTaxTier {
-                    up_to_percent: 85,
-                    rate_per_10_000: 5,
+                StorageTaxAnchor {
+                    utilization_ppm: 850_000,
+                    marginal_rate_bp: 5,
                 },
-                GlobalStorageTaxTier {
-                    up_to_percent: 100,
-                    rate_per_10_000: 20,
+                StorageTaxAnchor {
+                    utilization_ppm: 1_000_000,
+                    marginal_rate_bp: 20,
                 },
             ],
         }

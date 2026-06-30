@@ -5,14 +5,14 @@ use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::command::Tick;
-use crate::hot_cache::{CachedSnapshot, SnapshotKey, TiKVSnapshotStore};
+use crate::hot_cache::{CachedSnapshot, SnapshotKey, RedbSnapshotStore};
 use crate::mcp::VisibleWorldSnapshot;
 use crate::tick::{AtomicTickStore, CommitError, TickState};
 
 const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TiKVError {
+pub enum RedbError {
     Unavailable(String),
     Encode(String),
     Decode(String),
@@ -21,22 +21,22 @@ pub enum TiKVError {
     NotFound(String),
 }
 
-impl std::fmt::Display for TiKVError {
+impl std::fmt::Display for RedbError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unavailable(message) => write!(formatter, "tikv unavailable: {message}"),
-            Self::Encode(message) => write!(formatter, "tikv encode failed: {message}"),
-            Self::Decode(message) => write!(formatter, "tikv decode failed: {message}"),
-            Self::Commit(message) => write!(formatter, "tikv commit failed: {message}"),
+            Self::Unavailable(message) => write!(formatter, "redb unavailable: {message}"),
+            Self::Encode(message) => write!(formatter, "redb encode failed: {message}"),
+            Self::Decode(message) => write!(formatter, "redb decode failed: {message}"),
+            Self::Commit(message) => write!(formatter, "redb commit failed: {message}"),
             Self::Integrity(message) => {
-                write!(formatter, "tikv integrity check failed: {message}")
+                write!(formatter, "redb integrity check failed: {message}")
             }
-            Self::NotFound(message) => write!(formatter, "tikv row not found: {message}"),
+            Self::NotFound(message) => write!(formatter, "redb row not found: {message}"),
         }
     }
 }
 
-impl std::error::Error for TiKVError {}
+impl std::error::Error for RedbError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UploadStatus {
@@ -115,43 +115,43 @@ pub struct RecoveryPoint {
 }
 
 #[derive(Resource, Debug)]
-pub struct TiKVStore {
+pub struct RedbStore {
     pub db: Option<Database>,
     pub snapshots: BTreeMap<SnapshotKey, CachedSnapshot>,
-    backend: TiKVBackend,
+    backend: RedbBackend,
 }
 
 #[derive(Debug)]
-pub enum TiKVBackend {
+pub enum RedbBackend {
     Unavailable(String),
-    InMemory(InMemoryTiKV),
+    InMemory(InMemoryRedb),
 }
 
-impl Default for TiKVStore {
+impl Default for RedbStore {
     fn default() -> Self {
         Self::unavailable("not connected")
     }
 }
 
-impl TiKVStore {
-    pub fn open(path: &str) -> Result<Self, TiKVError> {
+impl RedbStore {
+    pub fn open(path: &str) -> Result<Self, RedbError> {
         let db =
-            Database::create(path).map_err(|error| TiKVError::Unavailable(error.to_string()))?;
+            Database::create(path).map_err(|error| RedbError::Unavailable(error.to_string()))?;
         {
             let txn = db
                 .begin_write()
-                .map_err(|error| TiKVError::Unavailable(error.to_string()))?;
+                .map_err(|error| RedbError::Unavailable(error.to_string()))?;
             {
                 txn.open_table(KV_TABLE)
-                    .map_err(|error| TiKVError::Unavailable(error.to_string()))?;
+                    .map_err(|error| RedbError::Unavailable(error.to_string()))?;
             }
             txn.commit()
-                .map_err(|error| TiKVError::Unavailable(error.to_string()))?;
+                .map_err(|error| RedbError::Unavailable(error.to_string()))?;
         }
         Ok(Self {
             db: Some(db),
             snapshots: BTreeMap::new(),
-            backend: TiKVBackend::Unavailable("redb database connected".to_string()),
+            backend: RedbBackend::Unavailable("redb database connected".to_string()),
         })
     }
 
@@ -159,7 +159,7 @@ impl TiKVStore {
         Self {
             db: None,
             snapshots: BTreeMap::new(),
-            backend: TiKVBackend::Unavailable(reason.into()),
+            backend: RedbBackend::Unavailable(reason.into()),
         }
     }
 
@@ -168,7 +168,7 @@ impl TiKVStore {
         Self {
             db: None,
             snapshots: BTreeMap::new(),
-            backend: TiKVBackend::InMemory(InMemoryTiKV::default()),
+            backend: RedbBackend::InMemory(InMemoryRedb::default()),
         }
     }
 
@@ -177,7 +177,7 @@ impl TiKVStore {
         Self {
             db: None,
             snapshots: BTreeMap::new(),
-            backend: TiKVBackend::InMemory(InMemoryTiKV {
+            backend: RedbBackend::InMemory(InMemoryRedb {
                 fail_next_commit: true,
                 ..Default::default()
             }),
@@ -189,8 +189,8 @@ impl TiKVStore {
             true
         } else {
             match self.backend {
-                TiKVBackend::Unavailable(_) => false,
-                TiKVBackend::InMemory(_) => true,
+                RedbBackend::Unavailable(_) => false,
+                RedbBackend::InMemory(_) => true,
             }
         }
     }
@@ -200,8 +200,8 @@ impl TiKVStore {
             None
         } else {
             match &self.backend {
-                TiKVBackend::Unavailable(reason) => Some(reason),
-                TiKVBackend::InMemory(_) => None,
+                RedbBackend::Unavailable(reason) => Some(reason),
+                RedbBackend::InMemory(_) => None,
             }
         }
     }
@@ -213,20 +213,20 @@ impl TiKVStore {
         cached
     }
 
-    pub fn commit_tick_writes(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), TiKVError> {
+    pub fn commit_tick_writes(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), RedbError> {
         if let Some(db) = &self.db {
             return commit_writes(db, writes);
         }
         match &mut self.backend {
-            TiKVBackend::Unavailable(reason) => Err(TiKVError::Unavailable(reason.clone())),
-            TiKVBackend::InMemory(backend) => backend.commit(writes),
+            RedbBackend::Unavailable(reason) => Err(RedbError::Unavailable(reason.clone())),
+            RedbBackend::InMemory(backend) => backend.commit(writes),
         }
     }
 
     pub fn commit_tick_payload(
         &mut self,
         payload: TickCommitPayload,
-    ) -> Result<RecoveryPoint, TiKVError> {
+    ) -> Result<RecoveryPoint, RedbError> {
         let previous_chain_hash = self
             .read_hash_chain(payload.tick.saturating_sub(1))?
             .map(|row| row.chain_hash)
@@ -285,7 +285,7 @@ impl TiKVStore {
         })
     }
 
-    pub fn write_snapshot(&mut self, row: SnapshotRow) -> Result<(), TiKVError> {
+    pub fn write_snapshot(&mut self, row: SnapshotRow) -> Result<(), RedbError> {
         verify_snapshot_row(&row)?;
         self.commit_tick_writes(vec![(
             snapshot_state_key(row.tick),
@@ -293,27 +293,27 @@ impl TiKVStore {
         )])
     }
 
-    pub fn read_verified_snapshot(&self, tick: Tick) -> Result<SnapshotRow, TiKVError> {
+    pub fn read_verified_snapshot(&self, tick: Tick) -> Result<SnapshotRow, RedbError> {
         let row: SnapshotRow = self
             .read_json(&snapshot_state_key(tick))?
-            .ok_or_else(|| TiKVError::NotFound(format!("snapshot tick {tick}")))?;
+            .ok_or_else(|| RedbError::NotFound(format!("snapshot tick {tick}")))?;
         verify_snapshot_row(&row)?;
         Ok(row)
     }
 
-    pub fn verify_tick(&self, tick: Tick) -> Result<RecoveryPoint, TiKVError> {
+    pub fn verify_tick(&self, tick: Tick) -> Result<RecoveryPoint, RedbError> {
         let head = self
             .read_tick_head(tick)?
-            .ok_or_else(|| TiKVError::NotFound(format!("tick_head {tick}")))?;
+            .ok_or_else(|| RedbError::NotFound(format!("tick_head {tick}")))?;
         let manifest = self
             .read_tick_manifest(tick)?
-            .ok_or_else(|| TiKVError::NotFound(format!("tick_manifest {tick}")))?;
+            .ok_or_else(|| RedbError::NotFound(format!("tick_manifest {tick}")))?;
         let chain = self
             .read_hash_chain(tick)?
-            .ok_or_else(|| TiKVError::NotFound(format!("tick_hash_chain {tick}")))?;
+            .ok_or_else(|| RedbError::NotFound(format!("tick_hash_chain {tick}")))?;
 
         if head.tick != tick || manifest.tick != tick || chain.tick != tick {
-            return Err(TiKVError::Integrity(format!(
+            return Err(RedbError::Integrity(format!(
                 "tick row mismatch for {tick}"
             )));
         }
@@ -324,7 +324,7 @@ impl TiKVStore {
             head.terminal_state,
         );
         if head.tick_head_hash != expected_head_hash {
-            return Err(TiKVError::Integrity(format!(
+            return Err(RedbError::Integrity(format!(
                 "tick_head hash mismatch at tick {tick}"
             )));
         }
@@ -333,13 +333,13 @@ impl TiKVStore {
             .map(|row| row.chain_hash)
             .unwrap_or([0; 32]);
         if chain.previous_chain_hash != expected_previous {
-            return Err(TiKVError::Integrity(format!(
+            return Err(RedbError::Integrity(format!(
                 "hash chain previous mismatch at tick {tick}"
             )));
         }
         let expected_chain_hash = chain_hash(chain.previous_chain_hash, head.tick_head_hash);
         if chain.chain_hash != expected_chain_hash {
-            return Err(TiKVError::Integrity(format!(
+            return Err(RedbError::Integrity(format!(
                 "hash chain mismatch at tick {tick}"
             )));
         }
@@ -353,13 +353,13 @@ impl TiKVStore {
         })
     }
 
-    pub fn recover_latest(&self) -> Result<Option<RecoveryPoint>, TiKVError> {
+    pub fn recover_latest(&self) -> Result<Option<RecoveryPoint>, RedbError> {
         let mut latest = None;
         for tick in self.committed_ticks()? {
             let mut point = self.verify_tick(tick)?;
             if let Ok(snapshot) = self.read_verified_snapshot(tick) {
                 if snapshot.state_checksum != point.head.state_checksum {
-                    return Err(TiKVError::Integrity(format!(
+                    return Err(RedbError::Integrity(format!(
                         "snapshot checksum does not match tick_head at tick {tick}"
                     )));
                 }
@@ -370,45 +370,45 @@ impl TiKVStore {
         Ok(latest)
     }
 
-    pub fn read_tick_head(&self, tick: Tick) -> Result<Option<TickHeadRow>, TiKVError> {
+    pub fn read_tick_head(&self, tick: Tick) -> Result<Option<TickHeadRow>, RedbError> {
         self.read_json(&tick_head_key(tick))
     }
 
-    pub fn read_tick_manifest(&self, tick: Tick) -> Result<Option<TickManifestRow>, TiKVError> {
+    pub fn read_tick_manifest(&self, tick: Tick) -> Result<Option<TickManifestRow>, RedbError> {
         self.read_json(&tick_manifest_key(tick))
     }
 
-    pub fn read_hash_chain(&self, tick: Tick) -> Result<Option<TickHashChainRow>, TiKVError> {
+    pub fn read_hash_chain(&self, tick: Tick) -> Result<Option<TickHashChainRow>, RedbError> {
         self.read_json(&tick_hash_chain_key(tick))
     }
 
-    fn read_json<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>, TiKVError> {
+    fn read_json<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>, RedbError> {
         self.read_key(key)?
             .map(|value| decode(&value, std::str::from_utf8(key).unwrap_or("key")))
             .transpose()
     }
 
-    fn read_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, TiKVError> {
+    fn read_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, RedbError> {
         if let Some(db) = &self.db {
             return read_key(db, key);
         }
         match &self.backend {
-            TiKVBackend::Unavailable(reason) => {
-                Err(TiKVError::Unavailable(format!("{reason}; cannot read key")))
+            RedbBackend::Unavailable(reason) => {
+                Err(RedbError::Unavailable(format!("{reason}; cannot read key")))
             }
-            TiKVBackend::InMemory(backend) => Ok(backend.data.get(key).cloned()),
+            RedbBackend::InMemory(backend) => Ok(backend.data.get(key).cloned()),
         }
     }
 
-    fn committed_ticks(&self) -> Result<Vec<Tick>, TiKVError> {
+    fn committed_ticks(&self) -> Result<Vec<Tick>, RedbError> {
         if let Some(db) = &self.db {
             return committed_ticks(db);
         }
         match &self.backend {
-            TiKVBackend::Unavailable(reason) => Err(TiKVError::Unavailable(format!(
+            RedbBackend::Unavailable(reason) => Err(RedbError::Unavailable(format!(
                 "{reason}; cannot scan ticks"
             ))),
-            TiKVBackend::InMemory(backend) => {
+            RedbBackend::InMemory(backend) => {
                 let mut ticks = backend
                     .data
                     .keys()
@@ -421,7 +421,7 @@ impl TiKVStore {
     }
 }
 
-impl TiKVSnapshotStore for TiKVStore {
+impl RedbSnapshotStore for RedbStore {
     fn get_snapshot(&self, key: SnapshotKey) -> Option<CachedSnapshot> {
         self.snapshots.get(&key).cloned()
     }
@@ -433,18 +433,18 @@ impl TiKVSnapshotStore for TiKVStore {
             match serde_json::to_vec(&snapshot) {
                 Ok(value) => {
                     if let Err(error) = self.commit_tick_writes(vec![(key_bytes, value)]) {
-                        eprintln!("tikv snapshot write failed key={key:?} error={error}");
+                        eprintln!("redb snapshot write failed key={key:?} error={error}");
                     }
                 }
                 Err(error) => {
-                    eprintln!("tikv snapshot encode failed key={key:?} error={error}")
+                    eprintln!("redb snapshot encode failed key={key:?} error={error}")
                 }
             }
         }
     }
 }
 
-impl AtomicTickStore for TiKVStore {
+impl AtomicTickStore for RedbStore {
     fn atomic_commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), CommitError> {
         self.commit_tick_writes(writes)
             .map_err(|error| CommitError::Failed(error.to_string()))
@@ -452,16 +452,16 @@ impl AtomicTickStore for TiKVStore {
 }
 
 #[derive(Debug, Default)]
-pub struct InMemoryTiKV {
+pub struct InMemoryRedb {
     data: BTreeMap<Vec<u8>, Vec<u8>>,
     fail_next_commit: bool,
 }
 
-impl InMemoryTiKV {
-    fn commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), TiKVError> {
+impl InMemoryRedb {
+    fn commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), RedbError> {
         if self.fail_next_commit {
             self.fail_next_commit = false;
-            return Err(TiKVError::Commit("in-memory commit failed".to_string()));
+            return Err(RedbError::Commit("in-memory commit failed".to_string()));
         }
         let mut next = self.data.clone();
         for (key, value) in writes {
@@ -472,12 +472,12 @@ impl InMemoryTiKV {
     }
 }
 
-fn encode<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, TiKVError> {
-    serde_json::to_vec(value).map_err(|error| TiKVError::Encode(format!("{label}: {error}")))
+fn encode<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, RedbError> {
+    serde_json::to_vec(value).map_err(|error| RedbError::Encode(format!("{label}: {error}")))
 }
 
-fn decode<T: DeserializeOwned>(value: &[u8], label: &str) -> Result<T, TiKVError> {
-    serde_json::from_slice(value).map_err(|error| TiKVError::Decode(format!("{label}: {error}")))
+fn decode<T: DeserializeOwned>(value: &[u8], label: &str) -> Result<T, RedbError> {
+    serde_json::from_slice(value).map_err(|error| RedbError::Decode(format!("{label}: {error}")))
 }
 
 fn visible_snapshot_key(key: SnapshotKey) -> Vec<u8> {
@@ -531,18 +531,18 @@ fn chain_hash(previous: [u8; 32], tick_head_hash: [u8; 32]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn snapshot_content_hash(state: &TickState) -> Result<[u8; 32], TiKVError> {
+fn snapshot_content_hash(state: &TickState) -> Result<[u8; 32], RedbError> {
     let value = serde_json::to_value(state)
-        .map_err(|error| TiKVError::Encode(format!("snapshot state: {error}")))?;
+        .map_err(|error| RedbError::Encode(format!("snapshot state: {error}")))?;
     let bytes = serde_json::to_vec(&value)
-        .map_err(|error| TiKVError::Encode(format!("snapshot state: {error}")))?;
+        .map_err(|error| RedbError::Encode(format!("snapshot state: {error}")))?;
     Ok(content_hash(&bytes))
 }
 
-fn verify_snapshot_row(row: &SnapshotRow) -> Result<(), TiKVError> {
+fn verify_snapshot_row(row: &SnapshotRow) -> Result<(), RedbError> {
     let expected = snapshot_content_hash(&row.state)?;
     if row.content_hash != expected {
-        return Err(TiKVError::Integrity(format!(
+        return Err(RedbError::Integrity(format!(
             "snapshot content hash mismatch at tick {}",
             row.tick
         )));
@@ -550,50 +550,50 @@ fn verify_snapshot_row(row: &SnapshotRow) -> Result<(), TiKVError> {
     Ok(())
 }
 
-fn commit_writes(db: &Database, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), TiKVError> {
+fn commit_writes(db: &Database, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), RedbError> {
     let txn = db
         .begin_write()
-        .map_err(|error| TiKVError::Commit(error.to_string()))?;
+        .map_err(|error| RedbError::Commit(error.to_string()))?;
     {
         let mut table = txn
             .open_table(KV_TABLE)
-            .map_err(|error| TiKVError::Commit(error.to_string()))?;
+            .map_err(|error| RedbError::Commit(error.to_string()))?;
         for (key, value) in writes {
             table
                 .insert(key.as_slice(), value.as_slice())
-                .map_err(|error| TiKVError::Commit(error.to_string()))?;
+                .map_err(|error| RedbError::Commit(error.to_string()))?;
         }
     }
     txn.commit()
-        .map_err(|error| TiKVError::Commit(error.to_string()))
+        .map_err(|error| RedbError::Commit(error.to_string()))
 }
 
-fn read_key(db: &Database, key: &[u8]) -> Result<Option<Vec<u8>>, TiKVError> {
+fn read_key(db: &Database, key: &[u8]) -> Result<Option<Vec<u8>>, RedbError> {
     let txn = db
         .begin_read()
-        .map_err(|error| TiKVError::Commit(error.to_string()))?;
+        .map_err(|error| RedbError::Commit(error.to_string()))?;
     let table = txn
         .open_table(KV_TABLE)
-        .map_err(|error| TiKVError::Commit(error.to_string()))?;
+        .map_err(|error| RedbError::Commit(error.to_string()))?;
     table
         .get(key)
         .map(|value| value.map(|bytes| bytes.value().to_vec()))
-        .map_err(|error| TiKVError::Commit(error.to_string()))
+        .map_err(|error| RedbError::Commit(error.to_string()))
 }
 
-fn committed_ticks(db: &Database) -> Result<Vec<Tick>, TiKVError> {
+fn committed_ticks(db: &Database) -> Result<Vec<Tick>, RedbError> {
     let txn = db
         .begin_read()
-        .map_err(|error| TiKVError::Commit(error.to_string()))?;
+        .map_err(|error| RedbError::Commit(error.to_string()))?;
     let table = txn
         .open_table(KV_TABLE)
-        .map_err(|error| TiKVError::Commit(error.to_string()))?;
+        .map_err(|error| RedbError::Commit(error.to_string()))?;
     let mut ticks = Vec::new();
     for entry in table
         .iter()
-        .map_err(|error| TiKVError::Commit(error.to_string()))?
+        .map_err(|error| RedbError::Commit(error.to_string()))?
     {
-        let (key, _) = entry.map_err(|error| TiKVError::Commit(error.to_string()))?;
+        let (key, _) = entry.map_err(|error| RedbError::Commit(error.to_string()))?;
         if let Some(tick) = parse_tick_head_key(key.value()) {
             ticks.push(tick);
         }
@@ -655,9 +655,9 @@ mod tests {
 
     #[test]
     fn open_reports_database_errors() {
-        let error = TiKVStore::open("/tmp").unwrap_err();
+        let error = RedbStore::open("/tmp").unwrap_err();
 
-        assert!(error.to_string().contains("tikv unavailable"));
+        assert!(error.to_string().contains("redb unavailable"));
     }
 
     #[test]
@@ -665,7 +665,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("swarm.redb");
         let path = path.to_str().unwrap();
-        let mut store = TiKVStore::open(path).unwrap();
+        let mut store = RedbStore::open(path).unwrap();
 
         let point = store.commit_tick_payload(payload(1, 42)).unwrap();
 
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn degraded_store_keeps_visible_snapshots_available_in_process() {
-        let mut store = TiKVStore::unavailable("test degraded mode");
+        let mut store = RedbStore::unavailable("test degraded mode");
         let key = SnapshotKey::new(1, 7);
         let cached = store.write_visible_snapshot(visible_snapshot(7, 1, 0));
 
@@ -686,19 +686,19 @@ mod tests {
 
     #[test]
     fn degraded_atomic_commit_reports_unavailable_without_partial_success() {
-        let mut store = TiKVStore::unavailable("test degraded mode");
+        let mut store = RedbStore::unavailable("test degraded mode");
 
         let error = store
             .atomic_commit(vec![(b"/tick/1/state".to_vec(), b"{}".to_vec())])
             .unwrap_err();
 
         let CommitError::Failed(message) = error;
-        assert!(message.contains("tikv unavailable"));
+        assert!(message.contains("redb unavailable"));
     }
 
     #[test]
     fn tick_payload_commit_writes_head_manifest_and_hash_chain_atomically() {
-        let mut store = TiKVStore::in_memory();
+        let mut store = RedbStore::in_memory();
 
         let point = store.commit_tick_payload(payload(1, 42)).unwrap();
 
@@ -711,11 +711,11 @@ mod tests {
 
     #[test]
     fn failed_tick_payload_commit_rolls_back_every_row() {
-        let mut store = TiKVStore::in_memory_failing_commit();
+        let mut store = RedbStore::in_memory_failing_commit();
 
         let error = store.commit_tick_payload(payload(2, 44)).unwrap_err();
 
-        assert!(matches!(error, TiKVError::Commit(_)));
+        assert!(matches!(error, RedbError::Commit(_)));
         assert!(store.read_tick_head(2).unwrap().is_none());
         assert!(store.read_tick_manifest(2).unwrap().is_none());
         assert!(store.read_hash_chain(2).unwrap().is_none());
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn hash_chain_continuity_links_to_previous_tick() {
-        let mut store = TiKVStore::in_memory();
+        let mut store = RedbStore::in_memory();
         let first = store.commit_tick_payload(payload(1, 11)).unwrap();
         let second = store.commit_tick_payload(payload(2, 22)).unwrap();
 
@@ -734,18 +734,18 @@ mod tests {
 
     #[test]
     fn snapshot_read_rejects_content_hash_mismatch() {
-        let mut store = TiKVStore::in_memory();
+        let mut store = RedbStore::in_memory();
         let mut row = snapshot_row(5, 55);
         row.content_hash = [9; 32];
 
         let error = store.write_snapshot(row).unwrap_err();
 
-        assert!(matches!(error, TiKVError::Integrity(_)));
+        assert!(matches!(error, RedbError::Integrity(_)));
     }
 
     #[test]
     fn recovery_uses_latest_verified_tick_and_snapshot() {
-        let mut store = TiKVStore::in_memory();
+        let mut store = RedbStore::in_memory();
         store.commit_tick_payload(payload(1, 11)).unwrap();
         store.commit_tick_payload(payload(2, 22)).unwrap();
         store.write_snapshot(snapshot_row(2, 22)).unwrap();

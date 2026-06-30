@@ -569,7 +569,24 @@ fn apply_arena_rules(world: &mut SwarmWorld, config: &ArenaConfig) {
     storage.intercept_enabled = true;
     storage.transfer_to_global_fee_per_10_000 = 0;
     storage.transfer_from_global_fee_per_10_000 = 0;
-    storage.tax_tiers.clear();
+    storage.tax_anchors = [
+        crate::resources::StorageTaxAnchor {
+            utilization_ppm: 300_000,
+            marginal_rate_bp: 0,
+        },
+        crate::resources::StorageTaxAnchor {
+            utilization_ppm: 600_000,
+            marginal_rate_bp: 0,
+        },
+        crate::resources::StorageTaxAnchor {
+            utilization_ppm: 850_000,
+            marginal_rate_bp: 0,
+        },
+        crate::resources::StorageTaxAnchor {
+            utilization_ppm: 1_000_000,
+            marginal_rate_bp: 0,
+        },
+    ];
 }
 
 fn seed_symmetric_initial_state(world: &mut SwarmWorld, config: &ArenaConfig) {

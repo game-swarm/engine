@@ -3,14 +3,12 @@ use std::{collections::HashMap, thread, time::Instant};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::clickhouse::ClickHouseWriter;
 use crate::command::{
     CommandAction, CommandIntent, CommandRejection, CommandSource, MAX_FUEL, ObjectId, RawCommand,
     RefundAccumulator, Tick, apply_command, collect_command_intents, sort_raw_commands,
     validate_command,
 };
 use crate::components::*;
-use crate::replay_storage::WorldDelta;
 use crate::resource_ledger::ResourceLedger;
 use crate::resources::{
     CurrentTick, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
@@ -437,16 +435,6 @@ pub trait TickMetricsWriter {
     ) -> Result<(), TickMetricsWriteError>;
 }
 
-impl TickMetricsWriter for ClickHouseWriter {
-    fn write_tick_metrics(
-        &mut self,
-        row: ClickHouseTickMetricsRow,
-    ) -> Result<(), TickMetricsWriteError> {
-        self.enqueue(row);
-        Ok(())
-    }
-}
-
 pub const CLICKHOUSE_TICK_METRICS_INSERT: &str = "INSERT INTO tick_metrics (tick, player_id, collect_timeout_rate, tick_abandon_rate, refund_abuse_rate, command_rejection_rate, tick_duration_p99, accepted_commands, rejected_commands, refund_events, refund_fuel) VALUES";
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -633,6 +621,78 @@ pub struct TickReport {
     pub rejections: Vec<CommandRejection>,
     pub metrics: TickMetrics,
     pub security_alerts: Vec<SecurityAlert>,
+    pub messages: Vec<DroneMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroneMessage {
+    pub sender_id: ObjectId,
+    pub recipient_id: ObjectId,
+    pub payload: Vec<u8>,
+    pub sequence: u32,
+}
+
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroneMessageOutbox(pub Vec<DroneMessage>);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EntityChange {
+    Created {
+        entity_id: u64,
+        component_data: Vec<u8>,
+    },
+    Modified {
+        entity_id: u64,
+        component_data: Vec<u8>,
+    },
+    Removed {
+        entity_id: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldDelta {
+    pub from_tick: Tick,
+    pub to_tick: Tick,
+    pub entity_changes: Vec<EntityChange>,
+    pub commands: Vec<RawCommand>,
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+pub struct ReplayStore {
+    pub keyframes: std::collections::BTreeMap<Tick, KeyframeData>,
+    pub deltas: std::collections::BTreeMap<Tick, TickDelta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyframeData {
+    pub tick: Tick,
+    pub world_snapshot: Vec<u8>,
+    pub mods_lock: ModsLock,
+    pub world_config: WorldConfigSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TickDelta {
+    pub tick: Tick,
+    pub commands_json: String,
+    pub entity_changes: Vec<EntityChange>,
+}
+
+impl ReplayStore {
+    pub fn nearest_keyframe(&self, tick: Tick) -> Option<(Tick, &KeyframeData)> {
+        self.keyframes
+            .range(..=tick)
+            .next_back()
+            .map(|(tick, keyframe)| (*tick, keyframe))
+    }
+
+    pub fn deltas_in_range(&self, from_tick: Tick, to_tick: Tick) -> Vec<&TickDelta> {
+        self.deltas
+            .range((from_tick + 1)..=to_tick)
+            .map(|(_, delta)| delta)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -903,6 +963,7 @@ where
                 rejections: last_rejections,
                 metrics: self.metrics.clone(),
                 security_alerts: last_security_alerts,
+                messages: Vec::new(),
             };
         };
 
@@ -934,6 +995,7 @@ where
             rejections: trace.rejections,
             metrics: self.metrics.clone(),
             security_alerts: trace.security_alerts,
+            messages: Vec::new(),
         }
     }
 }
@@ -1084,6 +1146,7 @@ where
                 rejections: last_rejections,
                 metrics: self.metrics.clone(),
                 security_alerts: last_security_alerts,
+                messages: Vec::new(),
             };
         };
 
@@ -1114,6 +1177,7 @@ where
             rejections: trace.rejections,
             metrics: self.metrics.clone(),
             security_alerts: trace.security_alerts,
+            messages: Vec::new(),
         }
     }
 }
@@ -1149,11 +1213,11 @@ pub trait AtomicTickStore {
 }
 
 #[derive(Debug, Clone)]
-pub struct TiKVTickCommitter<S> {
+pub struct RedbTickCommitter<S> {
     store: S,
 }
 
-impl<S> TiKVTickCommitter<S> {
+impl<S> RedbTickCommitter<S> {
     pub fn new(store: S) -> Self {
         Self { store }
     }
@@ -1163,7 +1227,7 @@ impl<S> TiKVTickCommitter<S> {
     }
 }
 
-impl<S> TickCommitter for TiKVTickCommitter<S>
+impl<S> TickCommitter for RedbTickCommitter<S>
 where
     S: AtomicTickStore,
 {
@@ -1440,13 +1504,7 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
             remap_object_id(controller_id, entity_map);
         }
         CommandAction::Spawn { spawn_id, .. } => remap_object_id(spawn_id, entity_map),
-        CommandAction::Recycle {
-            object_id,
-            spawn_id,
-        } => {
-            remap_object_id(object_id, entity_map);
-            remap_object_id(spawn_id, entity_map);
-        }
+        CommandAction::Recycle { object_id } => remap_object_id(object_id, entity_map),
         CommandAction::Action {
             object_id,
             target_id,
@@ -1633,15 +1691,14 @@ impl WorldSnapshot {
         for id in ids {
             match (self.entities.get(&id), after.entities.get(&id)) {
                 (None, Some(snapshot)) => {
-                    entity_changes.push(crate::replay_storage::EntityChange::Created {
+                    entity_changes.push(EntityChange::Created {
                         entity_id: id.0,
                         component_data: serialize_entity_snapshot(snapshot),
                     })
                 }
-                (Some(_), None) => entity_changes
-                    .push(crate::replay_storage::EntityChange::Removed { entity_id: id.0 }),
+                (Some(_), None) => entity_changes.push(EntityChange::Removed { entity_id: id.0 }),
                 (Some(before), Some(after)) if before != after => {
-                    entity_changes.push(crate::replay_storage::EntityChange::Modified {
+                    entity_changes.push(EntityChange::Modified {
                         entity_id: id.0,
                         component_data: serialize_entity_snapshot(after),
                     });
@@ -2043,7 +2100,7 @@ mod tests {
         fn atomic_commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), CommitError> {
             if self.fail_next {
                 self.fail_next = false;
-                return Err(CommitError::Failed("fake tikv commit failed".to_string()));
+                return Err(CommitError::Failed("fake redb commit failed".to_string()));
             }
 
             for (key, value) in writes {
@@ -2074,9 +2131,9 @@ mod tests {
     }
 
     #[test]
-    fn tikv_tick_committer_writes_required_tick_keys_atomically() {
+    fn redb_tick_committer_writes_required_tick_keys_atomically() {
         let trace = sample_trace();
-        let mut committer = TiKVTickCommitter::new(FakeAtomicStore::default());
+        let mut committer = RedbTickCommitter::new(FakeAtomicStore::default());
 
         committer
             .commit(trace)
@@ -2104,16 +2161,16 @@ mod tests {
         let metrics: TickMetrics =
             serde_json::from_slice(&store.writes[&tick_key(42, "metrics")]).unwrap();
         assert_eq!(metrics.accepted_commands, 1);
-        let delta: crate::replay_storage::WorldDelta =
+        let delta: crate::tick::WorldDelta =
             serde_json::from_slice(&store.writes[&tick_key(42, "delta")]).unwrap();
         assert_eq!(delta.to_tick, 42);
         assert_eq!(delta.commands.len(), 1);
     }
 
     #[test]
-    fn tikv_tick_committer_does_not_write_partial_trace_on_commit_failure() {
+    fn redb_tick_committer_does_not_write_partial_trace_on_commit_failure() {
         let trace = sample_trace();
-        let mut committer = TiKVTickCommitter::new(FakeAtomicStore {
+        let mut committer = RedbTickCommitter::new(FakeAtomicStore {
             fail_next: true,
             ..Default::default()
         });
@@ -2304,34 +2361,6 @@ mod tests {
         assert_eq!(row.command_rejection_rate, 0.25);
         assert_eq!(row.tick_duration_p99, 40);
         assert_eq!(row.refund_fuel, 5_000);
-    }
-
-    #[test]
-    fn clickhouse_tick_metrics_writer_renders_insert_values_and_drops_when_full() {
-        let mut writer = ClickHouseWriter::with_queue_capacity("http://127.0.0.1:9", 0);
-        let row = ClickHouseTickMetricsRow {
-            tick: 2,
-            player_id: 3,
-            collect_timeout_rate: 0.0,
-            tick_abandon_rate: 0.0,
-            refund_abuse_rate: 0.5,
-            command_rejection_rate: 0.25,
-            tick_duration_p99: 2_801,
-            accepted_commands: 3,
-            rejected_commands: 1,
-            refund_events: 2,
-            refund_fuel: 10_000,
-        };
-
-        writer.write_tick_metrics(row.clone()).unwrap();
-
-        assert!(CLICKHOUSE_TICK_METRICS_INSERT.contains("refund_abuse_rate"));
-        assert!(CLICKHOUSE_TICK_METRICS_INSERT.contains("command_rejection_rate"));
-        assert!(CLICKHOUSE_TICK_METRICS_INSERT.contains("tick_duration_p99"));
-        assert_eq!(
-            ClickHouseWriter::insert_body(&row),
-            "(2, 3, 0.000000, 0.000000, 0.500000, 0.250000, 2801, 3, 1, 2, 10000)"
-        );
     }
 
     fn strategy_trace(

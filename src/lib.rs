@@ -1,10 +1,8 @@
 pub mod arena;
 pub mod arena_admin;
 pub mod auth;
-pub mod clickhouse;
 pub mod command;
 pub mod components;
-pub mod dragonfly;
 pub mod economy;
 pub mod hot_cache;
 pub mod idl;
@@ -14,8 +12,8 @@ pub mod npc;
 pub mod onboarding;
 pub mod pve;
 pub mod ranking;
+pub mod redb_store;
 pub mod realtime;
-pub mod replay_storage;
 pub mod resource_ledger;
 pub mod resources;
 pub mod rule_module;
@@ -25,7 +23,6 @@ pub mod security;
 pub mod sim;
 pub mod systems;
 pub mod tick;
-pub mod tikv;
 pub mod tutorial;
 pub mod visibility;
 pub mod world;
@@ -33,10 +30,8 @@ pub mod world;
 pub use arena::*;
 pub use arena_admin::*;
 pub use auth::*;
-pub use clickhouse::*;
 pub use command::*;
 pub use components::*;
-pub use dragonfly::*;
 pub use economy::*;
 pub use hot_cache::*;
 pub use mcp::{
@@ -53,12 +48,11 @@ pub use npc::loot::*;
 pub use onboarding::*;
 pub use pve::*;
 pub use ranking::*;
+pub use redb_store::*;
 pub use realtime::*;
-pub use replay_storage::*;
 pub use resources::*;
 pub use rule_module::*;
 pub use tick::*;
-pub use tikv::*;
 pub use visibility::*;
 pub use world::{SwarmWorld, create_world, create_world_with_mode};
 
@@ -198,7 +192,6 @@ mod tests {
             .world()
             .resource::<ResourceRegistry>()
             .body_energy_cost(&body);
-        let spawn = spawn_structure(&mut world, Some(1), 10, 10, 0, 300, 0);
         let drone = world.spawn_drone(1, 11, 10, body);
 
         submit(
@@ -207,7 +200,6 @@ mod tests {
             1,
             CommandAction::Recycle {
                 object_id: object_id(drone),
-                spawn_id: object_id(spawn),
             },
         )
         .unwrap();
@@ -215,8 +207,11 @@ mod tests {
         let refund = world
             .app
             .world()
-            .get::<Structure>(spawn)
-            .and_then(|structure| structure.energy)
+            .resource::<PlayerLocalStorage>()
+            .0
+            .get(&1)
+            .and_then(|storage| storage.get("Energy"))
+            .copied()
             .expect("spawn energy after recycle");
         (body_cost, refund)
     }
@@ -1805,7 +1800,7 @@ mod tests {
                 .0
                 .get(&1)
                 .and_then(|storage| storage.get("Energy")),
-            Some(&99_955)
+            Some(&99_976)
         );
     }
 

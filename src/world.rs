@@ -8,7 +8,7 @@ use crate::command::{
     validate_command,
 };
 use crate::components::*;
-use crate::dragonfly::DragonflyCache;
+use crate::hot_cache::InMemorySnapshotCache;
 use crate::npc::events::{EventConfig, EventState, event_effect_system, world_event_system};
 use crate::npc::loot::{BlueprintRegistry, NpcLootTables};
 use crate::npc::strongholds::{
@@ -25,8 +25,8 @@ use crate::pve::{
     zone_definition_for_room, zone_for_room,
 };
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
-use crate::replay_storage::ReplayStore;
 use crate::resource_ledger::{ResourceLedger, resource_ledger_system};
+use crate::tick::{DroneMessageOutbox, ReplayStore};
 use crate::resources::{
     CurrentTick, GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
@@ -37,7 +37,7 @@ use crate::rule_module::{
 };
 use crate::scheduler::SystemSchedulerManifest;
 use crate::systems::*;
-use crate::tikv::TiKVStore;
+use crate::redb_store::RedbStore;
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -834,6 +834,7 @@ impl WorldConfig {
         });
         app.insert_resource(DroneEnvVars::default());
         app.insert_resource(ReplayStore::default());
+        app.insert_resource(DroneMessageOutbox::default());
         app.insert_resource(NpcSpawnState::default());
         app.insert_resource(StrongholdSpawnConfig::default());
         app.insert_resource(SpawnedStrongholdRooms::default());
@@ -1268,8 +1269,9 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<PveBudget>();
     app.init_resource::<CurrentTick>();
     app.init_resource::<RhaiRuleModules>();
-    app.init_resource::<TiKVStore>();
-    app.init_resource::<DragonflyCache>();
+    app.init_resource::<RedbStore>();
+    app.init_resource::<InMemorySnapshotCache>();
+    app.init_resource::<DroneMessageOutbox>();
     app.init_resource::<RankingState>();
     app.init_resource::<ShardConfig>();
     app.init_resource::<crate::systems::StartingResourcesGranted>();

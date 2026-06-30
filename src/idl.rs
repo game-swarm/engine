@@ -182,10 +182,7 @@ fn core_commands() -> Vec<CommandDef> {
             &[("object_id", "ObjectId"), ("controller_id", "ObjectId")],
         ),
         def("Spawn", &[("spawn_id", "ObjectId"), ("body", "BodyPart[]")]),
-        def(
-            "Recycle",
-            &[("object_id", "ObjectId"), ("spawn_id", "ObjectId")],
-        ),
+        def("Recycle", &[("object_id", "ObjectId")]),
         def(
             "Build",
             &[

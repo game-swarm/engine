@@ -87,9 +87,6 @@ fn main() {
     }
 
     let redb_path = env::var("REDB_PATH").unwrap_or_else(|_| "swarm.redb".to_string());
-    let dragonfly_url = env::var("DRAGONFLY_URL")
-        .or_else(|_| env::var("REDIS_URL"))
-        .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
     let health_addr =
         env::var("ENGINE_HEALTH_ADDR").unwrap_or_else(|_| DEFAULT_HEALTH_ADDR.to_string());
@@ -106,21 +103,14 @@ fn main() {
     let healthy = Arc::new(AtomicBool::new(false));
     start_health_server(health_addr, Arc::clone(&healthy));
 
-    let tikv_store = swarm_engine::TiKVStore::open(&redb_path);
-    let dragonfly_cache = swarm_engine::DragonflyCache::connect(&dragonfly_url);
-    let dragonfly_endpoint = parse_dragonfly_endpoint(&dragonfly_url);
+    let redb_store = swarm_engine::RedbStore::open(&redb_path);
     let nats_endpoint = parse_nats_endpoint(&nats_url);
 
-    let tikv_connected = tikv_store.is_ok();
-    match &tikv_store {
+    let redb_connected = redb_store.is_ok();
+    match &redb_store {
         Ok(_) => println!("redb opened path={redb_path}"),
         Err(error) => eprintln!("redb unavailable: {error}"),
     }
-    match &dragonfly_cache {
-        Ok(_) => println!("dragonfly configured url={dragonfly_url}"),
-        Err(error) => eprintln!("dragonfly unavailable: {error}"),
-    }
-
     match &nats_endpoint {
         Ok(endpoint) => println!(
             "nats configured url={} endpoint={}:{}",
@@ -130,12 +120,12 @@ fn main() {
     }
 
     let mut world = create_world_with_mode(mode);
-    if let Ok(store) = tikv_store {
+    if let Ok(store) = redb_store {
         world.app.insert_resource(store);
     }
-    if let Ok(cache) = dragonfly_cache {
-        world.app.insert_resource(cache);
-    }
+    world
+        .app
+        .insert_resource(swarm_engine::InMemorySnapshotCache::in_process());
     world.spawn_drone(
         1,
         10,
@@ -145,18 +135,14 @@ fn main() {
 
     let mut tick: u64 = 0;
     loop {
-        let tikv_ok = tikv_connected;
+        let redb_ok = redb_connected;
         let nats_ok = nats_endpoint
             .as_ref()
             .map(|endpoint| tcp_check(endpoint))
             .unwrap_or(false);
-        let dragonfly_ok = dragonfly_endpoint
-            .as_ref()
-            .map(|endpoint| tcp_check(endpoint))
-            .unwrap_or(false);
-        healthy.store(tikv_ok && dragonfly_ok && nats_ok, Ordering::Relaxed);
+        healthy.store(redb_ok && nats_ok, Ordering::Relaxed);
 
-        if !tikv_ok {
+        if !redb_ok {
             eprintln!(
                 "tick={tick} dependency=redb status=degraded action=continue_without_persistence"
             );
@@ -166,19 +152,12 @@ fn main() {
                 "tick={tick} dependency=nats status=degraded action=continue_without_broadcast"
             );
         }
-        if !dragonfly_ok {
-            eprintln!(
-                "tick={tick} dependency=dragonfly status=degraded action=use_in_process_cache"
-            );
-        }
-
         world.run_tick();
         println!(
-            "tick={} state_checksum={} redb={} dragonfly={} nats={}",
+            "tick={} state_checksum={} redb={} nats={}",
             tick,
             world.state_checksum(),
-            status(tikv_ok),
-            status(dragonfly_ok),
+            status(redb_ok),
             status(nats_ok)
         );
         tick += 1;
@@ -327,21 +306,6 @@ fn parse_nats_endpoint(url: &str) -> Result<Endpoint, String> {
     let without_scheme = url.strip_prefix("nats://").unwrap_or(url);
     let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
     parse_host_port(authority, 4222)
-}
-
-fn parse_dragonfly_endpoint(url: &str) -> Result<Endpoint, String> {
-    let without_scheme = url
-        .strip_prefix("redis://")
-        .or_else(|| url.strip_prefix("rediss://"))
-        .unwrap_or(url);
-    let authority = without_scheme
-        .split('@')
-        .next_back()
-        .unwrap_or(without_scheme)
-        .split('/')
-        .next()
-        .unwrap_or(without_scheme);
-    parse_host_port(authority, 6379)
 }
 
 fn parse_host_port(value: &str, default_port: u16) -> Result<Endpoint, String> {
