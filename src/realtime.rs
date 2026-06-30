@@ -352,6 +352,7 @@ mod tests {
             system_manifest_hash: [0; 32],
             action_manifest_hash: [0; 32],
             security_alerts: Vec::new(),
+            trace_events: Vec::new(),
         };
         let replay_entities = replay_visible_entities(&trace, 1);
 

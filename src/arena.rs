@@ -7,7 +7,7 @@ use crate::command::Tick;
 use crate::components::WorldMode;
 use crate::components::{BodyPart, Owner, PlayerId, Position, RoomId};
 use crate::ranking::MatchOutcome;
-use crate::resources::GlobalStorageConfig;
+use crate::resources::{CurrentTick, GlobalStorageConfig};
 use crate::tick::{InMemoryTickBroadcaster, InMemoryTickCommitter, PlayerExecutor, TickTrace};
 use crate::world::{SwarmWorld, create_world_with_mode};
 
@@ -467,6 +467,7 @@ impl ArenaMatch {
         let mut world = create_world_with_mode(WorldMode::Arena);
         apply_arena_rules(&mut world, &config);
         seed_symmetric_initial_state(&mut world, &config);
+        world.app.world_mut().resource_mut::<CurrentTick>().0 = 0;
 
         Ok(Self {
             world,

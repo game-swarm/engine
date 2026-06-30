@@ -51,20 +51,42 @@ impl DistanceBucket {
     }
 }
 
-/// Counts of omitted items in a truncated snapshot (§1.2)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OmittedBucket {
+    Zero,
+    Few,
+    Some,
+    Many,
+    Extreme,
+}
+
+impl OmittedBucket {
+    pub fn from_count(count: usize) -> Self {
+        match count {
+            0 => Self::Zero,
+            1..=10 => Self::Few,
+            11..=50 => Self::Some,
+            51..=200 => Self::Many,
+            _ => Self::Extreme,
+        }
+    }
+}
+
+/// Bucketed omitted categories in a truncated snapshot (§1.2)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OmittedCategories {
-    pub entities: usize,
-    pub resources: usize,
-    pub events: usize,
+    pub entities: OmittedBucket,
+    pub resources: OmittedBucket,
+    pub events: OmittedBucket,
 }
 
 impl OmittedCategories {
     pub fn all_zero() -> Self {
         Self {
-            entities: 0,
-            resources: 0,
-            events: 0,
+            entities: OmittedBucket::Zero,
+            resources: OmittedBucket::Zero,
+            events: OmittedBucket::Zero,
         }
     }
 }
@@ -301,9 +323,9 @@ pub fn build_snapshot(
         truncated: omitted_count > 0,
         degraded,
         omitted_categories: OmittedCategories {
-            entities: omitted_count,
-            resources: 0, // resources tracked separately in ledger
-            events: 0,    // events not yet in snapshot scope
+            entities: OmittedBucket::from_count(omitted_count),
+            resources: OmittedBucket::Zero, // resources tracked separately in ledger
+            events: OmittedBucket::Zero,    // events not yet in snapshot scope
         },
         entities: kept_entities,
         resources: Vec::new(),
@@ -603,9 +625,10 @@ mod tests {
             snapshot.truncated,
             "snapshot should be truncated with tiny max_size"
         );
-        assert!(
-            snapshot.omitted_categories.entities > 0,
-            "omitted_count should be > 0"
+        assert_ne!(
+            snapshot.omitted_categories.entities,
+            OmittedBucket::Zero,
+            "omitted_count bucket should be non-zero"
         );
         // Schema stability: all categories present even if zero
         let _ = snapshot.omitted_categories.resources;

@@ -9,9 +9,9 @@ use crate::onboarding::{OnboardingEvent, send_onboarding_event};
 use crate::resources::{
     ALLIED_DAILY_CAP, ALLIED_TRANSFER_COOLDOWN, ALLIED_TRANSFER_DELAY, ALLIED_TRANSFER_FEE_BP,
     AlliedTransferCooldowns, AlliedTransferDailyUsage, CurrentTick, GlobalStorageConfig,
-    GlobalTransferDirection, NEW_PLAYER_TRANSFER_LOCK, PendingAlliedTransfer,
-    PendingAlliedTransfers, PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage,
-    PlayerLocalStorage, ResourceCost, ResourceRegistry,
+    GlobalTransferDirection, PendingAlliedTransfer, PendingAlliedTransfers, PendingGlobalTransfer,
+    PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
+    ResourceRegistry,
 };
 use crate::systems::{
     PendingControllerUpgrade, PendingDamage, PendingHeal, PendingSpawn, PendingSpawnQueue,
@@ -559,9 +559,17 @@ pub enum RejectionReason {
     DisruptedResisted {
         part: BodyPart,
     },
+    RateLimited,
     InternalError,
     ServerOverloaded,
     SnapshotOverBudget,
+    UnknownAction {
+        action: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AuthError {
     InvalidCertificate,
     CertExpired,
     TokenRevoked,
@@ -573,57 +581,57 @@ pub enum RejectionReason {
     MultiDeviceConflict,
     UnknownCredential,
     InternalAuthError,
-    UnknownAction {
-        action: String,
-    },
 }
 
 pub const CANONICAL_REJECTION_REASONS: &[&str] = &[
+    "CommandBufferFull",
+    "TimeoutExceeded",
+    "SourceNotAllowed",
+    "AuthContextInvalid",
+    "NotVisibleOrNotFound",
     "ObjectNotFound",
+    "TargetNotVisible",
     "NotOwner",
+    "InvalidBodyPart",
+    "NotEnoughBodyParts",
+    "PositionOccupied",
+    "InvalidDirection",
     "InsufficientResource",
     "OutOfRange",
-    "NotStructure",
-    "NotController",
-    "NotVisibleOrNotFound",
-    "TargetNotVisible",
-    "SpawnOnCooldown",
-    "RoomDroneCapReached",
-    "AuthContextInvalid",
-    "CooldownActive",
-    "InvalidDirection",
-    "PositionOccupied",
-    "ConstructionLimitReached",
-    "SafeModeActive",
-    "TargetOverloadCooldown",
-    "TargetFortifyCooldown",
-    "DisruptedResisted",
-    "NotEnoughBodyParts",
-    "InvalidBodyPart",
     "InvalidStructureType",
     "InvalidResourceType",
-    "SourceNotAllowed",
-    "UnknownAction",
+    "ConstructionLimitReached",
+    "NotStructure",
+    "NotController",
+    "SpawnOnCooldown",
+    "CooldownActive",
+    "RoomDroneCapReached",
     "GlobalStorageDisabled",
     "TransferInProgress",
-    "RateLimited",
-    "InvalidCertificate",
-    "NotAuthorized",
+    "DailyTransferCapExceeded",
     "FuelExhausted",
-    "TimeoutExceeded",
-    "SnapshotOverBudget",
-    "CommandBufferFull",
+    "SafeModeActive",
+    "TargetFortifyCooldown",
+    "TargetOverloadCooldown",
+    "DisruptedResisted",
+    "UnknownAction",
+    "InvalidJson",
+    "SchemaViolation",
+    "RateLimited",
     "ServerOverloaded",
+    "SnapshotOverBudget",
     "InternalError",
-    "CertExpired",
-    "DeviceNotRegistered",
-    "SessionLimitReached",
-    "RefreshTokenInvalid",
-    "ScopeInsufficient",
-    "TokenRevoked",
-    "MultiDeviceConflict",
-    "UnknownCredential",
-    "InternalAuthError",
+    "NotMovable",
+    "Fatigued",
+    "StillSpawning",
+    "TileBlocked",
+    "OutOfRoom",
+    "NoPath",
+    "PathTooLong",
+    "CarryFull",
+    "SourceEmpty",
+    "TargetFull",
+    "TargetEmpty",
 ];
 
 pub type CommandResult = Result<(), RejectionReason>;
@@ -1396,7 +1404,7 @@ fn canonical_rejection_reason(rejection: &RejectionReason) -> &'static str {
         RejectionReason::RoomDroneCapReached => "RoomDroneCapReached",
         RejectionReason::GlobalStorageDisabled => "GlobalStorageDisabled",
         RejectionReason::TransferInProgress => "TransferInProgress",
-        RejectionReason::TargetTransferLocked => "TargetTransferLocked",
+        RejectionReason::TargetTransferLocked => "RateLimited",
         RejectionReason::DailyTransferCapExceeded => "DailyTransferCapExceeded",
         RejectionReason::PlayerNotFound => "NotVisibleOrNotFound",
         RejectionReason::FuelExhausted => "FuelExhausted",
@@ -1404,20 +1412,10 @@ fn canonical_rejection_reason(rejection: &RejectionReason) -> &'static str {
         RejectionReason::TargetFortifyCooldown => "TargetFortifyCooldown",
         RejectionReason::TargetOverloadCooldown => "TargetOverloadCooldown",
         RejectionReason::DisruptedResisted { .. } => "DisruptedResisted",
+        RejectionReason::RateLimited => "RateLimited",
         RejectionReason::InternalError => "InternalError",
         RejectionReason::ServerOverloaded => "ServerOverloaded",
         RejectionReason::SnapshotOverBudget => "SnapshotOverBudget",
-        RejectionReason::InvalidCertificate => "InvalidCertificate",
-        RejectionReason::CertExpired => "CertExpired",
-        RejectionReason::TokenRevoked => "TokenRevoked",
-        RejectionReason::RefreshTokenInvalid => "RefreshTokenInvalid",
-        RejectionReason::NotAuthorized => "NotAuthorized",
-        RejectionReason::ScopeInsufficient => "ScopeInsufficient",
-        RejectionReason::SessionLimitReached => "SessionLimitReached",
-        RejectionReason::DeviceNotRegistered => "DeviceNotRegistered",
-        RejectionReason::MultiDeviceConflict => "MultiDeviceConflict",
-        RejectionReason::UnknownCredential => "UnknownCredential",
-        RejectionReason::InternalAuthError => "InternalAuthError",
         RejectionReason::UnknownAction { .. } => "UnknownAction",
     }
 }
@@ -1455,20 +1453,10 @@ fn non_canonical_rejection_reason(rejection: &RejectionReason) -> bool {
             | RejectionReason::SafeModeActive
             | RejectionReason::TargetFortifyCooldown
             | RejectionReason::TargetOverloadCooldown
+            | RejectionReason::RateLimited
             | RejectionReason::InternalError
             | RejectionReason::ServerOverloaded
             | RejectionReason::SnapshotOverBudget
-            | RejectionReason::InvalidCertificate
-            | RejectionReason::CertExpired
-            | RejectionReason::TokenRevoked
-            | RejectionReason::RefreshTokenInvalid
-            | RejectionReason::NotAuthorized
-            | RejectionReason::ScopeInsufficient
-            | RejectionReason::SessionLimitReached
-            | RejectionReason::DeviceNotRegistered
-            | RejectionReason::MultiDeviceConflict
-            | RejectionReason::UnknownCredential
-            | RejectionReason::InternalAuthError
             | RejectionReason::UnknownAction { .. }
     )
 }
@@ -2947,16 +2935,9 @@ fn validate_allied_transfer(
         return Err(RejectionReason::NotFriendly);
     }
 
-    // Check new player transfer lock: target must have been in world ≥ NEW_PLAYER_TRANSFER_LOCK ticks
     let first_spawn = world.resource::<crate::systems::PlayerFirstSpawnTick>();
     let current_tick = world.resource::<CurrentTick>().0;
-    if let Some(spawn_tick) = first_spawn.0.get(&to_player) {
-        let elapsed = current_tick.saturating_sub(*spawn_tick);
-        if elapsed < NEW_PLAYER_TRANSFER_LOCK {
-            return Err(RejectionReason::TargetTransferLocked);
-        }
-    } else {
-        // Target player has no spawn record — cannot receive transfers
+    if !first_spawn.0.contains_key(&to_player) {
         return Err(RejectionReason::PlayerNotFound);
     }
 

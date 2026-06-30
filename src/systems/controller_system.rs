@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 
 use crate::components::{Controller, StructureType};
+use crate::resources::PlayerGlobalStorage;
+use crate::world::WorldConfig;
 
 pub const DEFAULT_CONTROLLER_DOWNGRADE_TIMER: u32 = 5_000;
 
@@ -138,9 +140,17 @@ pub fn rcl_progress_total(level: u8) -> u32 {
     rcl_level(level).progress_total
 }
 
+pub fn controller_reserve_to_rcl_progress(controller_reserve: u32, ticks: u32) -> u32 {
+    u64::from(controller_reserve)
+        .saturating_mul(u64::from(ticks))
+        .min(u64::from(u32::MAX)) as u32
+}
+
 pub fn controller_system(
     mut pending: ResMut<PendingControllerUpgrade>,
     mut controllers: Query<&mut Controller>,
+    config: Res<WorldConfig>,
+    mut global_storage: ResMut<PlayerGlobalStorage>,
 ) {
     for (entity_bits, amount) in pending.0.drain(..) {
         if let Ok(mut controller) = controllers.get_mut(Entity::from_bits(entity_bits)) {
@@ -171,6 +181,14 @@ pub fn controller_system(
                 controller.progress_total = rcl_progress_total((controller.level + 1).min(8));
                 controller.downgrade_timer = DEFAULT_CONTROLLER_DOWNGRADE_TIMER;
             }
+        } else if config.empire_upkeep.controller_passive_income > 0 {
+            let owner = controller.owner.expect("checked above");
+            *global_storage
+                .0
+                .entry(owner)
+                .or_default()
+                .entry(config.empire_upkeep.resource.clone())
+                .or_default() += config.empire_upkeep.controller_passive_income;
         }
     }
 }

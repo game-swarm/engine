@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn command_action_and_rejection_registries_match_api_surface() {
         assert_eq!(CORE_COMMAND_ACTIONS.len(), 12);
-        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 45);
+        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 48);
 
         let action: CommandAction =
             serde_json::from_str(r#"{"type":"Hack","object_id":1,"target_id":2}"#).unwrap();
@@ -766,7 +766,7 @@ mod tests {
                 .iter()
                 .any(|command| command.name == "Action")
         );
-        assert_eq!(idl.core.enums.rejection_reason.len(), 45);
+        assert_eq!(idl.core.enums.rejection_reason.len(), 48);
     }
 
     #[test]
@@ -2362,15 +2362,15 @@ mod tests {
     #[test]
     fn standard_empire_upkeep_uses_superlinear_formula() {
         let upkeep = crate::world::EmpireUpkeepConfig::standard();
-        assert_eq!(upkeep.upkeep_cost(1), 55);
-        assert_eq!(upkeep.upkeep_cost(10), 1_000);
+        assert_eq!(upkeep.upkeep_cost(1), 31);
+        assert_eq!(upkeep.upkeep_cost(20), 1_200);
     }
 
     #[test]
     fn vanilla_empire_upkeep_uses_vanilla_defaults() {
         let upkeep = crate::world::EmpireUpkeepConfig::vanilla();
-        assert_eq!(upkeep.upkeep_cost(1), 32);
-        assert_eq!(upkeep.upkeep_cost(15), 900);
+        assert_eq!(upkeep.upkeep_cost(1), 20);
+        assert_eq!(upkeep.upkeep_cost(25), 1_000);
     }
 
     #[test]
@@ -2503,21 +2503,20 @@ mod tests {
             .entry(1)
             .or_default()
             .insert("Energy".to_string(), 10000);
-        // Seed target with first spawn record (to pass transfer lock)
+        // Seed target with a first spawn record so the player exists.
         world.spawn_drone(2, 20, 20, vec![BodyPart::Move]);
         world.run_tick_for(1); // register spawn at tick 1
-        world.run_tick_for(510); // 510 > NEW_PLAYER_TRANSFER_LOCK (500)
 
         // Execute allied transfer
         let result = world.submit_raw_command(RawCommand {
             player_id: 1,
-            tick: 511,
+            tick: 2,
             source: crate::command::CommandSource::TestHarness,
             auth: crate::command::CommandAuth {
                 source: crate::command::CommandSource::TestHarness,
                 player_id: 1,
-                tick_submitted: 511,
-                tick_target: 511,
+                tick_submitted: 2,
+                tick_target: 2,
             },
             sequence: 0,
             action: CommandAction::AlliedTransfer {
@@ -2579,7 +2578,7 @@ mod tests {
     }
 
     #[test]
-    fn allied_transfer_rejects_new_player_target() {
+    fn allied_transfer_rejects_unknown_target_player() {
         let mut world = create_world();
         // Player 1 has spawn record
         world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
@@ -2592,7 +2591,7 @@ mod tests {
             .entry(1)
             .or_default()
             .insert("Energy".to_string(), 5000);
-        // Player 2 has no spawn — should be rejected
+        // Player 2 has no spawn record — target player is unknown.
         let result = world.submit_raw_command(RawCommand {
             player_id: 1,
             tick: 2,
@@ -2619,7 +2618,6 @@ mod tests {
         world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         world.spawn_drone(2, 20, 20, vec![BodyPart::Move]);
         world.run_tick_for(1); // register spawns at tick 1
-        world.run_tick_for(510);
         world
             .app
             .world_mut()
@@ -2632,13 +2630,13 @@ mod tests {
         world
             .submit_raw_command(RawCommand {
                 player_id: 1,
-                tick: 511,
+                tick: 2,
                 source: crate::command::CommandSource::TestHarness,
                 auth: crate::command::CommandAuth {
                     source: crate::command::CommandSource::TestHarness,
                     player_id: 1,
-                    tick_submitted: 511,
-                    tick_target: 511,
+                    tick_submitted: 2,
+                    tick_target: 2,
                 },
                 sequence: 0,
                 action: CommandAction::AlliedTransfer {
@@ -2675,7 +2673,6 @@ mod tests {
         world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         world.spawn_drone(2, 20, 20, vec![BodyPart::Move]);
         world.run_tick_for(1); // register spawns at tick 1
-        world.run_tick_for(510);
         world
             .app
             .world_mut()
@@ -2690,13 +2687,13 @@ mod tests {
             world
                 .submit_raw_command(RawCommand {
                     player_id: 1,
-                    tick: 511,
+                    tick: 2,
                     source: crate::command::CommandSource::TestHarness,
                     auth: crate::command::CommandAuth {
                         source: crate::command::CommandSource::TestHarness,
                         player_id: 1,
-                        tick_submitted: 511,
-                        tick_target: 511,
+                        tick_submitted: 2,
+                        tick_target: 2,
                     },
                     sequence: 0,
                     action: CommandAction::AlliedTransfer {
@@ -2711,13 +2708,13 @@ mod tests {
         // Second transfer within cooldown should fail
         let result2 = world.submit_raw_command(RawCommand {
             player_id: 1,
-            tick: 512,
+            tick: 3,
             source: crate::command::CommandSource::TestHarness,
             auth: crate::command::CommandAuth {
                 source: crate::command::CommandSource::TestHarness,
                 player_id: 1,
-                tick_submitted: 512,
-                tick_target: 512,
+                tick_submitted: 3,
+                tick_target: 3,
             },
             sequence: 0,
             action: CommandAction::AlliedTransfer {

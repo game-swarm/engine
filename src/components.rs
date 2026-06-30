@@ -1389,6 +1389,13 @@ pub struct Resource {
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wreckage {
+    pub former_owner: PlayerId,
+    pub amounts: IndexMap<String, u32>,
+    pub remaining_ticks: u32,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub produces: IndexMap<String, u32>,
     pub capacity: u32,

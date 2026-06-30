@@ -19,7 +19,6 @@ pub const ALLIED_TRANSFER_FEE_BP: u32 = 200;
 pub const ALLIED_TRANSFER_DELAY: Tick = 200;
 pub const ALLIED_TRANSFER_COOLDOWN: Tick = 500;
 pub const ALLIED_DAILY_CAP: u32 = 10_000;
-pub const NEW_PLAYER_TRANSFER_LOCK: Tick = 500;
 
 #[derive(BevyResource, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentTick(pub Tick);

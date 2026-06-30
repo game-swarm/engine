@@ -23,6 +23,7 @@ pub enum ResourceOperation {
     GlobalWithdraw,
     AlliedTransfer,
     PvEAward,
+    ControllerPassiveIncome,
     RecycleRefund,
     BuildCost,
     SpawnCost,

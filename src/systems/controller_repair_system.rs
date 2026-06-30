@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 use crate::components::{Controller, Drone, Position, RepairTracker};
 use crate::resources::{PlayerGlobalStorage, ResourceRegistry};
+use crate::tick::{TickTraceEvent, TickTraceEventLog};
 use crate::world::WorldConfig;
 
 /// Drone body hits repair system — handles Controller repair only.
@@ -9,12 +10,13 @@ use crate::world::WorldConfig;
 /// Both systems share RepairTracker to enforce the combined hard cap.
 /// Runs after command execution, before decay.
 pub fn controller_repair_system(
-    mut drones: Query<(&mut Drone, &Position)>,
+    mut drones: Query<(Entity, &mut Drone, &Position)>,
     controllers: Query<(&Controller, &Position)>,
     registry: Res<ResourceRegistry>,
     config: Res<WorldConfig>,
     mut global_storage: ResMut<PlayerGlobalStorage>,
     mut repair_tracker: ResMut<RepairTracker>,
+    mut trace_events: ResMut<TickTraceEventLog>,
 ) {
     let hard_cap = repair_tracker.hard_cap;
     let mut body_repair_this_tick = 0;
@@ -29,7 +31,7 @@ pub fn controller_repair_system(
         return;
     }
 
-    for (mut drone, drone_pos) in drones.iter_mut() {
+    for (entity, mut drone, drone_pos) in drones.iter_mut() {
         if drone.hits >= drone.hits_max {
             continue;
         }
@@ -85,6 +87,13 @@ pub fn controller_repair_system(
             drone.hits = drone.hits.saturating_add(repair_amount).min(drone.hits_max);
             body_repair_this_tick += repair_amount;
             *repair_tracker.per_player.entry(player_id).or_default() += repair_amount;
+            trace_events.events.push(TickTraceEvent {
+                system: "controller_repair_system".to_string(),
+                entity: entity.to_bits(),
+                event: "controller_age_repair".to_string(),
+                amount: repair_cost,
+                resource: Some(config.empire_upkeep.resource.clone()),
+            });
             break; // One repair per tick per drone
         }
     }

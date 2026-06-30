@@ -38,7 +38,7 @@ use crate::rule_module::{
 };
 use crate::scheduler::SystemSchedulerManifest;
 use crate::systems::*;
-use crate::tick::{DroneMessageOutbox, ReplayStore};
+use crate::tick::{DroneMessageOutbox, ReplayStore, TickTraceEventLog};
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -61,6 +61,7 @@ pub struct WorldConfig {
     pub pve_budget: PveBudgetConfig,
     pub resources: WorldResourceConfig,
     pub combat: WorldCombatConfig,
+    pub replay: ReplayRetentionConfig,
     pub damage_types: Vec<crate::components::DamageTypeDef>,
     pub body_part_types: Vec<crate::components::BodyPartTypeDef>,
     pub structure_types: Vec<crate::components::StructureTypeDef>,
@@ -143,6 +144,7 @@ pub struct EmpireUpkeepConfig {
     pub enabled: bool,
     pub base_upkeep: u32,
     pub room_soft_cap: u32,
+    pub controller_passive_income: u32,
     pub resource: String,
     pub repair_cap: u32,
     pub distance_decay_bp: u32,
@@ -154,16 +156,18 @@ pub struct EmpireUpkeepConfig {
 impl EmpireUpkeepConfig {
     pub fn standard() -> Self {
         Self {
-            base_upkeep: 50,
-            room_soft_cap: 10,
+            base_upkeep: 30,
+            room_soft_cap: 20,
+            controller_passive_income: 25,
             ..Self::default()
         }
     }
 
     pub fn vanilla() -> Self {
         Self {
-            base_upkeep: 30,
-            room_soft_cap: 15,
+            base_upkeep: 20,
+            room_soft_cap: 25,
+            controller_passive_income: 20,
             ..Self::default()
         }
     }
@@ -172,6 +176,7 @@ impl EmpireUpkeepConfig {
         Self {
             base_upkeep: 10,
             room_soft_cap: 20,
+            controller_passive_income: 10,
             ..Self::default()
         }
     }
@@ -286,6 +291,13 @@ pub struct WorldCombatConfig {
     pub friendly_fire: bool,
     pub damage_multiplier: f64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReplayRetentionConfig {
+    pub deterministic_retention_ticks: Tick,
+    pub rich_artifact_retention_ticks: Tick,
+}
 impl Default for WorldConfig {
     fn default() -> Self {
         Self {
@@ -301,6 +313,7 @@ impl Default for WorldConfig {
             pve_budget: PveBudgetConfig::default(),
             resources: WorldResourceConfig::default(),
             combat: WorldCombatConfig::default(),
+            replay: ReplayRetentionConfig::default(),
             damage_types: default_damage_types(),
             body_part_types: Vec::new(),
             structure_types: Vec::new(),
@@ -603,7 +616,7 @@ fn default_custom_actions() -> Vec<crate::components::CustomActionDef> {
         "Leech",
         "Corrosive attack that heals the attacker for 50% of dealt damage",
         "leech",
-        None,
+        Some(100),
         &[("Energy", 300)],
     );
     leech.damage_type = Some("Corrosive".to_string());
@@ -616,7 +629,7 @@ fn default_custom_actions() -> Vec<crate::components::CustomActionDef> {
         "Convert an enemy drone into an owned structure",
         "fabricate",
         Some(500),
-        &[("Energy", 2000), ("Mineral", 500)],
+        &[("Energy", 2500)],
     );
     fabricate.range = 1;
 
@@ -699,8 +712,9 @@ impl Default for EmpireUpkeepConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            base_upkeep: 50,
-            room_soft_cap: 10,
+            base_upkeep: 30,
+            room_soft_cap: 20,
+            controller_passive_income: 25,
             resource: "Energy".to_string(),
             repair_cap: 3_500,
             distance_decay_bp: 500,
@@ -765,6 +779,15 @@ impl Default for WorldCombatConfig {
             pvp_enabled: true,
             friendly_fire: false,
             damage_multiplier: 1.0,
+        }
+    }
+}
+
+impl Default for ReplayRetentionConfig {
+    fn default() -> Self {
+        Self {
+            deterministic_retention_ticks: 30 * 24 * 60,
+            rich_artifact_retention_ticks: 180 * 24 * 60,
         }
     }
 }
@@ -835,6 +858,7 @@ impl WorldConfig {
         });
         app.insert_resource(DroneEnvVars::default());
         app.insert_resource(ReplayStore::default());
+        app.insert_resource(TickTraceEventLog::default());
         app.insert_resource(DroneMessageOutbox::default());
         app.insert_resource(NpcSpawnState::default());
         app.insert_resource(StrongholdSpawnConfig::default());
@@ -935,6 +959,7 @@ impl WorldConfig {
                 status_advance_system,
                 aging_system,
                 decay_system,
+                wreckage_decay_system,
                 memory_upkeep_system,
                 drone_env_var_system,
                 rhai_rule_module_tick_end_system,
@@ -945,6 +970,7 @@ impl WorldConfig {
         app.add_systems(
             Update,
             (
+                spawn_wreckage_system,
                 death_cleanup_system,
                 pvp_block_system,
                 room_state_system,
@@ -1255,6 +1281,11 @@ pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
 }
 
 pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -> SwarmWorld {
+    let mut config = config;
+    if mode == WorldMode::Arena {
+        config.replay.deterministic_retention_ticks = 180 * 24 * 60;
+        config.replay.rich_artifact_retention_ticks = 180 * 24 * 60;
+    }
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.init_resource::<PendingSpawnQueue>();
@@ -1868,6 +1899,10 @@ mod shard_tests {
         assert_eq!(action("Disrupt").range, 1);
         assert_eq!(action("Disrupt").cooldown, Some(50));
         assert_eq!(action("Disrupt").cost.get("Energy"), Some(&100));
+
+        assert_eq!(action("Leech").cooldown, Some(100));
+        assert_eq!(action("Fabricate").cost.get("Energy"), Some(&2500));
+        assert!(!action("Fabricate").cost.contains_key("Mineral"));
     }
 
     #[test]
@@ -1911,6 +1946,9 @@ max_pve_output_per_tick = 1234
 pvp_enabled = false
 friendly_fire = true
 damage_multiplier = 1.5
+[replay]
+deterministic_retention_ticks = 123
+rich_artifact_retention_ticks = 456
 "#,
         )
         .unwrap();
@@ -1934,6 +1972,8 @@ damage_multiplier = 1.5
         assert!(!config.combat.pvp_enabled);
         assert!(config.combat.friendly_fire);
         assert_eq!(config.combat_damage_multiplier_fixed(), 15_000);
+        assert_eq!(config.replay.deterministic_retention_ticks, 123);
+        assert_eq!(config.replay.rich_artifact_retention_ticks, 456);
         assert!(config.propagation_system_enabled());
     }
 

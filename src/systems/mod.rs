@@ -34,6 +34,7 @@ pub mod spawning_grace_system;
 pub mod special_attack_reducer;
 pub mod starting_resources_system;
 pub mod status_advance_system;
+pub mod wreckage_system;
 
 pub use aging_system::aging_system;
 pub use cargo_in_transit_system::{CargoInTransit, cargo_in_transit_system};
@@ -89,3 +90,6 @@ pub use starting_resources_system::{
     PlayerFirstSpawnTick, StartingResourcesGranted, starting_resources_system,
 };
 pub use status_advance_system::status_advance_system;
+pub use wreckage_system::{
+    WRECKAGE_LIFESPAN_TICKS, WRECKAGE_RATE_BP, spawn_wreckage_system, wreckage_decay_system,
+};

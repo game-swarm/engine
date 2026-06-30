@@ -202,6 +202,8 @@ pub struct TickTrace {
     pub action_manifest_hash: [u8; 32],
     #[serde(default)]
     pub security_alerts: Vec<SecurityAlert>,
+    #[serde(default)]
+    pub trace_events: Vec<TickTraceEvent>,
 }
 
 impl TickTrace {
@@ -223,6 +225,20 @@ fn action_manifest_hash() -> [u8; 32] {
 }
 
 pub type TickCommitRecord = TickTrace;
+
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickTraceEventLog {
+    pub events: Vec<TickTraceEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickTraceEvent {
+    pub system: String,
+    pub entity: u64,
+    pub event: String,
+    pub amount: u32,
+    pub resource: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickBroadcast {
@@ -930,6 +946,14 @@ where
                 system_manifest_hash: system_manifest_hash(),
                 action_manifest_hash: action_manifest_hash(),
                 security_alerts: Vec::new(),
+                trace_events: std::mem::take(
+                    &mut self
+                        .world
+                        .app
+                        .world_mut()
+                        .resource_mut::<TickTraceEventLog>()
+                        .events,
+                ),
             };
             trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
             let environment = ReplayEnvironment::capture(self.world.app.world());
@@ -1113,6 +1137,14 @@ where
                 system_manifest_hash: system_manifest_hash(),
                 action_manifest_hash: action_manifest_hash(),
                 security_alerts: Vec::new(),
+                trace_events: std::mem::take(
+                    &mut self
+                        .world
+                        .app
+                        .world_mut()
+                        .resource_mut::<TickTraceEventLog>()
+                        .events,
+                ),
             };
             trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
             let environment = ReplayEnvironment::capture(self.world.app.world());
@@ -2127,6 +2159,7 @@ mod tests {
             system_manifest_hash: system_manifest_hash(),
             action_manifest_hash: action_manifest_hash(),
             security_alerts: Vec::new(),
+            trace_events: Vec::new(),
         }
     }
 
@@ -2350,6 +2383,7 @@ mod tests {
             system_manifest_hash: system_manifest_hash(),
             action_manifest_hash: action_manifest_hash(),
             security_alerts: Vec::new(),
+            trace_events: Vec::new(),
         };
 
         let row = ClickHouseTickMetricsRow::from_trace(&trace, &[10, 20, 30, 40]);
@@ -2388,6 +2422,7 @@ mod tests {
             system_manifest_hash: system_manifest_hash(),
             action_manifest_hash: action_manifest_hash(),
             security_alerts: Vec::new(),
+            trace_events: Vec::new(),
         }
     }
 
