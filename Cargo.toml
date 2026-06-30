@@ -1,3 +1,16 @@
+[workspace]
+members = [
+    ".",
+    "mods/combat-core",
+    "mods/depot-storage",
+    "mods/empire-upkeep",
+    "mods/fog-of-war",
+    "mods/pve-spawning",
+    "mods/resource-decay",
+    "mods/special-attacks",
+    "mods/vanilla-boss",
+]
+
 [package]
 name = "swarm-engine"
 version = "0.1.0"

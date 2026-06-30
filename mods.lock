@@ -1,0 +1,36 @@
+[plugins.combat-core]
+version = "0.1.0"
+enabled = true
+config = { damage_multiplier = 100, body_part_types = "core,movement,attack" }
+
+[plugins.depot-storage]
+version = "0.1.0"
+enabled = true
+
+[plugins.empire-upkeep]
+version = "0.1.0"
+enabled = true
+config = { base_upkeep = 50, room_soft_cap = 10, repair_cap = 3500, distance_decay_bp = 500, recycle_refund_base = 5000, recycle_refund_min = 1000 }
+
+[plugins.fog-of-war]
+version = "0.1.0"
+enabled = true
+
+[plugins.pve-spawning]
+version = "0.1.0"
+enabled = true
+config = { spawn_rate = 5, npc_types = "basic", difficulty_zones = "" }
+
+[plugins.resource-decay]
+version = "0.1.0"
+enabled = true
+
+[plugins.special-attacks]
+version = "0.1.0"
+enabled = true
+config = { special_attacks_enabled = true, custom_actions = "" }
+
+[plugins.vanilla-boss]
+version = "0.1.0"
+enabled = true
+config = { arena_bosses_enabled = true, world_bosses_enabled = false }

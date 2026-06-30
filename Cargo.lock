@@ -2174,6 +2174,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "ctrlc"
 version = "3.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4982,13 +4992,81 @@ dependencies = [
 ]
 
 [[package]]
+name = "swarm-mod-combat-core"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "swarm-engine",
+]
+
+[[package]]
+name = "swarm-mod-depot-storage"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "swarm-engine",
+]
+
+[[package]]
+name = "swarm-mod-empire-upkeep"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "swarm-engine",
+]
+
+[[package]]
+name = "swarm-mod-fog-of-war"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "swarm-engine",
+]
+
+[[package]]
+name = "swarm-mod-pve-spawning"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "swarm-engine",
+]
+
+[[package]]
+name = "swarm-mod-resource-decay"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "swarm-engine",
+]
+
+[[package]]
+name = "swarm-mod-special-attacks"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "swarm-engine",
+]
+
+[[package]]
+name = "swarm-mod-vanilla-boss"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "serde",
+ "swarm-engine",
+]
+
+[[package]]
 name = "swarm-wasm-sandbox"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ctor",
+ "libc",
  "thiserror 2.0.18",
  "wasmparser 0.248.0",
  "wasmtime",
+ "wat",
 ]
 
 [[package]]

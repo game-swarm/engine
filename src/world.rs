@@ -20,24 +20,25 @@ use crate::onboarding::{
     OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
     send_onboarding_event,
 };
+use crate::plugins::{load_default_plugin_lock, register_mods};
 use crate::pve::{
     DifficultyZone, PveBudget, PveBudgetConfig, WorldPveConfig, ZoneDefinition,
     zone_definition_for_room, zone_for_room,
 };
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::resource_ledger::{ResourceLedger, resource_ledger_system};
-use crate::tick::{DroneMessageOutbox, ReplayStore};
 use crate::resources::{
     CurrentTick, GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
 };
+use crate::redb_store::RedbStore;
 use crate::rule_module::{
     RhaiRuleModules, rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system,
     run_init_scripts,
 };
 use crate::scheduler::SystemSchedulerManifest;
 use crate::systems::*;
-use crate::redb_store::RedbStore;
+use crate::tick::{DroneMessageOutbox, ReplayStore};
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -1287,6 +1288,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<OnboardingProgress>();
     app.add_event::<OnboardingEvent>();
     app.add_event::<OnboardingSwarmEvent>();
+    register_mods(&mut app, &load_default_plugin_lock());
 
     let namespace = match mode {
         WorldMode::Default => "default".to_string(),
