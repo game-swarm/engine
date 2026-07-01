@@ -22,13 +22,41 @@ blake3 = "1"
 ed25519-dalek = "2"
 getrandom = "0.2"
 indexmap = { version = "2", features = ["serde"] }
-rhai = "1"
 redb = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 toml = "0.8"
 swarm-wasm-sandbox = { path = "sandbox" }
+swarm-mod-combat-core = { path = "mods/combat-core", optional = true }
+swarm-mod-depot-storage = { path = "mods/depot-storage", optional = true }
+swarm-mod-empire-upkeep = { path = "mods/empire-upkeep", optional = true }
+swarm-mod-fog-of-war = { path = "mods/fog-of-war", optional = true }
+swarm-mod-pve-spawning = { path = "mods/pve-spawning", optional = true }
+swarm-mod-resource-decay = { path = "mods/resource-decay", optional = true }
+swarm-mod-special-attacks = { path = "mods/special-attacks", optional = true }
+swarm-mod-vanilla-boss = { path = "mods/vanilla-boss", optional = true }
+
+[features]
+default = []
+mod_combat_core = ["dep:swarm-mod-combat-core"]
+mod_depot_storage = ["dep:swarm-mod-depot-storage"]
+mod_empire_upkeep = ["dep:swarm-mod-empire-upkeep"]
+mod_fog_of_war = ["dep:swarm-mod-fog-of-war"]
+mod_pve_spawning = ["dep:swarm-mod-pve-spawning"]
+mod_resource_decay = ["dep:swarm-mod-resource-decay"]
+mod_special_attacks = ["dep:swarm-mod-special-attacks"]
+mod_vanilla_boss = ["dep:swarm-mod-vanilla-boss"]
+vanilla_mods = [
+    "mod_combat_core",
+    "mod_depot_storage",
+    "mod_empire_upkeep",
+    "mod_fog_of_war",
+    "mod_pve_spawning",
+    "mod_resource_decay",
+    "mod_special_attacks",
+    "mod_vanilla_boss",
+]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

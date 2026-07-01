@@ -84,9 +84,87 @@ pub fn install_plugin_registry(app: &mut App, lock: PluginLock) {
 }
 
 pub fn register_mods(app: &mut App, lock: &PluginLock) {
+    #[cfg(feature = "mod_empire_upkeep")]
+    add_mod_plugin(
+        app,
+        lock,
+        "empire-upkeep",
+        swarm_mod_empire_upkeep::EmpireUpkeepModPlugin,
+    );
+    #[cfg(feature = "mod_fog_of_war")]
+    add_mod_plugin(
+        app,
+        lock,
+        "fog-of-war",
+        swarm_mod_fog_of_war::FogOfWarModPlugin,
+    );
+    #[cfg(feature = "mod_combat_core")]
+    add_mod_plugin(
+        app,
+        lock,
+        "combat-core",
+        swarm_mod_combat_core::CombatCoreModPlugin,
+    );
+    #[cfg(feature = "mod_depot_storage")]
+    add_mod_plugin(
+        app,
+        lock,
+        "depot-storage",
+        swarm_mod_depot_storage::DepotStorageModPlugin,
+    );
+    #[cfg(feature = "mod_pve_spawning")]
+    add_mod_plugin(
+        app,
+        lock,
+        "pve-spawning",
+        swarm_mod_pve_spawning::PveSpawningModPlugin,
+    );
+    #[cfg(feature = "mod_resource_decay")]
+    add_mod_plugin(
+        app,
+        lock,
+        "resource-decay",
+        swarm_mod_resource_decay::ResourceDecayModPlugin,
+    );
+    #[cfg(feature = "mod_special_attacks")]
+    add_mod_plugin(
+        app,
+        lock,
+        "special-attacks",
+        swarm_mod_special_attacks::SpecialAttacksModPlugin,
+    );
+    #[cfg(feature = "mod_vanilla_boss")]
+    add_mod_plugin(
+        app,
+        lock,
+        "vanilla-boss",
+        swarm_mod_vanilla_boss::VanillaBossPlugin::default(),
+    );
+
     install_plugin_registry(app, lock.clone());
 }
 
 pub fn load_default_plugin_lock() -> PluginLock {
     PluginLock::load_or_default("mods.lock")
+}
+
+#[cfg(any(
+    feature = "mod_combat_core",
+    feature = "mod_depot_storage",
+    feature = "mod_empire_upkeep",
+    feature = "mod_fog_of_war",
+    feature = "mod_pve_spawning",
+    feature = "mod_resource_decay",
+    feature = "mod_special_attacks",
+    feature = "mod_vanilla_boss",
+))]
+fn add_mod_plugin<P: Plugin>(app: &mut App, lock: &PluginLock, name: &str, plugin: P) {
+    if lock
+        .plugins
+        .get(name)
+        .map(|entry| entry.enabled)
+        .unwrap_or(false)
+    {
+        app.add_plugins(plugin);
+    }
 }

@@ -13,11 +13,10 @@ pub mod onboarding;
 pub mod plugins;
 pub mod pve;
 pub mod ranking;
-pub mod redb_store;
 pub mod realtime;
+pub mod redb_store;
 pub mod resource_ledger;
 pub mod resources;
-pub mod rule_module;
 pub mod scheduler;
 pub mod sdk_gen;
 pub mod security;
@@ -50,10 +49,9 @@ pub use onboarding::*;
 pub use plugins::*;
 pub use pve::*;
 pub use ranking::*;
-pub use redb_store::*;
 pub use realtime::*;
+pub use redb_store::*;
 pub use resources::*;
-pub use rule_module::*;
 pub use tick::*;
 pub use visibility::*;
 pub use world::{SwarmWorld, create_world, create_world_with_mode};
@@ -1170,31 +1168,34 @@ mod tests {
     }
 
     #[test]
-    fn rule_module_budget_runs_in_world_tick_and_auto_disables() {
+    fn replay_environment_captures_enabled_plugin_versions() {
+        let mut lock = crate::plugins::PluginLock::default();
+        lock.plugins.insert(
+            "combat-core".to_string(),
+            crate::plugins::PluginEntry {
+                version: "0.2.0".to_string(),
+                enabled: true,
+                config: Default::default(),
+            },
+        );
+        lock.plugins.insert(
+            "disabled-mod".to_string(),
+            crate::plugins::PluginEntry {
+                version: "9.9.9".to_string(),
+                enabled: false,
+                config: Default::default(),
+            },
+        );
+
         let mut world = create_world();
-        world
-            .app
-            .world_mut()
-            .resource_mut::<crate::rule_module::RhaiRuleModules>()
-            .add_module(crate::rule_module::RhaiRuleModule::with_ast_nodes(
-                "oversized",
-                crate::rule_module::DEFAULT_RHAI_AST_NODES_PER_TICK + 1,
-                |_: &mut crate::rule_module::RhaiActions<'_>| {
-                    panic!("AST over-budget module should be skipped");
-                },
-            ));
+        crate::plugins::install_plugin_registry(&mut world.app, lock);
 
-        for _ in 0..crate::rule_module::DEFAULT_RHAI_MAX_CONSECUTIVE_OVER_BUDGET_TICKS {
-            world.run_tick();
-        }
-
-        let modules = world
-            .app
-            .world()
-            .resource::<crate::rule_module::RhaiRuleModules>();
-        assert!(!modules.modules()[0].is_enabled());
-        assert_eq!(modules.last_tick_reports()[0].module_name, "oversized");
-        assert!(modules.last_tick_reports()[0].disabled);
+        let environment = crate::tick::ReplayEnvironment::capture(world.app.world());
+        assert_eq!(
+            environment.mods_lock.modules.get("combat-core"),
+            Some(&"0.2.0".to_string())
+        );
+        assert!(!environment.mods_lock.modules.contains_key("disabled-mod"));
     }
 
     #[test]

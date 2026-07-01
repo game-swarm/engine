@@ -13,7 +13,6 @@ use crate::resource_ledger::ResourceLedger;
 use crate::resources::{
     CurrentTick, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
 };
-use crate::rule_module::{RhaiRuleModules, run_tick_start_scripts};
 use crate::scheduler::{SYSTEM_MANIFEST, manifest_hash};
 use crate::security::{SecurityAlert, SecurityAuditor};
 use crate::sim::{SnapshotConfig, collect_snapshots};
@@ -163,8 +162,16 @@ pub struct ReplayEnvironment {
 impl ReplayEnvironment {
     pub fn capture(world: &World) -> Self {
         let modules = world
-            .get_resource::<RhaiRuleModules>()
-            .map(RhaiRuleModules::module_version_hashes)
+            .get_resource::<crate::plugins::PluginRegistry>()
+            .map(|registry| {
+                registry
+                    .lock
+                    .plugins
+                    .iter()
+                    .filter(|(_, entry)| entry.enabled)
+                    .map(|(name, entry)| (name.clone(), entry.version.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         let config = world
             .get_resource::<WorldConfig>()
@@ -1406,7 +1413,6 @@ fn execute_deterministic_with_loop(
     tick_loop: &mut TickLoop,
 ) -> DeterministicExecution {
     tick_loop.enter(TickPhase::Execute);
-    run_tick_start_scripts(world.app.world_mut());
     let mut accepted = Vec::new();
     let mut rejections = Vec::new();
     let mut refunds = RefundAccumulator::default();

@@ -26,15 +26,11 @@ use crate::pve::{
     zone_definition_for_room, zone_for_room,
 };
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
+use crate::redb_store::RedbStore;
 use crate::resource_ledger::{ResourceLedger, resource_ledger_system};
 use crate::resources::{
     CurrentTick, GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
-};
-use crate::redb_store::RedbStore;
-use crate::rule_module::{
-    RhaiRuleModules, rhai_rule_module_tick_end_system, rhai_rule_module_tick_start_system,
-    run_init_scripts,
 };
 use crate::scheduler::SystemSchedulerManifest;
 use crate::systems::*;
@@ -917,7 +913,6 @@ impl WorldConfig {
         app.add_systems(
             Update,
             (
-                rhai_rule_module_tick_start_system,
                 death_mark_system,
                 spawn_system,
                 starting_resources_system,
@@ -962,7 +957,6 @@ impl WorldConfig {
                 wreckage_decay_system,
                 memory_upkeep_system,
                 drone_env_var_system,
-                rhai_rule_module_tick_end_system,
             )
                 .chain()
                 .after(damage_application_system),
@@ -980,7 +974,7 @@ impl WorldConfig {
                 flush_pending_entity_creation_system,
             )
                 .chain()
-                .after(rhai_rule_module_tick_end_system),
+                .after(drone_env_var_system),
         );
     }
 }
@@ -1300,7 +1294,6 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<PveOutputTracker>();
     app.init_resource::<PveBudget>();
     app.init_resource::<CurrentTick>();
-    app.init_resource::<RhaiRuleModules>();
     app.init_resource::<RedbStore>();
     app.init_resource::<InMemorySnapshotCache>();
     app.init_resource::<DroneMessageOutbox>();
@@ -1375,8 +1368,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
         },
     ));
 
-    let mut world = SwarmWorld { app };
-    run_init_scripts(world.app.world_mut());
+    let world = SwarmWorld { app };
 
     // ── Auto-generate SDK on world.toml change ──────────────────────
     generate_sdk_on_startup("world.toml");
