@@ -4,30 +4,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arena_admin::ArenaRoomAdmin;
 use crate::command::{
-    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
-    validate_command,
+    apply_command, source_gate, validate_command, CommandIntent, CommandResult, CommandSource,
+    RawCommand, Tick,
 };
 use crate::components::*;
 use crate::hot_cache::InMemorySnapshotCache;
-use crate::npc::events::{EventConfig, EventState, event_effect_system, world_event_system};
+use crate::npc::events::{event_effect_system, world_event_system, EventConfig, EventState};
 use crate::npc::loot::{BlueprintRegistry, NpcLootTables};
 use crate::npc::strongholds::{
-    SpawnedStrongholdRooms, StrongholdSpawnConfig, stronghold_production_system,
-    stronghold_spawn_system,
+    stronghold_production_system, stronghold_spawn_system, SpawnedStrongholdRooms,
+    StrongholdSpawnConfig,
 };
-use crate::npc::{NpcSpawnState, npc_ai_system, npc_combat_system, npc_spawn_system};
+use crate::npc::{npc_ai_system, npc_combat_system, npc_spawn_system, NpcSpawnState};
 use crate::onboarding::{
-    OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
-    send_onboarding_event,
+    onboarding_system, send_onboarding_event, OnboardingConfig, OnboardingEvent,
+    OnboardingProgress, OnboardingSwarmEvent,
 };
 use crate::plugins::{load_default_plugin_lock, register_mods};
 use crate::pve::{
-    DifficultyZone, PveBudget, PveBudgetConfig, WorldPveConfig, ZoneDefinition,
-    zone_definition_for_room, zone_for_room,
+    zone_definition_for_room, zone_for_room, DifficultyZone, PveBudget, PveBudgetConfig,
+    WorldPveConfig, ZoneDefinition,
 };
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::redb_store::RedbStore;
-use crate::resource_ledger::{ResourceLedger, resource_ledger_system};
+use crate::resource_ledger::{resource_ledger_system, ResourceLedger};
 use crate::resources::{
     CurrentTick, GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
@@ -1466,36 +1466,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
         },
     ));
 
-    let world = SwarmWorld { app };
-
-    // ── Auto-generate SDK on world.toml change ──────────────────────
-    generate_sdk_on_startup("world.toml");
-
-    world
-}
-
-/// Auto-generate the SDK cache on world startup if world.toml changed
-/// (different hash from last cached version).
-fn generate_sdk_on_startup(world_toml_path: &str) {
-    let toml_bytes = match std::fs::read(world_toml_path) {
-        Ok(b) => b,
-        Err(_) => return,
-    };
-    let hash = crate::sdk_gen::sha256_hex(&toml_bytes);
-    let cache_dir = crate::sdk_gen::sdk_cache_dir(&hash);
-    if cache_dir.exists() {
-        return; // already cached
-    }
-    // Generate in background — don't block world startup
-    println!(
-        "[SDK] world.toml changed (hash={}), regenerating SDK...",
-        &hash[..12]
-    );
-    if let Err(e) = crate::sdk_gen::cli_generate_sdk(world_toml_path, "/data/swarm/sdk-cache") {
-        eprintln!("[SDK] generation failed: {e}");
-    } else {
-        println!("[SDK] cached to {}", cache_dir.display());
-    }
+    SwarmWorld { app }
 }
 
 /// Compute a deterministic, stable checksum over the full world state.
@@ -2253,22 +2224,18 @@ cost = { Energy = 33 }
                 .update_cooldown,
             5
         );
-        assert!(
-            world
-                .app
-                .world()
-                .resource::<SpecialEffectRegistry>()
-                .get("hack")
-                .is_some()
-        );
-        assert!(
-            world
-                .app
-                .world()
-                .resource::<CustomActionRegistry>()
-                .get("Hack")
-                .is_some()
-        );
+        assert!(world
+            .app
+            .world()
+            .resource::<SpecialEffectRegistry>()
+            .get("hack")
+            .is_some());
+        assert!(world
+            .app
+            .world()
+            .resource::<CustomActionRegistry>()
+            .get("Hack")
+            .is_some());
     }
 
     fn test_command(player_id: PlayerId) -> RawCommand {

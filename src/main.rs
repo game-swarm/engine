@@ -3,19 +3,21 @@ use std::{
     env,
     io::{Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
+    path::{Component, Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     thread,
     time::Duration,
 };
 
 use swarm_engine::{
-    BodyPart, CommandIntent, ExecutorError, PlayerExecutor, PlayerId, TickBroadcaster,
-    TickSnapshot, WorldMode, create_world_with_mode,
-    sandbox_transport::{SandboxBackend, execute_tick_remote},
+    create_world_with_mode,
+    sandbox_transport::{execute_tick_remote, SandboxBackend},
     sim::{create_local_simulation_world, summarize_local_simulation},
+    BodyPart, CommandIntent, ExecutorError, PlayerExecutor, PlayerId, TickBroadcaster,
+    TickSnapshot, WorldMode,
 };
 use swarm_wasm_sandbox::SandboxRuntime;
 
@@ -394,6 +396,8 @@ fn parse_sim_speed(value: &str) -> Result<String, String> {
 
 fn start_health_server(addr: String, healthy: Arc<AtomicBool>) {
     thread::spawn(move || {
+        let sdk_output_dir =
+            env::var("SDK_OUTPUT_DIR").unwrap_or_else(|_| "/app/sdk-output".to_string());
         let listener = match TcpListener::bind(&addr) {
             Ok(listener) => listener,
             Err(error) => {
@@ -405,16 +409,40 @@ fn start_health_server(addr: String, healthy: Arc<AtomicBool>) {
 
         for stream in listener.incoming() {
             match stream {
-                Ok(mut stream) => respond_health(&mut stream, healthy.load(Ordering::Relaxed)),
+                Ok(mut stream) => respond_http(
+                    &mut stream,
+                    healthy.load(Ordering::Relaxed),
+                    Path::new(&sdk_output_dir),
+                ),
                 Err(error) => eprintln!("health server connection failed error={error}"),
             }
         }
     });
 }
 
-fn respond_health(stream: &mut TcpStream, healthy: bool) {
+fn respond_http(stream: &mut TcpStream, healthy: bool, sdk_output_dir: &Path) {
     let mut request = [0_u8; 512];
-    let _ = stream.read(&mut request);
+    let bytes_read = stream.read(&mut request).unwrap_or(0);
+    let path = request_path(&request[..bytes_read]).unwrap_or("/");
+
+    if path == "/" || path == "/healthz" {
+        respond_health(stream, healthy);
+    } else if let Some(sdk_path) = path.strip_prefix("/sdk/") {
+        respond_sdk_file(stream, sdk_output_dir, sdk_path);
+    } else {
+        respond_not_found(stream);
+    }
+}
+
+fn request_path(request: &[u8]) -> Option<&str> {
+    let request = std::str::from_utf8(request).ok()?;
+    let request_line = request.lines().next()?;
+    let mut parts = request_line.split_whitespace();
+    let _method = parts.next()?;
+    parts.next()
+}
+
+fn respond_health(stream: &mut TcpStream, healthy: bool) {
     let (status_line, body) = if healthy {
         ("HTTP/1.1 200 OK", "ok\n")
     } else {
@@ -425,6 +453,120 @@ fn respond_health(stream: &mut TcpStream, healthy: bool) {
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
+}
+
+fn respond_sdk_file(stream: &mut TcpStream, sdk_output_dir: &Path, sdk_path: &str) {
+    let Some(relative_path) = clean_relative_path(sdk_path) else {
+        respond_not_found(stream);
+        return;
+    };
+    let mut file_path = sdk_output_dir.join(relative_path);
+
+    if file_path.is_dir() {
+        let index_path = file_path.join("index.html");
+        if index_path.is_file() {
+            file_path = index_path;
+        } else {
+            respond_directory_listing(stream, sdk_output_dir, &file_path);
+            return;
+        }
+    }
+
+    match std::fs::read(&file_path) {
+        Ok(body) => {
+            let content_type = content_type_for(&file_path);
+            respond_bytes(stream, "HTTP/1.1 200 OK", content_type, &body);
+        }
+        Err(_) => respond_not_found(stream),
+    }
+}
+
+fn clean_relative_path(path: &str) -> Option<PathBuf> {
+    let path = path.split('?').next().unwrap_or(path);
+    let path = path.trim_start_matches('/');
+    if path.is_empty() {
+        return Some(PathBuf::new());
+    }
+
+    let mut cleaned = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(part) => cleaned.push(part),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(cleaned)
+}
+
+fn respond_directory_listing(stream: &mut TcpStream, sdk_output_dir: &Path, dir: &Path) {
+    let mut entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect::<Vec<_>>(),
+        Err(_) => {
+            respond_not_found(stream);
+            return;
+        }
+    };
+    entries.sort();
+
+    let title = dir
+        .strip_prefix(sdk_output_dir)
+        .ok()
+        .and_then(|path| path.to_str())
+        .unwrap_or("");
+    let mut body = format!("<!doctype html><html><body><h1>/sdk/{title}</h1><ul>");
+    for entry in entries {
+        body.push_str("<li>");
+        body.push_str(&html_escape(&entry));
+        body.push_str("</li>");
+    }
+    body.push_str("</ul></body></html>");
+    respond_bytes(
+        stream,
+        "HTTP/1.1 200 OK",
+        "text/html; charset=utf-8",
+        body.as_bytes(),
+    );
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn content_type_for(path: &Path) -> &'static str {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("ts") => "text/typescript; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        Some("html") | Some("htm") => "text/html; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+fn respond_not_found(stream: &mut TcpStream) {
+    respond_bytes(
+        stream,
+        "HTTP/1.1 404 Not Found",
+        "text/plain; charset=utf-8",
+        b"not found\n",
+    );
+}
+
+fn respond_bytes(stream: &mut TcpStream, status_line: &str, content_type: &str, body: &[u8]) {
+    let header = format!(
+        "{status_line}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body);
 }
 
 fn parse_nats_endpoint(url: &str) -> Result<Endpoint, String> {
@@ -470,5 +612,9 @@ fn tcp_check(endpoint: &Endpoint) -> bool {
 }
 
 fn status(ok: bool) -> &'static str {
-    if ok { "ok" } else { "degraded" }
+    if ok {
+        "ok"
+    } else {
+        "degraded"
+    }
 }

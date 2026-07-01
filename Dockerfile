@@ -11,6 +11,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY . .
 RUN cargo build --release
+RUN ./target/release/swarm-engine generate-sdk world.toml /app/sdk-output
 
 FROM debian:trixie-slim AS runtime
 
@@ -23,6 +24,7 @@ RUN apt-get update \
 COPY --from=build /app/target/release/swarm-engine /usr/local/bin/swarm-engine
 COPY --from=build /app/world.toml /app/world.toml
 COPY --from=build /app/mods/ /app/mods/
+COPY --from=build /app/sdk-output /app/sdk-output
 WORKDIR /app
 
 EXPOSE 8080

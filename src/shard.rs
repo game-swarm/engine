@@ -3,10 +3,10 @@ use std::collections::BTreeMap;
 use bevy::prelude::Resource as BevyResource;
 use serde::{Deserialize, Serialize};
 
-use crate::command::{CommandIntent, CommandResult, CommandSource, RawCommand, Tick, source_gate};
+use crate::command::{source_gate, CommandIntent, CommandResult, CommandSource, RawCommand, Tick};
 use crate::components::PlayerId;
 use crate::realtime::{NatsPublisher, RealtimeError};
-use crate::world::{SwarmWorld, create_world_with_shard_config};
+use crate::world::{create_world_with_shard_config, SwarmWorld};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ShardId(pub u32);
