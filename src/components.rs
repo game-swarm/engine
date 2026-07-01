@@ -253,6 +253,7 @@ impl Default for DamageTypeDef {
 #[serde(default)]
 pub struct BodyPartTypeDef {
     pub name: BodyPart,
+    pub weight: u32,
     pub damage_type: Option<String>,
     pub base_damage: Option<u32>,
     pub heal_amount: Option<u32>,
@@ -263,6 +264,7 @@ impl Default for BodyPartTypeDef {
     fn default() -> Self {
         Self {
             name: BodyPart::Move,
+            weight: default_body_part_weight(BodyPart::Move),
             damage_type: None,
             base_damage: None,
             heal_amount: None,
@@ -292,6 +294,7 @@ impl Default for BodyPartRegistry {
                 part,
                 BodyPartTypeDef {
                     name: part,
+                    weight: default_body_part_weight(part),
                     ..Default::default()
                 },
             );
@@ -315,6 +318,18 @@ impl Default for BodyPartRegistry {
             .resistances
             .insert(DamageType::Kinetic.to_string(), 0.5);
         Self { parts }
+    }
+}
+fn default_body_part_weight(part: BodyPart) -> u32 {
+    match part {
+        BodyPart::Move => 50,
+        BodyPart::Work => 20,
+        BodyPart::Carry => 50,
+        BodyPart::Attack => 20,
+        BodyPart::RangedAttack => 50,
+        BodyPart::Heal => 250,
+        BodyPart::Claim => 100,
+        BodyPart::Tough => 10,
     }
 }
 impl BodyPartRegistry {
@@ -342,6 +357,12 @@ impl BodyPartRegistry {
             .get(&part)
             .and_then(|d| d.heal_amount)
             .unwrap_or(0)
+    }
+    pub fn weight(&self, part: BodyPart) -> u32 {
+        self.parts
+            .get(&part)
+            .map(|d| d.weight)
+            .unwrap_or_else(|| default_body_part_weight(part))
     }
     pub fn resistance(&self, part: BodyPart, dt: &str) -> f64 {
         self.parts

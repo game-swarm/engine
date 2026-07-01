@@ -1551,6 +1551,14 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
         CommandAction::ClaimController {
             object_id,
             controller_id,
+        }
+        | CommandAction::Repair {
+            object_id,
+            target_id: controller_id,
+        }
+        | CommandAction::UpgradeController {
+            object_id,
+            controller_id,
         } => {
             remap_object_id(object_id, entity_map);
             remap_object_id(controller_id, entity_map);

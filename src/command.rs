@@ -112,6 +112,14 @@ pub enum CommandAction {
         y: i32,
         structure: StructureType,
     },
+    Repair {
+        object_id: ObjectId,
+        target_id: ObjectId,
+    },
+    UpgradeController {
+        object_id: ObjectId,
+        controller_id: ObjectId,
+    },
     TransferToGlobal {
         resource: String,
         amount: u32,
@@ -137,6 +145,8 @@ pub const CORE_COMMAND_ACTIONS: &[&str] = &[
     "Spawn",
     "Recycle",
     "Build",
+    "Repair",
+    "UpgradeController",
     "TransferToGlobal",
     "TransferFromGlobal",
     "AlliedTransfer",
@@ -236,6 +246,14 @@ impl<'de> Deserialize<'de> for CommandAction {
                 x: required!(wire.x, "x"),
                 y: required!(wire.y, "y"),
                 structure: required!(wire.structure, "structure"),
+            },
+            "Repair" => Self::Repair {
+                object_id: required!(wire.object_id, "object_id"),
+                target_id: required!(wire.target_id, "target_id"),
+            },
+            "UpgradeController" => Self::UpgradeController {
+                object_id: required!(wire.object_id, "object_id"),
+                controller_id: required!(wire.controller_id, "controller_id"),
             },
             "TransferToGlobal" => Self::TransferToGlobal {
                 resource: required!(wire.resource, "resource"),
@@ -371,6 +389,18 @@ impl Serialize for CommandAction {
                 map.serialize_entry("y", y)?;
                 map.serialize_entry("structure", structure)?;
             }
+            Self::Repair {
+                object_id,
+                target_id,
+            } => serialize_target_action(&mut map, "Repair", object_id, target_id)?,
+            Self::UpgradeController {
+                object_id,
+                controller_id,
+            } => {
+                map.serialize_entry("type", "UpgradeController")?;
+                map.serialize_entry("object_id", object_id)?;
+                map.serialize_entry("controller_id", controller_id)?;
+            }
             Self::TransferToGlobal { resource, amount } => {
                 map.serialize_entry("type", "TransferToGlobal")?;
                 map.serialize_entry("resource", resource)?;
@@ -492,6 +522,7 @@ pub enum RejectionReason {
     NotOwner,
     NotMovable,
     Fatigued,
+    AlreadyActed,
     InvalidBodyPart,
     NotEnoughBodyParts,
     MissingBodyPart {
@@ -819,12 +850,12 @@ pub fn validate_command(
         CommandAction::Move {
             object_id,
             direction,
-        } => validate_move(world, raw.player_id, *object_id, *direction),
+        } => validate_move(world, raw.player_id, raw.tick, *object_id, *direction),
         CommandAction::Harvest {
             object_id,
             target_id,
             resource: _,
-        } => validate_harvest(world, raw.player_id, *object_id, *target_id),
+        } => validate_harvest(world, raw.player_id, raw.tick, *object_id, *target_id),
         CommandAction::Transfer {
             object_id,
             target_id,
@@ -837,6 +868,7 @@ pub fn validate_command(
             *target_id,
             resource,
             *amount,
+            raw.tick,
         ),
         CommandAction::Withdraw {
             object_id,
@@ -850,6 +882,7 @@ pub fn validate_command(
             *target_id,
             resource,
             *amount,
+            raw.tick,
         ),
         CommandAction::Action {
             action_type,
@@ -868,7 +901,7 @@ pub fn validate_command(
         CommandAction::ClaimController {
             object_id,
             controller_id,
-        } => validate_claim_controller(world, raw.player_id, *object_id, *controller_id),
+        } => validate_claim_controller(world, raw.player_id, raw.tick, *object_id, *controller_id),
         CommandAction::Spawn { spawn_id, body } => {
             validate_spawn_drone(world, raw.player_id, *spawn_id, body)
         }
@@ -878,7 +911,15 @@ pub fn validate_command(
             x,
             y,
             structure,
-        } => validate_build(world, raw.player_id, *object_id, *x, *y, *structure),
+        } => validate_build(world, raw.player_id, raw.tick, *object_id, *x, *y, *structure),
+        CommandAction::Repair {
+            object_id,
+            target_id,
+        } => validate_repair(world, raw.player_id, raw.tick, *object_id, *target_id),
+        CommandAction::UpgradeController {
+            object_id,
+            controller_id,
+        } => validate_upgrade_controller(world, raw.player_id, raw.tick, *object_id, *controller_id),
         CommandAction::TransferToGlobal { resource, amount } => {
             validate_transfer_to_global(world, raw.player_id, resource, *amount)
         }
@@ -1189,6 +1230,8 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
         CommandAction::Spawn { .. } => "Spawn",
         CommandAction::Recycle { .. } => "Recycle",
         CommandAction::Build { .. } => "Build",
+        CommandAction::Repair { .. } => "Repair",
+        CommandAction::UpgradeController { .. } => "UpgradeController",
         CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
         CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
         CommandAction::AlliedTransfer { .. } => "AlliedTransfer",
@@ -1363,6 +1406,7 @@ fn canonical_rejection_reason(rejection: &RejectionReason) -> &'static str {
         | RejectionReason::NotSource
         | RejectionReason::OrderNotFound => "ObjectNotFound",
         RejectionReason::Fatigued
+        | RejectionReason::AlreadyActed
         | RejectionReason::StillSpawning
         | RejectionReason::AlreadyFullHealth
         | RejectionReason::AlreadyHacked
@@ -1433,6 +1477,7 @@ fn non_canonical_rejection_reason(rejection: &RejectionReason) -> bool {
             | RejectionReason::ObjectNotFound
             | RejectionReason::TargetNotVisible
             | RejectionReason::NotOwner
+            | RejectionReason::AlreadyActed
             | RejectionReason::InvalidBodyPart
             | RejectionReason::NotEnoughBodyParts
             | RejectionReason::PositionOccupied
@@ -1546,6 +1591,20 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             actor_id = Some(object_id);
             apply_build(world, player_id, object_id, x, y, structure)
         }
+        CommandAction::Repair {
+            object_id,
+            target_id,
+        } => {
+            actor_id = Some(object_id);
+            apply_repair(world, object_id, target_id)
+        }
+        CommandAction::UpgradeController {
+            object_id,
+            controller_id,
+        } => {
+            actor_id = Some(object_id);
+            apply_upgrade_controller(world, object_id, controller_id)
+        }
         CommandAction::TransferToGlobal { resource, amount } => {
             apply_transfer_to_global(world, player_id, &resource, amount)
         }
@@ -1579,6 +1638,7 @@ fn mark_drone_action(world: &mut World, object_id: ObjectId, tick: Tick) {
 fn validate_move(
     world: &mut World,
     player_id: PlayerId,
+    tick: Tick,
     object_id: ObjectId,
     direction: Direction,
 ) -> CommandResult {
@@ -1600,6 +1660,7 @@ fn validate_move(
 fn validate_harvest(
     world: &mut World,
     player_id: PlayerId,
+    tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
@@ -1625,10 +1686,11 @@ fn validate_transfer(
     target_id: ObjectId,
     resource: &str,
     amount: u32,
+    tick: Tick,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    require_body(&drone, BodyPart::Carry)?;
+    ensure_drone_can_act(&drone, BodyPart::Carry, false)?;
     let available = *drone.carry.get(resource).unwrap_or(&0);
     if available < amount {
         return Err(RejectionReason::InsufficientResource {
@@ -1657,10 +1719,11 @@ fn validate_withdraw(
     target_id: ObjectId,
     resource: &str,
     amount: u32,
+    tick: Tick,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    require_body(&drone, BodyPart::Carry)?;
+    ensure_drone_can_act(&drone, BodyPart::Carry, false)?;
     let space = drone
         .carry_capacity
         .saturating_sub(carry_used(&drone.carry));
@@ -1685,6 +1748,7 @@ fn validate_withdraw(
 fn validate_attack(
     world: &mut World,
     player_id: PlayerId,
+    tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
@@ -1701,6 +1765,7 @@ fn validate_attack(
 fn validate_ranged_attack(
     world: &mut World,
     player_id: PlayerId,
+    tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
     range: u32,
@@ -1724,12 +1789,13 @@ fn validate_ranged_attack(
 fn validate_heal(
     world: &mut World,
     player_id: PlayerId,
+    tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    require_body(&drone, BodyPart::Heal)?;
+    ensure_drone_can_act(&drone, BodyPart::Heal, false)?;
     let (target_position, target) = drone_snapshot(world, target_id)?;
     if target.owner != player_id {
         return Err(RejectionReason::NotFriendly);
@@ -1750,15 +1816,16 @@ fn validate_action(
     payload: &serde_json::Value,
 ) -> CommandResult {
     match action_type {
-        "Attack" => validate_attack(world, player_id, object_id, require_target_id(target_id)?),
+        "Attack" => validate_attack(world, player_id, tick, object_id, require_target_id(target_id)?),
         "RangedAttack" => validate_ranged_attack(
             world,
             player_id,
+            tick,
             object_id,
             require_target_id(target_id)?,
             payload_u32(payload, "range").unwrap_or(MAX_RANGED_ATTACK_RANGE),
         ),
-        "Heal" => validate_heal(world, player_id, object_id, require_target_id(target_id)?),
+        "Heal" => validate_heal(world, player_id, tick, object_id, require_target_id(target_id)?),
         custom => validate_custom_action(world, player_id, tick, custom, object_id, target_id),
     }
 }
@@ -1777,6 +1844,7 @@ fn payload_u32(payload: &serde_json::Value, field: &str) -> Option<u32> {
 fn validate_claim_controller(
     world: &mut World,
     player_id: PlayerId,
+    tick: Tick,
     object_id: ObjectId,
     controller_id: ObjectId,
 ) -> CommandResult {
@@ -1848,6 +1916,7 @@ fn validate_recycle(world: &mut World, player_id: PlayerId, object_id: ObjectId)
 fn validate_build(
     world: &mut World,
     player_id: PlayerId,
+    tick: Tick,
     object_id: ObjectId,
     x: i32,
     y: i32,
@@ -1879,6 +1948,43 @@ fn validate_build(
 
     let cost = build_cost(world, structure);
     ensure_player_resource_cost(world, player_id, &cost, false)
+}
+
+fn validate_repair(
+    world: &mut World,
+    player_id: PlayerId,
+    tick: Tick,
+    object_id: ObjectId,
+    target_id: ObjectId,
+) -> CommandResult {
+    let (position, drone) = drone_snapshot(world, object_id)?;
+    ensure_owner(&drone, player_id)?;
+    ensure_drone_can_act(&drone, BodyPart::Work, false)?;
+    let (target_position, structure) = structure_snapshot(world, target_id)?;
+    if structure.owner.is_some() && structure.owner != Some(player_id) {
+        return Err(RejectionReason::NotOwner);
+    }
+    if structure.hits >= structure.hits_max {
+        return Err(RejectionReason::AlreadyFullHealth);
+    }
+    ensure_range(position, target_position, 3)
+}
+
+fn validate_upgrade_controller(
+    world: &mut World,
+    player_id: PlayerId,
+    tick: Tick,
+    object_id: ObjectId,
+    controller_id: ObjectId,
+) -> CommandResult {
+    let (position, drone) = drone_snapshot(world, object_id)?;
+    ensure_owner(&drone, player_id)?;
+    ensure_drone_can_act(&drone, BodyPart::Work, false)?;
+    let (target_position, controller) = controller_snapshot(world, controller_id)?;
+    if controller.owner != Some(player_id) {
+        return Err(RejectionReason::NotOwner);
+    }
+    ensure_range(position, target_position, 3)
 }
 
 fn validate_transfer_to_global(
@@ -2405,6 +2511,79 @@ fn apply_build(
             },
         });
     send_onboarding_event(world, OnboardingEvent::StructureBuilt);
+    Ok(())
+}
+
+fn apply_repair(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> CommandResult {
+    let object = entity(object_id)?;
+    let target = entity(target_id)?;
+    let (_, drone) = drone_snapshot(world, object_id)?;
+    let work_parts = drone
+        .body
+        .iter()
+        .filter(|part| **part == BodyPart::Work)
+        .count() as u32;
+    let energy = drone.carry.get(ENERGY_RESOURCE).copied().unwrap_or_default();
+    let repair_amount = work_parts
+        .max(1)
+        .saturating_mul(100)
+        .min(energy)
+        .min(
+            world
+                .entity(target)
+                .get::<Structure>()
+                .ok_or(RejectionReason::ObjectNotFound)?
+                .hits_max
+                .saturating_sub(
+                    world
+                        .entity(target)
+                        .get::<Structure>()
+                        .ok_or(RejectionReason::ObjectNotFound)?
+                        .hits,
+                ),
+        );
+
+    if repair_amount == 0 {
+        return Ok(());
+    }
+
+    take_from_drone(world, object, ENERGY_RESOURCE, repair_amount);
+    let mut entity_mut = world.entity_mut(target);
+    let mut structure = entity_mut
+        .get_mut::<Structure>()
+        .ok_or(RejectionReason::ObjectNotFound)?;
+    structure.hits = structure
+        .hits
+        .saturating_add(repair_amount)
+        .min(structure.hits_max);
+    Ok(())
+}
+
+fn apply_upgrade_controller(
+    world: &mut World,
+    object_id: ObjectId,
+    controller_id: ObjectId,
+) -> CommandResult {
+    let object = entity(object_id)?;
+    let controller = entity(controller_id)?;
+    let (_, drone) = drone_snapshot(world, object_id)?;
+    let work_parts = drone
+        .body
+        .iter()
+        .filter(|part| **part == BodyPart::Work)
+        .count() as u32;
+    let energy = drone.carry.get(ENERGY_RESOURCE).copied().unwrap_or_default();
+    let amount = work_parts.max(1).min(energy);
+
+    if amount == 0 {
+        return Ok(());
+    }
+
+    take_from_drone(world, object, ENERGY_RESOURCE, amount);
+    world
+        .resource_mut::<PendingControllerUpgrade>()
+        .0
+        .push((controller.to_bits(), amount));
     Ok(())
 }
 
