@@ -20,6 +20,7 @@ pub mod resources;
 pub mod scheduler;
 pub mod sdk_gen;
 pub mod security;
+pub mod sandbox_transport;
 pub mod sim;
 pub mod systems;
 pub mod tick;

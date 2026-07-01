@@ -12,6 +12,7 @@ use std::{
 
 use swarm_engine::{
     BodyPart, WorldMode, create_world_with_mode,
+    sandbox_transport::SandboxBackend,
     sim::{create_local_simulation_world, summarize_local_simulation},
 };
 
@@ -88,6 +89,8 @@ fn main() {
 
     let redb_path = env::var("REDB_PATH").unwrap_or_else(|_| "swarm.redb".to_string());
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
+    let sandbox_backend =
+        env::var("SANDBOX_BACKEND").unwrap_or_else(|_| "local".to_string());
     let health_addr =
         env::var("ENGINE_HEALTH_ADDR").unwrap_or_else(|_| DEFAULT_HEALTH_ADDR.to_string());
     let tick_interval = Duration::from_millis(
@@ -118,6 +121,29 @@ fn main() {
         ),
         Err(error) => eprintln!("nats unavailable: {error}"),
     }
+    let shared_nats_client = if sandbox_backend == "nats" {
+        match connect_nats_client(&nats_url) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                eprintln!("sandbox_backend=nats nats_client=unavailable error={error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let _sandbox_backend = match (sandbox_backend.as_str(), shared_nats_client) {
+        ("local", _) => SandboxBackend::default(),
+        ("nats", Some(nats_client)) => SandboxBackend::Remote {
+            nats_client,
+            instance_id: env::var("ENGINE_INSTANCE_ID").unwrap_or_else(|_| "engine-1".to_string()),
+        },
+        ("nats", None) => SandboxBackend::default(),
+        (other, _) => {
+            eprintln!("unknown SANDBOX_BACKEND={other}; using local");
+            SandboxBackend::default()
+        }
+    };
 
     let mut world = create_world_with_mode(mode);
     if let Ok(store) = redb_store {
@@ -163,6 +189,15 @@ fn main() {
         tick += 1;
         thread::sleep(tick_interval);
     }
+}
+
+fn connect_nats_client(nats_url: &str) -> Result<async_nats::Client, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async_nats::connect(nats_url))
+        .map_err(|error| error.to_string())
 }
 
 fn parse_mode_arg(args: Vec<String>) -> Result<(WorldMode, Vec<String>), String> {

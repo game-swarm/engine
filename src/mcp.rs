@@ -6,7 +6,7 @@ use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use swarm_wasm_sandbox::{
-    CachedNativeModule, CompiledModule, CompiledModuleCache, ModuleCacheKey, SandboxRuntime,
+    CachedNativeModule, CompiledModule, CompiledModuleCache, ModuleCacheKey,
     wasmtime_version,
 };
 
@@ -22,6 +22,7 @@ use crate::components::*;
 use crate::economy::*;
 use crate::hot_cache::{SnapshotKey, read_through_snapshot_cache};
 use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
+use crate::sandbox_transport::{SandboxBackend, deploy_module_remote};
 use crate::tick::{TickTrace, tick_key};
 use crate::visibility::{
     VISIBILITY_RADIUS, is_position_visible_to, visible_entity_ids, visible_positions,
@@ -873,7 +874,7 @@ pub struct ResourceReadParams {
 pub struct McpServer {
     modules: Vec<StoredModule>,
     module_cache: CompiledModuleCache,
-    sandbox_runtime: SandboxRuntime,
+    sandbox_backend: SandboxBackend,
     tournament_locks: BTreeMap<PlayerId, TournamentLockedModule>,
     tournaments: BTreeMap<String, TournamentBracket>,
     issuer: CertificateIssuer,
@@ -889,7 +890,7 @@ impl McpServer {
         Self {
             modules: Vec::new(),
             module_cache: CompiledModuleCache::new(),
-            sandbox_runtime: SandboxRuntime::default(),
+            sandbox_backend: SandboxBackend::default(),
             tournament_locks: BTreeMap::new(),
             tournaments: BTreeMap::new(),
             issuer: CertificateIssuer::new(),
@@ -905,7 +906,7 @@ impl McpServer {
         Self {
             modules: Vec::new(),
             module_cache: CompiledModuleCache::new(),
-            sandbox_runtime: SandboxRuntime::default(),
+            sandbox_backend: SandboxBackend::default(),
             tournament_locks: BTreeMap::new(),
             tournaments: BTreeMap::new(),
             issuer: CertificateIssuer::from_signing_key_for_tests(issuer),
@@ -914,6 +915,13 @@ impl McpServer {
             rate_limiter: RateLimiter::new(),
             now_seconds: Some(now_seconds),
             tick_traces: Vec::new(),
+        }
+    }
+
+    pub fn with_sandbox_backend(sandbox_backend: SandboxBackend) -> Self {
+        Self {
+            sandbox_backend,
+            ..Self::new()
         }
     }
 
@@ -1447,7 +1455,8 @@ impl McpServer {
         )?;
 
         let cached_native_module = self
-            .sandbox_runtime
+            .sandbox_backend
+            .local_runtime_or_default()
             .precompile_native(&wasm_bytes)
             .map_err(|error| {
                 McpError::invalid_params(format!("wasm precompile failed: {error}"))
@@ -1466,7 +1475,7 @@ impl McpServer {
             module_id: module_id.clone(),
             player_id: context.player_id,
             room_id,
-            wasm_bytes,
+            wasm_bytes: wasm_bytes.clone(),
             cached_native_module,
             wasm_hash: cache_key.module_hash.clone(),
             wasmtime_version: cache_key.wasmtime_version.clone(),
@@ -1477,6 +1486,20 @@ impl McpServer {
             deployed_at: deployed_at.clone(),
             load_after_tick: context.tick + 1,
         });
+
+        if let SandboxBackend::Remote { nats_client, .. } = &self.sandbox_backend {
+            let _ = tokio::runtime::Handle::try_current()
+                .map(|handle| {
+                    handle.spawn({
+                        let nats_client = nats_client.clone();
+                        let module_hash = cache_key.module_hash.as_bytes().to_vec();
+                        let wasm_bytes = wasm_bytes.clone();
+                        async move {
+                            let _ = deploy_module_remote(&nats_client, &module_hash, &wasm_bytes).await;
+                        }
+                    });
+                });
+        }
 
         Ok(DeployResult {
             module_id,
@@ -1708,11 +1731,12 @@ impl McpServer {
             .find(|module| module.module_id == module_id)
             .ok_or_else(|| McpError::invalid_params("module_id is not deployed"))?;
 
+        let runtime = self.sandbox_backend.local_runtime_or_default();
         let compiled = if module.wasmtime_version == wasmtime_version() {
-            self.sandbox_runtime
+            runtime
                 .compile_from_cached_native(&module.cached_native_module, &module.wasm_bytes)
         } else {
-            self.sandbox_runtime.compile_cached_with_version(
+            runtime.compile_cached_with_version(
                 &mut self.module_cache,
                 &module.wasm_bytes,
                 &module.wasmtime_version,
