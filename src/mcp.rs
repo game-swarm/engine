@@ -6,8 +6,7 @@ use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use swarm_wasm_sandbox::{
-    CachedNativeModule, CompiledModule, CompiledModuleCache, ModuleCacheKey,
-    wasmtime_version,
+    CachedNativeModule, CompiledModule, CompiledModuleCache, ModuleCacheKey, wasmtime_version,
 };
 
 use crate::arena::{
@@ -1145,20 +1144,35 @@ impl McpServer {
                 serde_json::to_value(self.swarm_auth_revoke(params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
-            "swarm_auth_login"
-            | "swarm_auth_logout"
-            | "swarm_auth_refresh"
-            | "swarm_auth_check"
+            "swarm_auth_login" => {
+                let params: OAuth2LoginParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_oauth2_login(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_auth_refresh" => {
+                let params: TokenRefreshParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_token_refresh(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_auth_check" => Ok(json!({
+                "status": "ok",
+                "player_id": context.player_id,
+                "tick": context.tick,
+                "active_sessions": self.sessions.len(),
+                "revoked_certificates": self.revoked_certificates.len(),
+            })),
+            "swarm_auth_logout"
             | "swarm_auth_cert_issue"
             | "swarm_auth_cert_list"
             | "swarm_auth_cert_revoke"
             | "swarm_auth_cert_rotate"
             | "swarm_auth_device_list"
-            | "swarm_auth_device_register"
-            | "swarm_get_world_config" => {
-                serde_json::to_value(auth_stub_result(tool, context, params))
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
+            | "swarm_auth_device_register" => Err(McpError::invalid_params(format!(
+                "{tool} is not implemented by the embedded engine MCP server; use gateway OAuth2/session endpoints for web auth"
+            ))),
+            "swarm_get_world_config" => Ok(json!(swarm_get_world_rules())),
             "swarm_tournament_precommit" => {
                 let params: TournamentPrecommitParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -1217,6 +1231,12 @@ impl McpServer {
                 let params: ValidateModuleParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
                 serde_json::to_value(swarm_validate_module(params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_dry_run" => {
+                let params: DryRunCommandsParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_dry_run(world, context, params))
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_admin_challenge" => Ok(swarm_admin_challenge(context, &params)),
@@ -1488,17 +1508,16 @@ impl McpServer {
         });
 
         if let SandboxBackend::Remote { nats_client, .. } = &self.sandbox_backend {
-            let _ = tokio::runtime::Handle::try_current()
-                .map(|handle| {
-                    handle.spawn({
-                        let nats_client = nats_client.clone();
-                        let module_hash = cache_key.module_hash.as_bytes().to_vec();
-                        let wasm_bytes = wasm_bytes.clone();
-                        async move {
-                            let _ = deploy_module_remote(&nats_client, &module_hash, &wasm_bytes).await;
-                        }
-                    });
+            let _ = tokio::runtime::Handle::try_current().map(|handle| {
+                handle.spawn({
+                    let nats_client = nats_client.clone();
+                    let module_hash = cache_key.module_hash.as_bytes().to_vec();
+                    let wasm_bytes = wasm_bytes.clone();
+                    async move {
+                        let _ = deploy_module_remote(&nats_client, &module_hash, &wasm_bytes).await;
+                    }
                 });
+            });
         }
 
         Ok(DeployResult {
@@ -1733,8 +1752,7 @@ impl McpServer {
 
         let runtime = self.sandbox_backend.local_runtime_or_default();
         let compiled = if module.wasmtime_version == wasmtime_version() {
-            runtime
-                .compile_from_cached_native(&module.cached_native_module, &module.wasm_bytes)
+            runtime.compile_from_cached_native(&module.cached_native_module, &module.wasm_bytes)
         } else {
             runtime.compile_cached_with_version(
                 &mut self.module_cache,
@@ -2257,17 +2275,6 @@ fn swarm_admin_force_gc(_params: &Value) -> Value {
 fn swarm_admin_get_audit_log(_params: &Value) -> Value {
     json!({
         "entries": [],
-    })
-}
-
-fn auth_stub_result(tool: &str, context: McpContext, params: Value) -> Value {
-    json!({
-        "tool": tool,
-        "status": "stubbed",
-        "auth_control_plane": true,
-        "player_id": context.player_id,
-        "tick": context.tick,
-        "params": params,
     })
 }
 

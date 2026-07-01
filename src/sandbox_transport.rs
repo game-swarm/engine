@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use swarm_wasm_sandbox::{
@@ -8,7 +9,7 @@ use swarm_wasm_sandbox::{
 
 const DEFAULT_COLLECT_TIMEOUT_MS: u64 = 2_500;
 
-#[derive(Clone)]
+#[derive(Resource, Clone)]
 pub enum SandboxBackend {
     Local(SandboxRuntime),
     Remote {

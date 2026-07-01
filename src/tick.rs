@@ -59,7 +59,7 @@ impl TickLoop {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickSnapshot {
     pub tick: Tick,
     pub player_id: PlayerId,
@@ -317,7 +317,7 @@ fn ratio(numerator: u64, denominator: u64) -> f64 {
 
 /// Caches COLLECT results for cross-retry reuse.
 ///
-/// When FDB commit fails, the tick is retried. Without caching, WASM COLLECT
+/// When redb commit fails, the tick is retried. Without caching, WASM COLLECT
 /// would be invoked again, leading to double fuel charges and non-deterministic
 /// side effects. This cache stores the raw commands and fuel metrics from the
 /// first COLLECT call so subsequent retries reuse the same output.
@@ -838,7 +838,7 @@ where
         let state_checksum = self.world.state_checksum();
 
         // S1: Check COLLECT cache before executing WASM.
-        // If FDB commit failed last tick and we're retrying with the same state,
+        // If redb commit failed last tick and we're retrying with the same state,
         // reuse cached commands to avoid double fuel charges.
         let cache_hit = self
             .collect_cache
@@ -1728,12 +1728,10 @@ impl WorldSnapshot {
 
         for id in ids {
             match (self.entities.get(&id), after.entities.get(&id)) {
-                (None, Some(snapshot)) => {
-                    entity_changes.push(EntityChange::Created {
-                        entity_id: id.0,
-                        component_data: serialize_entity_snapshot(snapshot),
-                    })
-                }
+                (None, Some(snapshot)) => entity_changes.push(EntityChange::Created {
+                    entity_id: id.0,
+                    component_data: serialize_entity_snapshot(snapshot),
+                }),
                 (Some(_), None) => entity_changes.push(EntityChange::Removed { entity_id: id.0 }),
                 (Some(before), Some(after)) if before != after => {
                     entity_changes.push(EntityChange::Modified {

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env,
     io::{Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
@@ -11,10 +12,12 @@ use std::{
 };
 
 use swarm_engine::{
-    BodyPart, WorldMode, create_world_with_mode,
-    sandbox_transport::SandboxBackend,
+    BodyPart, CommandIntent, ExecutorError, PlayerExecutor, PlayerId, TickSnapshot, WorldMode,
+    create_world_with_mode,
+    sandbox_transport::{SandboxBackend, execute_tick_remote},
     sim::{create_local_simulation_world, summarize_local_simulation},
 };
+use swarm_wasm_sandbox::SandboxRuntime;
 
 const DEFAULT_HEALTH_ADDR: &str = "0.0.0.0:8080";
 #[derive(Clone, Debug)]
@@ -89,8 +92,7 @@ fn main() {
 
     let redb_path = env::var("REDB_PATH").unwrap_or_else(|_| "swarm.redb".to_string());
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
-    let sandbox_backend =
-        env::var("SANDBOX_BACKEND").unwrap_or_else(|_| "local".to_string());
+    let sandbox_backend = env::var("SANDBOX_BACKEND").unwrap_or_else(|_| "local".to_string());
     let health_addr =
         env::var("ENGINE_HEALTH_ADDR").unwrap_or_else(|_| DEFAULT_HEALTH_ADDR.to_string());
     let tick_interval = Duration::from_millis(
@@ -132,23 +134,28 @@ fn main() {
     } else {
         None
     };
-    let _sandbox_backend = match (sandbox_backend.as_str(), shared_nats_client) {
-        ("local", _) => SandboxBackend::default(),
+    let sandbox_backend = match (sandbox_backend.as_str(), shared_nats_client.clone()) {
+        ("local", _) => SandboxBackend::Local(SandboxRuntime::default()),
         ("nats", Some(nats_client)) => SandboxBackend::Remote {
             nats_client,
-            instance_id: env::var("ENGINE_INSTANCE_ID").unwrap_or_else(|_| "engine-1".to_string()),
+            instance_id: env::var("INSTANCE_ID")
+                .or_else(|_| env::var("ENGINE_INSTANCE_ID"))
+                .unwrap_or_else(|_| "engine-0".to_string()),
         },
-        ("nats", None) => SandboxBackend::default(),
+        ("nats", None) => SandboxBackend::Local(SandboxRuntime::default()),
         (other, _) => {
             eprintln!("unknown SANDBOX_BACKEND={other}; using local");
-            SandboxBackend::default()
+            SandboxBackend::Local(SandboxRuntime::default())
         }
     };
 
     let mut world = create_world_with_mode(mode);
-    if let Ok(store) = redb_store {
-        world.app.insert_resource(store);
-    }
+    world.app.insert_resource(sandbox_backend.clone());
+    world
+        .app
+        .insert_resource(swarm_engine::RedbStore::unavailable(
+            "owned by tick scheduler",
+        ));
     world
         .app
         .insert_resource(swarm_engine::InMemorySnapshotCache::in_process());
@@ -157,6 +164,16 @@ fn main() {
         10,
         10,
         vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
+    );
+
+    let mut scheduler = swarm_engine::MultiPlayerTickScheduler::new(
+        world,
+        scheduler_executors(&sandbox_backend),
+        swarm_engine::RedbTickCommitter::new(match redb_store {
+            Ok(store) => store,
+            Err(error) => swarm_engine::RedbStore::unavailable(error.to_string()),
+        }),
+        swarm_engine::InMemoryTickBroadcaster::default(),
     );
 
     let mut tick: u64 = 0;
@@ -178,11 +195,21 @@ fn main() {
                 "tick={tick} dependency=nats status=degraded action=continue_without_broadcast"
             );
         }
-        world.run_tick();
+        if redb_ok && nats_ok {
+            let report = scheduler.tick();
+            if !report.committed {
+                eprintln!(
+                    "tick={tick} scheduler_commit=failed commit_failures={}",
+                    report.metrics.commit_failures
+                );
+            }
+        } else {
+            scheduler.world.run_tick();
+        }
         println!(
             "tick={} state_checksum={} redb={} nats={}",
             tick,
-            world.state_checksum(),
+            scheduler.world.state_checksum(),
             status(redb_ok),
             status(nats_ok)
         );
@@ -191,12 +218,65 @@ fn main() {
     }
 }
 
+fn scheduler_executors(backend: &SandboxBackend) -> HashMap<PlayerId, Box<dyn PlayerExecutor>> {
+    HashMap::from([(
+        1,
+        Box::new(SandboxPlayerExecutor::new(backend.clone())) as Box<dyn PlayerExecutor>,
+    )])
+}
+
+struct SandboxPlayerExecutor {
+    backend: SandboxBackend,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl SandboxPlayerExecutor {
+    fn new(backend: SandboxBackend) -> Self {
+        Self {
+            backend,
+            runtime: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build sandbox executor runtime"),
+        }
+    }
+}
+
+impl PlayerExecutor for SandboxPlayerExecutor {
+    fn collect(&mut self, snapshot: TickSnapshot) -> Result<Vec<CommandIntent>, ExecutorError> {
+        match &self.backend {
+            SandboxBackend::Remote { nats_client, .. } => {
+                let player_id = snapshot.player_id.to_string();
+                let snapshot_json = serde_json::to_vec(&snapshot)
+                    .map_err(|error| ExecutorError::Error(error.to_string()))?;
+                let reply = self
+                    .runtime
+                    .block_on(execute_tick_remote(
+                        nats_client,
+                        snapshot.tick,
+                        &player_id,
+                        &snapshot_json,
+                        &[],
+                        swarm_engine::MAX_FUEL,
+                    ))
+                    .map_err(ExecutorError::Error)?;
+                if reply.status.eq_ignore_ascii_case("timeout") {
+                    return Err(ExecutorError::Timeout);
+                }
+                Ok(Vec::new())
+            }
+            SandboxBackend::Local(_) => Ok(Vec::new()),
+        }
+    }
+}
+
 fn connect_nats_client(nats_url: &str) -> Result<async_nats::Client, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    runtime.block_on(async_nats::connect(nats_url))
+    runtime
+        .block_on(async_nats::connect(nats_url))
         .map_err(|error| error.to_string())
 }
 
