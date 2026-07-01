@@ -4,30 +4,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arena_admin::ArenaRoomAdmin;
 use crate::command::{
-    apply_command, source_gate, validate_command, CommandIntent, CommandResult, CommandSource,
-    RawCommand, Tick,
+    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
+    validate_command,
 };
 use crate::components::*;
 use crate::hot_cache::InMemorySnapshotCache;
-use crate::npc::events::{event_effect_system, world_event_system, EventConfig, EventState};
+use crate::npc::events::{EventConfig, EventState, event_effect_system, world_event_system};
 use crate::npc::loot::{BlueprintRegistry, NpcLootTables};
 use crate::npc::strongholds::{
-    stronghold_production_system, stronghold_spawn_system, SpawnedStrongholdRooms,
-    StrongholdSpawnConfig,
+    SpawnedStrongholdRooms, StrongholdSpawnConfig, stronghold_production_system,
+    stronghold_spawn_system,
 };
-use crate::npc::{npc_ai_system, npc_combat_system, npc_spawn_system, NpcSpawnState};
+use crate::npc::{NpcSpawnState, npc_ai_system, npc_combat_system, npc_spawn_system};
 use crate::onboarding::{
-    onboarding_system, send_onboarding_event, OnboardingConfig, OnboardingEvent,
-    OnboardingProgress, OnboardingSwarmEvent,
+    OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
+    send_onboarding_event,
 };
 use crate::plugins::{load_default_plugin_lock, register_mods};
 use crate::pve::{
-    zone_definition_for_room, zone_for_room, DifficultyZone, PveBudget, PveBudgetConfig,
-    WorldPveConfig, ZoneDefinition,
+    DifficultyZone, PveBudget, PveBudgetConfig, WorldPveConfig, ZoneDefinition,
+    zone_definition_for_room, zone_for_room,
 };
 use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::redb_store::RedbStore;
-use crate::resource_ledger::{resource_ledger_system, ResourceLedger};
+use crate::resource_ledger::{ResourceLedger, resource_ledger_system};
 use crate::resources::{
     CurrentTick, GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
@@ -872,6 +872,9 @@ impl WorldConfig {
         app.insert_resource(ResourceLedger::default());
     }
     fn register_systems(&self, app: &mut App) {
+        // Registered tick systems include the core manifest chain plus live engine systems for
+        // propagation, world events, strongholds, NPCs, starting resources, cargo/global storage,
+        // allied transfer, repair/projectile combat, status buffers, cleanup, and entity flush.
         if self.propagation_system_enabled() {
             app.add_systems(Update, code_propagation_system.before(spawn_system));
         }
@@ -2224,18 +2227,22 @@ cost = { Energy = 33 }
                 .update_cooldown,
             5
         );
-        assert!(world
-            .app
-            .world()
-            .resource::<SpecialEffectRegistry>()
-            .get("hack")
-            .is_some());
-        assert!(world
-            .app
-            .world()
-            .resource::<CustomActionRegistry>()
-            .get("Hack")
-            .is_some());
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<SpecialEffectRegistry>()
+                .get("hack")
+                .is_some()
+        );
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<CustomActionRegistry>()
+                .get("Hack")
+                .is_some()
+        );
     }
 
     fn test_command(player_id: PlayerId) -> RawCommand {

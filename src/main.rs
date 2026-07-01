@@ -5,21 +5,45 @@ use std::{
     net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Component, Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
 
 use swarm_engine::{
-    create_world_with_mode,
-    sandbox_transport::{execute_tick_remote, SandboxBackend},
-    sim::{create_local_simulation_world, summarize_local_simulation},
     BodyPart, CommandIntent, ExecutorError, PlayerExecutor, PlayerId, TickBroadcaster,
-    TickSnapshot, WorldMode,
+    TickSnapshot, WorldMode, create_world_with_mode,
+    sandbox_transport::{SandboxBackend, execute_tick_remote},
+    sim::{create_local_simulation_world, summarize_local_simulation},
 };
 use swarm_wasm_sandbox::SandboxRuntime;
+
+#[cfg(feature = "mod_combat_core")]
+#[path = "../mods/combat-core/src/lib.rs"]
+mod swarm_mod_combat_core;
+#[cfg(feature = "mod_depot_storage")]
+#[path = "../mods/depot-storage/src/lib.rs"]
+mod swarm_mod_depot_storage;
+#[cfg(feature = "mod_empire_upkeep")]
+#[path = "../mods/empire-upkeep/src/lib.rs"]
+mod swarm_mod_empire_upkeep;
+#[cfg(feature = "mod_fog_of_war")]
+#[path = "../mods/fog-of-war/src/lib.rs"]
+mod swarm_mod_fog_of_war;
+#[cfg(feature = "mod_pve_spawning")]
+#[path = "../mods/pve-spawning/src/lib.rs"]
+mod swarm_mod_pve_spawning;
+#[cfg(feature = "mod_resource_decay")]
+#[path = "../mods/resource-decay/src/lib.rs"]
+mod swarm_mod_resource_decay;
+#[cfg(feature = "mod_special_attacks")]
+#[path = "../mods/special-attacks/src/lib.rs"]
+mod swarm_mod_special_attacks;
+#[cfg(feature = "mod_vanilla_boss")]
+#[path = "../mods/vanilla-boss/src/lib.rs"]
+mod swarm_mod_vanilla_boss;
 
 const DEFAULT_HEALTH_ADDR: &str = "0.0.0.0:8080";
 #[derive(Clone, Debug)]
@@ -153,6 +177,7 @@ fn main() {
 
     swarm_engine::world::ensure_world_config_exists("world.toml", "mods.lock");
     let mut world = create_world_with_mode(mode);
+    add_feature_gated_mod_plugins(&mut world.app);
     world.app.insert_resource(sandbox_backend.clone());
     world
         .app
@@ -228,6 +253,26 @@ fn main() {
         tick += 1;
         thread::sleep(tick_interval);
     }
+}
+
+fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) {
+    let _ = app;
+    #[cfg(feature = "mod_combat_core")]
+    app.add_plugins(swarm_mod_combat_core::CombatCoreModPlugin);
+    #[cfg(feature = "mod_depot_storage")]
+    app.add_plugins(swarm_mod_depot_storage::DepotStorageModPlugin);
+    #[cfg(feature = "mod_empire_upkeep")]
+    app.add_plugins(swarm_mod_empire_upkeep::EmpireUpkeepModPlugin);
+    #[cfg(feature = "mod_fog_of_war")]
+    app.add_plugins(swarm_mod_fog_of_war::FogOfWarModPlugin);
+    #[cfg(feature = "mod_pve_spawning")]
+    app.add_plugins(swarm_mod_pve_spawning::PveSpawningModPlugin);
+    #[cfg(feature = "mod_resource_decay")]
+    app.add_plugins(swarm_mod_resource_decay::ResourceDecayModPlugin);
+    #[cfg(feature = "mod_special_attacks")]
+    app.add_plugins(swarm_mod_special_attacks::SpecialAttacksModPlugin);
+    #[cfg(feature = "mod_vanilla_boss")]
+    app.add_plugins(swarm_mod_vanilla_boss::VanillaBossPlugin::default());
 }
 
 fn scheduler_executors(backend: &SandboxBackend) -> HashMap<PlayerId, Box<dyn PlayerExecutor>> {
@@ -612,9 +657,5 @@ fn tcp_check(endpoint: &Endpoint) -> bool {
 }
 
 fn status(ok: bool) -> &'static str {
-    if ok {
-        "ok"
-    } else {
-        "degraded"
-    }
+    if ok { "ok" } else { "degraded" }
 }

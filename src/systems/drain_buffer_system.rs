@@ -1,21 +1,26 @@
 use bevy::prelude::*;
 
-use crate::components::{DrainBuffer, DrainState};
+use crate::components::DrainBuffer;
+use crate::systems::{PendingSpecialAttack, SpecialAttackKind};
 
 pub fn drain_buffer_system(
     mut commands: Commands,
-    states: Query<(Entity, &DrainState)>,
+    pending: Res<PendingSpecialAttack>,
     mut buffers: Query<&mut DrainBuffer>,
 ) {
-    for (entity, state) in &states {
+    for intent in pending
+        .intents
+        .iter()
+        .filter(|intent| intent.kind == SpecialAttackKind::Drain)
+    {
         let next = DrainBuffer {
-            resource: state.resource.clone(),
-            amount_per_tick: state.amount_per_tick,
+            resource: "energy".to_string(),
+            amount_per_tick: intent.amount.max(1) / 3,
         };
-        if let Ok(mut buffer) = buffers.get_mut(entity) {
+        if let Ok(mut buffer) = buffers.get_mut(intent.target) {
             *buffer = next;
         } else {
-            commands.entity(entity).insert(next);
+            commands.entity(intent.target).insert(next);
         }
     }
 }

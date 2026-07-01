@@ -16,6 +16,14 @@ name = "swarm-engine"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "swarm_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "swarm-engine"
+path = "src/main.rs"
+
 [dependencies]
 bevy = "0.16"
 async-nats = "0.42"
@@ -55,6 +63,14 @@ vanilla_mods = [
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+swarm-mod-combat-core = { path = "mods/combat-core" }
+swarm-mod-depot-storage = { path = "mods/depot-storage" }
+swarm-mod-empire-upkeep = { path = "mods/empire-upkeep" }
+swarm-mod-fog-of-war = { path = "mods/fog-of-war" }
+swarm-mod-pve-spawning = { path = "mods/pve-spawning" }
+swarm-mod-resource-decay = { path = "mods/resource-decay" }
+swarm-mod-special-attacks = { path = "mods/special-attacks" }
+swarm-mod-vanilla-boss = { path = "mods/vanilla-boss" }
 tempfile = "3"
 wat = "1"
 

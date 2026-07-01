@@ -5,7 +5,7 @@ use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::command::Tick;
-use crate::hot_cache::{CachedSnapshot, SnapshotKey, RedbSnapshotStore};
+use crate::hot_cache::{CachedSnapshot, RedbSnapshotStore, SnapshotKey};
 use crate::mcp::VisibleWorldSnapshot;
 use crate::tick::{AtomicTickStore, CommitError, TickState};
 

@@ -1550,7 +1550,7 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
         }
         CommandAction::ClaimController {
             object_id,
-            controller_id,
+            target_id: controller_id,
         }
         | CommandAction::Repair {
             object_id,
@@ -1558,12 +1558,19 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
         }
         | CommandAction::UpgradeController {
             object_id,
-            controller_id,
+            target_id: controller_id,
         } => {
             remap_object_id(object_id, entity_map);
             remap_object_id(controller_id, entity_map);
         }
-        CommandAction::Spawn { spawn_id, .. } => remap_object_id(spawn_id, entity_map),
+        CommandAction::Spawn {
+            object_id,
+            spawn_id,
+            ..
+        } => {
+            remap_object_id(object_id, entity_map);
+            remap_object_id(spawn_id, entity_map);
+        }
         CommandAction::Recycle { object_id } => remap_object_id(object_id, entity_map),
         CommandAction::Action {
             object_id,
@@ -3120,8 +3127,9 @@ mod tests {
             result: Ok(vec![CommandIntent {
                 sequence: 1,
                 action: CommandAction::Spawn {
+                    object_id: object_id(spawn),
                     spawn_id: object_id(spawn),
-                    body: vec![BodyPart::Move],
+                    body_parts: vec![BodyPart::Move],
                 },
             }]),
         };

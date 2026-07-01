@@ -1,19 +1,24 @@
 use bevy::prelude::*;
 
-use crate::components::{HackBuffer, HackState};
+use crate::components::HackBuffer;
+use crate::systems::{PendingSpecialAttack, SpecialAttackKind};
 
 pub fn hack_buffer_system(
     mut commands: Commands,
-    states: Query<(Entity, &HackState)>,
+    pending: Res<PendingSpecialAttack>,
     mut buffers: Query<&mut HackBuffer>,
 ) {
-    for (entity, state) in &states {
-        if let Ok(mut buffer) = buffers.get_mut(entity) {
-            buffer.active = state.remaining_ticks > 0;
+    for intent in pending
+        .intents
+        .iter()
+        .filter(|intent| intent.kind == SpecialAttackKind::Hack)
+    {
+        if let Ok(mut buffer) = buffers.get_mut(intent.target) {
+            buffer.active = true;
         } else {
-            commands.entity(entity).insert(HackBuffer {
-                active: state.remaining_ticks > 0,
-            });
+            commands
+                .entity(intent.target)
+                .insert(HackBuffer { active: true });
         }
     }
 }

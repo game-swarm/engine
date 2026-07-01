@@ -68,6 +68,13 @@ impl McpError {
             message: format!("rate limited, retry after {retry_after_seconds} seconds"),
         }
     }
+
+    fn feature_gated(feature: impl Into<String>) -> Self {
+        Self {
+            code: -32000,
+            message: format!("ERR_FEATURE_GATED: {}", feature.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,6 +526,8 @@ pub struct ToolInfo {
     pub name: String,
     pub description: String,
     pub auth_mode: AuthMode,
+    pub input_schema: Value,
+    pub output_schema: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -534,6 +543,8 @@ fn tool_info(name: &str, description: &str) -> ToolInfo {
         name: name.to_string(),
         description: description.to_string(),
         auth_mode: mcp_tool_auth_mode(name).unwrap_or(AuthMode::WebSessionOk),
+        input_schema: json!({}),
+        output_schema: json!({}),
     }
 }
 
@@ -990,10 +1001,16 @@ impl McpServer {
                 serde_json::to_value(swarm_get_room(world, context, params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
-            "swarm_get_structure" | "swarm_get_controller" => {
+            "swarm_get_structure" => {
                 let params: InspectEntityParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(swarm_get_drone(world, context, params)?)
+                serde_json::to_value(swarm_get_structure(world, context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_controller" => {
+                let params: InspectEntityParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(swarm_get_controller(world, context, params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_get_code" => Ok(world_view_code(params)?),
@@ -1005,7 +1022,7 @@ impl McpServer {
             "swarm_list_rooms" => Ok(world_view_list(world, context, "rooms")),
             "swarm_list_structures" => Ok(world_view_list(world, context, "structures")),
             "swarm_list_controllers" => Ok(world_view_list(world, context, "controllers")),
-            "swarm_get_events" => Ok(json!({ "events": Vec::<Value>::new() })),
+            "swarm_get_events" => Ok(self.swarm_get_events(world, context)),
             "swarm_get_messages" => Ok(world_view_messages(params)?),
 
             "swarm_get_tick_trace" => {
@@ -1082,19 +1099,7 @@ impl McpServer {
                 serde_json::to_value(get_drone_efficiency(world, params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
-            "swarm_get_leaderboard" => {
-                let params: LeaderboardParams = if params.is_null() {
-                    LeaderboardParams {
-                        scope: "global".to_string(),
-                        limit: 10,
-                    }
-                } else {
-                    serde_json::from_value(params)
-                        .map_err(|error| McpError::invalid_params(error.to_string()))?
-                };
-                serde_json::to_value(get_leaderboard(world, params))
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
+            "swarm_get_leaderboard" => Err(McpError::feature_gated(tool)),
             "swarm_sdk_fetch" => {
                 let params: SdkFetchParams = if params.is_null() {
                     SdkFetchParams {
@@ -1169,26 +1174,18 @@ impl McpServer {
             | "swarm_auth_cert_revoke"
             | "swarm_auth_cert_rotate"
             | "swarm_auth_device_list"
-            | "swarm_auth_device_register" => Err(McpError::invalid_params(format!(
-                "{tool} is not implemented by the embedded engine MCP server; use gateway OAuth2/session endpoints for web auth"
-            ))),
-            "swarm_get_world_config" => Ok(json!(swarm_get_world_rules())),
-            "swarm_tournament_precommit" => {
-                let params: TournamentPrecommitParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(self.swarm_tournament_precommit(context, params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_tournament_create" => {
-                let params: TournamentCreateParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(self.swarm_tournament_create(params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_tournament_status" => {
-                serde_json::to_value(self.swarm_tournament_status(context))
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
+            | "swarm_auth_device_register"
+            | "swarm_register_challenge"
+            | "swarm_submit_csr"
+            | "swarm_renew_certificate"
+            | "swarm_revoke_certificate"
+            | "swarm_cert_list"
+            | "swarm_cert_check"
+            | "swarm_get_server_trust" => Err(McpError::feature_gated(tool)),
+            "swarm_get_world_config" => Ok(swarm_get_world_config()),
+            "swarm_tournament_precommit"
+            | "swarm_tournament_create"
+            | "swarm_tournament_status" => Err(McpError::feature_gated(tool)),
             "swarm_match_result" => {
                 let params: MatchResultParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -1717,6 +1714,55 @@ impl McpServer {
         swarm_explain_last_tick_from_traces(world, context, &self.tick_traces)
     }
 
+    pub fn swarm_get_events(&self, world: &mut SwarmWorld, context: McpContext) -> Value {
+        let mut events = Vec::new();
+        if let Some(log) = world.app.world().get_resource::<EventLog>() {
+            events.extend(
+                log.entries
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .player_id
+                            .is_none_or(|player| player == context.player_id)
+                    })
+                    .map(|entry| {
+                        json!({
+                            "tick": entry.tick,
+                            "type": entry.event_type,
+                            "data": {
+                                "message": entry.message,
+                                "player_id": entry.player_id,
+                            }
+                        })
+                    }),
+            );
+        }
+        for trace in &self.tick_traces {
+            for event in &trace.trace_events {
+                if !trace_event_visible(world, context.player_id, event.entity) {
+                    continue;
+                }
+                events.push(json!({
+                    "tick": trace.tick,
+                    "type": event.event,
+                    "data": {
+                        "system": event.system,
+                        "entity": event.entity,
+                        "amount": event.amount,
+                        "resource": event.resource,
+                    }
+                }));
+            }
+        }
+        events.sort_by_key(|event| {
+            event
+                .get("tick")
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+        });
+        json!({ "events": events })
+    }
+
     fn verify_certificate_for_player(
         &self,
         certificate: &PlayerCertificate,
@@ -2065,6 +2111,34 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             "Issue an application-layer client/code certificate bundle",
         ),
         tool_info(
+            "swarm_register_challenge",
+            "Create a proof-of-work challenge for CSR certificate registration",
+        ),
+        tool_info(
+            "swarm_submit_csr",
+            "Submit a certificate signing request for application-layer auth",
+        ),
+        tool_info(
+            "swarm_renew_certificate",
+            "Renew an application-layer certificate",
+        ),
+        tool_info(
+            "swarm_revoke_certificate",
+            "Revoke an application-layer certificate",
+        ),
+        tool_info(
+            "swarm_cert_list",
+            "List application-layer certificates for the caller",
+        ),
+        tool_info(
+            "swarm_cert_check",
+            "Check application-layer certificate status",
+        ),
+        tool_info(
+            "swarm_get_server_trust",
+            "Return server trust anchors for application-layer auth",
+        ),
+        tool_info(
             "swarm_auth_cert_list",
             "List application-layer certificates for the caller",
         ),
@@ -2199,6 +2273,13 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_auth_cert_rotate"
         | "swarm_auth_device_list"
         | "swarm_auth_device_register"
+        | "swarm_register_challenge"
+        | "swarm_submit_csr"
+        | "swarm_renew_certificate"
+        | "swarm_revoke_certificate"
+        | "swarm_cert_list"
+        | "swarm_cert_check"
+        | "swarm_get_server_trust"
         | "swarm_get_world_config"
         | "swarm_tournament_status"
         | "swarm_match_result"
@@ -2685,6 +2766,29 @@ fn world_view_path(params: Value) -> Value {
     json!({ "path": Vec::<Value>::new(), "distance": 0, "cost": 0, "params": params })
 }
 
+fn trace_event_visible(world: &mut SwarmWorld, player_id: PlayerId, object_id: ObjectId) -> bool {
+    let entity = Entity::from_bits(object_id);
+    let Ok(entity_ref) = world.app.world().get_entity(entity) else {
+        return false;
+    };
+    let owned = entity_ref
+        .get::<Owner>()
+        .is_some_and(|owner| owner.0 == player_id)
+        || entity_ref
+            .get::<Drone>()
+            .is_some_and(|drone| drone.owner == player_id)
+        || entity_ref
+            .get::<Structure>()
+            .is_some_and(|structure| structure.owner == Some(player_id))
+        || entity_ref
+            .get::<Controller>()
+            .is_some_and(|controller| controller.owner == Some(player_id));
+    let position = entity_ref.get::<Position>().copied();
+    owned
+        || position
+            .is_some_and(|position| is_visible_to(world.app.world_mut(), player_id, position))
+}
+
 pub fn swarm_get_drone(
     world: &mut SwarmWorld,
     context: McpContext,
@@ -2747,6 +2851,62 @@ pub fn swarm_get_drone(
         terrain: terrain.map(|terrain| terrain.0),
         controller,
         marked_for_death,
+    })
+}
+
+pub fn swarm_get_structure(
+    world: &mut SwarmWorld,
+    context: McpContext,
+    params: InspectEntityParams,
+) -> Result<VisibleStructure, McpError> {
+    let state = swarm_get_drone(world, context, params)?;
+    let Some(structure) = state.structure else {
+        return Err(McpError::invalid_params(
+            "entity is not a visible structure",
+        ));
+    };
+    let Some(position) = state.position else {
+        return Err(McpError::invalid_params(
+            "structure has no visible position",
+        ));
+    };
+    Ok(VisibleStructure {
+        id: state.id,
+        structure_type: structure.structure_type,
+        owner: structure.owner,
+        position,
+        hits: structure.hits,
+        hits_max: structure.hits_max,
+        energy: structure.energy,
+        energy_capacity: structure.energy_capacity,
+        cooldown: structure.cooldown,
+    })
+}
+
+pub fn swarm_get_controller(
+    world: &mut SwarmWorld,
+    context: McpContext,
+    params: InspectEntityParams,
+) -> Result<VisibleController, McpError> {
+    let state = swarm_get_drone(world, context, params)?;
+    let Some(controller) = state.controller else {
+        return Err(McpError::invalid_params(
+            "entity is not a visible controller",
+        ));
+    };
+    let Some(position) = state.position else {
+        return Err(McpError::invalid_params(
+            "controller has no visible position",
+        ));
+    };
+    Ok(VisibleController {
+        id: state.id,
+        owner: controller.owner,
+        position,
+        level: controller.level,
+        progress: controller.progress,
+        progress_total: controller.progress_total,
+        safe_mode: controller.safe_mode,
     })
 }
 
@@ -3493,6 +3653,28 @@ pub fn swarm_get_world_rules() -> WorldRules {
             },
         ],
     }
+}
+
+fn swarm_get_world_config() -> Value {
+    let rules = swarm_get_world_rules();
+    let limits = json!({
+        "room_size": rules.room_size,
+        "visibility_radius": rules.visibility_radius,
+        "max_wasm_bytes": rules.max_wasm_bytes,
+        "max_body_parts": crate::command::MAX_BODY_PARTS,
+        "max_commands_per_player": crate::command::MAX_COMMANDS_PER_PLAYER,
+        "max_drones_per_player": crate::command::MAX_DRONES_PER_PLAYER,
+    });
+    json!({
+        "rules": {
+            "ruleset": rules.ruleset,
+            "room_size": rules.room_size,
+            "visibility_radius": rules.visibility_radius,
+        },
+        "mods": rules.active_mods,
+        "limits": limits,
+        "tick_rate": 1,
+    })
 }
 
 pub fn is_visible_to(world: &mut World, player_id: PlayerId, position: Position) -> bool {

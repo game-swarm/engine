@@ -17,10 +17,10 @@ pub mod realtime;
 pub mod redb_store;
 pub mod resource_ledger;
 pub mod resources;
+pub mod sandbox_transport;
 pub mod scheduler;
 pub mod sdk_gen;
 pub mod security;
-pub mod sandbox_transport;
 pub mod sim;
 pub mod systems;
 pub mod tick;
@@ -1025,8 +1025,9 @@ mod tests {
                 1,
                 1,
                 CommandAction::Spawn {
+                    object_id: object_id(spawn),
                     spawn_id: object_id(spawn),
-                    body: vec![BodyPart::Move],
+                    body_parts: vec![BodyPart::Move],
                 },
             ),
             Err(RejectionReason::InsufficientResource {
@@ -2179,8 +2180,9 @@ mod tests {
                 1,
                 1,
                 CommandAction::Spawn {
+                    object_id: object_id(spawn),
                     spawn_id: object_id(spawn),
-                    body: vec![BodyPart::Move]
+                    body_parts: vec![BodyPart::Move]
                 }
             ),
             Err(RejectionReason::SpawnOnCooldown)
@@ -2199,8 +2201,9 @@ mod tests {
                 2,
                 2,
                 CommandAction::Spawn {
+                    object_id: object_id(spawn),
                     spawn_id: object_id(spawn),
-                    body: vec![BodyPart::Move]
+                    body_parts: vec![BodyPart::Move]
                 }
             ),
             Err(RejectionReason::NotYourSpawn)
@@ -2212,8 +2215,9 @@ mod tests {
                 1,
                 3,
                 CommandAction::Spawn {
+                    object_id: object_id(spawn),
                     spawn_id: object_id(spawn),
-                    body: vec![BodyPart::Tough; 51]
+                    body_parts: vec![BodyPart::Tough; 51]
                 }
             ),
             Err(RejectionReason::BodyTooLarge)
@@ -2226,8 +2230,9 @@ mod tests {
                 1,
                 4,
                 CommandAction::Spawn {
+                    object_id: object_id(spawn),
                     spawn_id: object_id(spawn),
-                    body: vec![BodyPart::Move]
+                    body_parts: vec![BodyPart::Move]
                 }
             ),
             Err(RejectionReason::InvalidTerrain)
@@ -2240,8 +2245,9 @@ mod tests {
                 1,
                 5,
                 CommandAction::Spawn {
+                    object_id: object_id(spawn),
                     spawn_id: object_id(spawn),
-                    body: vec![BodyPart::Move, BodyPart::Carry]
+                    body_parts: vec![BodyPart::Move, BodyPart::Carry]
                 }
             ),
             Ok(())

@@ -1,19 +1,24 @@
 use bevy::prelude::*;
 
-use crate::components::{FortifyBuffer, FortifyState};
+use crate::components::FortifyBuffer;
+use crate::systems::{PendingSpecialAttack, SpecialAttackKind};
 
 pub fn fortify_buffer_system(
     mut commands: Commands,
-    states: Query<(Entity, &FortifyState)>,
+    pending: Res<PendingSpecialAttack>,
     mut buffers: Query<&mut FortifyBuffer>,
 ) {
-    for (entity, state) in &states {
-        if let Ok(mut buffer) = buffers.get_mut(entity) {
-            buffer.active = state.remaining_ticks > 0;
+    for intent in pending
+        .intents
+        .iter()
+        .filter(|intent| intent.kind == SpecialAttackKind::Fortify)
+    {
+        if let Ok(mut buffer) = buffers.get_mut(intent.target) {
+            buffer.active = true;
         } else {
-            commands.entity(entity).insert(FortifyBuffer {
-                active: state.remaining_ticks > 0,
-            });
+            commands
+                .entity(intent.target)
+                .insert(FortifyBuffer { active: true });
         }
     }
 }

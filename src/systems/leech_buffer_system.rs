@@ -1,22 +1,27 @@
 use bevy::prelude::*;
 
-use crate::components::{LeechBuffer, LeechState};
+use crate::components::LeechBuffer;
+use crate::systems::{PendingSpecialAttack, SpecialAttackKind};
 
 pub fn leech_buffer_system(
     mut commands: Commands,
-    states: Query<(Entity, &LeechState)>,
+    pending: Res<PendingSpecialAttack>,
     mut buffers: Query<&mut LeechBuffer>,
 ) {
-    for (entity, state) in &states {
+    for intent in pending
+        .intents
+        .iter()
+        .filter(|intent| intent.kind == SpecialAttackKind::Leech)
+    {
         let next = LeechBuffer {
-            resource: state.resource.clone(),
-            amount_per_tick: state.amount_per_tick,
-            age_acceleration: state.age_acceleration,
+            resource: "Energy".to_string(),
+            amount_per_tick: intent.amount.max(1) / 3,
+            age_acceleration: 1,
         };
-        if let Ok(mut buffer) = buffers.get_mut(entity) {
+        if let Ok(mut buffer) = buffers.get_mut(intent.target) {
             *buffer = next;
         } else {
-            commands.entity(entity).insert(next);
+            commands.entity(intent.target).insert(next);
         }
     }
 }

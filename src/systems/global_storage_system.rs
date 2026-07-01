@@ -149,7 +149,10 @@ mod tests {
         let config = GlobalStorageConfig::default();
 
         assert_eq!(compute_continuous_storage_tax(30_000, 100_000, &config), 0);
-        assert_eq!(compute_continuous_storage_tax(100_000, 100_000, &config), 24);
+        assert_eq!(
+            compute_continuous_storage_tax(100_000, 100_000, &config),
+            24
+        );
     }
 }
 

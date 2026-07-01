@@ -1,20 +1,23 @@
 use bevy::prelude::*;
 
-use crate::components::{FabricateBuffer, FabricateState};
+use crate::components::FabricateBuffer;
+use crate::systems::{PendingSpecialAttack, SpecialAttackKind};
 
 pub fn fabricate_buffer_system(
     mut commands: Commands,
-    states: Query<(Entity, &FabricateState)>,
+    pending: Res<PendingSpecialAttack>,
     mut buffers: Query<&mut FabricateBuffer>,
 ) {
-    for (entity, state) in &states {
-        let next = FabricateBuffer {
-            structure_type: state.structure_type,
-        };
-        if let Ok(mut buffer) = buffers.get_mut(entity) {
+    for intent in pending
+        .intents
+        .iter()
+        .filter(|intent| intent.kind == SpecialAttackKind::Fabricate)
+    {
+        let next = FabricateBuffer::default();
+        if let Ok(mut buffer) = buffers.get_mut(intent.target) {
             *buffer = next;
         } else {
-            commands.entity(entity).insert(next);
+            commands.entity(intent.target).insert(next);
         }
     }
 }

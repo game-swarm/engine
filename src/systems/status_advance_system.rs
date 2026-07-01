@@ -13,8 +13,8 @@ use crate::systems::{PendingDamage, PendingIntents, SpecialAttackKind};
 /// and FabricateState (R22 B3).
 /// It reads canonical sorted intents from S14's PendingIntents buffer,
 /// resets/extends existing statuses, advances remaining_ticks, and
-/// removes expired statuses. Initial component insertion happens via
-/// command validation (apply_hack etc).
+/// removes expired statuses. Command validation only queues PendingSpecialAttack;
+/// status components are advanced here from reduced intents.
 pub fn status_advance_system(
     mut commands: Commands,
     intents: Option<Res<PendingIntents>>,

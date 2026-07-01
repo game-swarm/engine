@@ -15,7 +15,7 @@ use crate::resources::{
 };
 use crate::systems::{
     PendingControllerUpgrade, PendingDamage, PendingHeal, PendingSpawn, PendingSpawnQueue,
-    RoomDroneCounts,
+    PendingSpecialAttack, RoomDroneCounts, SpecialAttackKind, StatusActionIntent,
 };
 
 pub type ObjectId = u64;
@@ -97,11 +97,12 @@ pub enum CommandAction {
     },
     ClaimController {
         object_id: ObjectId,
-        controller_id: ObjectId,
+        target_id: ObjectId,
     },
     Spawn {
+        object_id: ObjectId,
         spawn_id: ObjectId,
-        body: Vec<BodyPart>,
+        body_parts: Vec<BodyPart>,
     },
     Recycle {
         object_id: ObjectId,
@@ -118,7 +119,7 @@ pub enum CommandAction {
     },
     UpgradeController {
         object_id: ObjectId,
-        controller_id: ObjectId,
+        target_id: ObjectId,
     },
     TransferToGlobal {
         resource: String,
@@ -177,6 +178,7 @@ struct CommandActionWire {
     controller_id: Option<ObjectId>,
     spawn_id: Option<ObjectId>,
     direction: Option<Direction>,
+    body_parts: Option<Vec<BodyPart>>,
     body: Option<Vec<BodyPart>>,
     resource: Option<String>,
     amount: Option<u32>,
@@ -232,11 +234,18 @@ impl<'de> Deserialize<'de> for CommandAction {
             },
             "ClaimController" => Self::ClaimController {
                 object_id: required!(wire.object_id, "object_id"),
-                controller_id: required!(wire.controller_id, "controller_id"),
+                target_id: wire
+                    .target_id
+                    .or(wire.controller_id)
+                    .ok_or_else(|| serde::de::Error::missing_field("target_id"))?,
             },
             "Spawn" => Self::Spawn {
+                object_id: required!(wire.object_id, "object_id"),
                 spawn_id: required!(wire.spawn_id, "spawn_id"),
-                body: required!(wire.body, "body"),
+                body_parts: wire
+                    .body_parts
+                    .or(wire.body)
+                    .ok_or_else(|| serde::de::Error::missing_field("body_parts"))?,
             },
             "Recycle" => Self::Recycle {
                 object_id: required!(wire.object_id, "object_id"),
@@ -253,7 +262,10 @@ impl<'de> Deserialize<'de> for CommandAction {
             },
             "UpgradeController" => Self::UpgradeController {
                 object_id: required!(wire.object_id, "object_id"),
-                controller_id: required!(wire.controller_id, "controller_id"),
+                target_id: wire
+                    .target_id
+                    .or(wire.controller_id)
+                    .ok_or_else(|| serde::de::Error::missing_field("target_id"))?,
             },
             "TransferToGlobal" => Self::TransferToGlobal {
                 resource: required!(wire.resource, "resource"),
@@ -362,16 +374,21 @@ impl Serialize for CommandAction {
             }
             Self::ClaimController {
                 object_id,
-                controller_id,
+                target_id,
             } => {
                 map.serialize_entry("type", "ClaimController")?;
                 map.serialize_entry("object_id", object_id)?;
-                map.serialize_entry("controller_id", controller_id)?;
+                map.serialize_entry("target_id", target_id)?;
             }
-            Self::Spawn { spawn_id, body } => {
+            Self::Spawn {
+                object_id,
+                spawn_id,
+                body_parts,
+            } => {
                 map.serialize_entry("type", "Spawn")?;
+                map.serialize_entry("object_id", object_id)?;
                 map.serialize_entry("spawn_id", spawn_id)?;
-                map.serialize_entry("body", body)?;
+                map.serialize_entry("body_parts", body_parts)?;
             }
             Self::Recycle { object_id } => {
                 map.serialize_entry("type", "Recycle")?;
@@ -395,11 +412,11 @@ impl Serialize for CommandAction {
             } => serialize_target_action(&mut map, "Repair", object_id, target_id)?,
             Self::UpgradeController {
                 object_id,
-                controller_id,
+                target_id,
             } => {
                 map.serialize_entry("type", "UpgradeController")?;
                 map.serialize_entry("object_id", object_id)?;
-                map.serialize_entry("controller_id", controller_id)?;
+                map.serialize_entry("target_id", target_id)?;
             }
             Self::TransferToGlobal { resource, amount } => {
                 map.serialize_entry("type", "TransferToGlobal")?;
@@ -900,26 +917,36 @@ pub fn validate_command(
         ),
         CommandAction::ClaimController {
             object_id,
-            controller_id,
-        } => validate_claim_controller(world, raw.player_id, raw.tick, *object_id, *controller_id),
-        CommandAction::Spawn { spawn_id, body } => {
-            validate_spawn_drone(world, raw.player_id, *spawn_id, body)
-        }
+            target_id,
+        } => validate_claim_controller(world, raw.player_id, raw.tick, *object_id, *target_id),
+        CommandAction::Spawn {
+            object_id: _,
+            spawn_id,
+            body_parts,
+        } => validate_spawn_drone(world, raw.player_id, *spawn_id, body_parts),
         CommandAction::Recycle { object_id } => validate_recycle(world, raw.player_id, *object_id),
         CommandAction::Build {
             object_id,
             x,
             y,
             structure,
-        } => validate_build(world, raw.player_id, raw.tick, *object_id, *x, *y, *structure),
+        } => validate_build(
+            world,
+            raw.player_id,
+            raw.tick,
+            *object_id,
+            *x,
+            *y,
+            *structure,
+        ),
         CommandAction::Repair {
             object_id,
             target_id,
         } => validate_repair(world, raw.player_id, raw.tick, *object_id, *target_id),
         CommandAction::UpgradeController {
             object_id,
-            controller_id,
-        } => validate_upgrade_controller(world, raw.player_id, raw.tick, *object_id, *controller_id),
+            target_id,
+        } => validate_upgrade_controller(world, raw.player_id, raw.tick, *object_id, *target_id),
         CommandAction::TransferToGlobal { resource, amount } => {
             validate_transfer_to_global(world, raw.player_id, resource, *amount)
         }
@@ -1112,9 +1139,23 @@ pub fn available_action_metadata(world: &World) -> Vec<CommandActionMetadata> {
         builtin_action_metadata(
             "ClaimController",
             "Claim a room controller",
-            &["object_id", "controller_id"],
+            &["object_id", "target_id"],
         ),
-        builtin_action_metadata("Spawn", "Spawn a drone", &["spawn_id", "body"]),
+        builtin_action_metadata(
+            "Spawn",
+            "Spawn a drone",
+            &["object_id", "spawn_id", "body_parts"],
+        ),
+        builtin_action_metadata(
+            "Repair",
+            "Repair a target structure",
+            &["object_id", "target_id"],
+        ),
+        builtin_action_metadata(
+            "UpgradeController",
+            "Upgrade a room controller",
+            &["object_id", "target_id"],
+        ),
         builtin_action_metadata(
             "Recycle",
             "Recycle a drone for a body cost refund",
@@ -1269,13 +1310,18 @@ fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_
                 "position": { "x": x, "y": y },
                 "structure": structure,
             }),
-            CommandAction::Spawn { spawn_id, body } => serde_json::json!({
+            CommandAction::Spawn {
+                object_id,
+                spawn_id,
+                body_parts,
+            } => serde_json::json!({
                 "reason": "TileOccupied",
                 "action": action,
                 "conflict": "first_come_first_served",
                 "refund_policy": { "fuel_percent": 50 },
+                "object_id": object_id,
                 "spawn_id": spawn_id,
-                "body_parts": body,
+                "body_parts": body_parts,
             }),
             _ => default_rejection_detail(command, rejection, action),
         },
@@ -1571,13 +1617,18 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         }
         CommandAction::ClaimController {
             object_id,
-            controller_id,
+            target_id,
         } => {
             actor_id = Some(object_id);
-            apply_claim_controller(world, player_id, controller_id)
+            apply_claim_controller(world, player_id, target_id)
         }
-        CommandAction::Spawn { spawn_id, body } => {
-            apply_spawn_drone(world, player_id, spawn_id, body)
+        CommandAction::Spawn {
+            object_id,
+            spawn_id,
+            body_parts,
+        } => {
+            actor_id = Some(object_id);
+            apply_spawn_drone(world, player_id, spawn_id, body_parts)
         }
         CommandAction::Recycle { object_id } => {
             apply_recycle(world, player_id, action_tick, object_id)
@@ -1600,10 +1651,10 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         }
         CommandAction::UpgradeController {
             object_id,
-            controller_id,
+            target_id,
         } => {
             actor_id = Some(object_id);
-            apply_upgrade_controller(world, object_id, controller_id)
+            apply_upgrade_controller(world, object_id, target_id)
         }
         CommandAction::TransferToGlobal { resource, amount } => {
             apply_transfer_to_global(world, player_id, &resource, amount)
@@ -1816,7 +1867,13 @@ fn validate_action(
     payload: &serde_json::Value,
 ) -> CommandResult {
     match action_type {
-        "Attack" => validate_attack(world, player_id, tick, object_id, require_target_id(target_id)?),
+        "Attack" => validate_attack(
+            world,
+            player_id,
+            tick,
+            object_id,
+            require_target_id(target_id)?,
+        ),
         "RangedAttack" => validate_ranged_attack(
             world,
             player_id,
@@ -1825,7 +1882,13 @@ fn validate_action(
             require_target_id(target_id)?,
             payload_u32(payload, "range").unwrap_or(MAX_RANGED_ATTACK_RANGE),
         ),
-        "Heal" => validate_heal(world, player_id, tick, object_id, require_target_id(target_id)?),
+        "Heal" => validate_heal(
+            world,
+            player_id,
+            tick,
+            object_id,
+            require_target_id(target_id)?,
+        ),
         custom => validate_custom_action(world, player_id, tick, custom, object_id, target_id),
     }
 }
@@ -2523,25 +2586,25 @@ fn apply_repair(world: &mut World, object_id: ObjectId, target_id: ObjectId) -> 
         .iter()
         .filter(|part| **part == BodyPart::Work)
         .count() as u32;
-    let energy = drone.carry.get(ENERGY_RESOURCE).copied().unwrap_or_default();
-    let repair_amount = work_parts
-        .max(1)
-        .saturating_mul(100)
-        .min(energy)
-        .min(
-            world
-                .entity(target)
-                .get::<Structure>()
-                .ok_or(RejectionReason::ObjectNotFound)?
-                .hits_max
-                .saturating_sub(
-                    world
-                        .entity(target)
-                        .get::<Structure>()
-                        .ok_or(RejectionReason::ObjectNotFound)?
-                        .hits,
-                ),
-        );
+    let energy = drone
+        .carry
+        .get(ENERGY_RESOURCE)
+        .copied()
+        .unwrap_or_default();
+    let repair_amount = work_parts.max(1).saturating_mul(100).min(energy).min(
+        world
+            .entity(target)
+            .get::<Structure>()
+            .ok_or(RejectionReason::ObjectNotFound)?
+            .hits_max
+            .saturating_sub(
+                world
+                    .entity(target)
+                    .get::<Structure>()
+                    .ok_or(RejectionReason::ObjectNotFound)?
+                    .hits,
+            ),
+    );
 
     if repair_amount == 0 {
         return Ok(());
@@ -2572,7 +2635,11 @@ fn apply_upgrade_controller(
         .iter()
         .filter(|part| **part == BodyPart::Work)
         .count() as u32;
-    let energy = drone.carry.get(ENERGY_RESOURCE).copied().unwrap_or_default();
+    let energy = drone
+        .carry
+        .get(ENERGY_RESOURCE)
+        .copied()
+        .unwrap_or_default();
     let amount = work_parts.max(1).min(energy);
 
     if amount == 0 {
@@ -2625,77 +2692,104 @@ fn apply_custom_action(
             let Some(target_id) = target_id else {
                 return Ok(());
             };
-            fabricate_target(world, player_id, target_id, structure_type)?;
+            let _ = structure_type;
+            queue_special_attack(
+                world,
+                SpecialAttackKind::Fabricate,
+                object_id,
+                target_id,
+                player_id,
+                0,
+            )?;
         }
         Some("fortify") => {
             let target_id = target_id.unwrap_or(object_id);
-            let target = entity(target_id)?;
-            let mut entity_mut = world.entity_mut(target);
-            if let Some(mut attrs) = entity_mut.get_mut::<Attributes>() {
-                apply_fortify_attrs(&mut attrs.0);
-            } else {
-                let mut attrs = Vec::new();
-                apply_fortify_attrs(&mut attrs);
-                entity_mut.insert(Attributes(attrs));
-            }
-            if let Some(mut flags) = entity_mut.get_mut::<EntityFlags>() {
-                apply_fortify_flags(&mut flags.0);
-            } else {
-                let mut flags = std::collections::HashMap::new();
-                apply_fortify_flags(&mut flags);
-                entity_mut.insert(EntityFlags(flags));
-            }
+            queue_special_attack(
+                world,
+                SpecialAttackKind::Fortify,
+                object_id,
+                target_id,
+                player_id,
+                action.base_damage.unwrap_or_default(),
+            )?;
         }
         Some("disrupt") => {
             let Some(target_id) = target_id else {
                 return Ok(());
             };
-            apply_disrupt(world, target_id)?;
+            queue_special_attack(
+                world,
+                SpecialAttackKind::Disrupt,
+                object_id,
+                target_id,
+                player_id,
+                action.base_damage.unwrap_or_default(),
+            )?;
         }
         Some("hack") => {
             let Some(target_id) = target_id else {
                 return Ok(());
             };
-            apply_hack(world, target_id)?;
+            queue_special_attack(
+                world,
+                SpecialAttackKind::Hack,
+                object_id,
+                target_id,
+                player_id,
+                action.base_damage.unwrap_or_default(),
+            )?;
         }
         Some("drain") => {
             let Some(target_id) = target_id else {
                 return Ok(());
             };
-            let resource = action.damage_type.as_deref().unwrap_or(ENERGY_RESOURCE);
-            apply_drain(world, object_id, target_id, resource)?;
+            queue_special_attack(
+                world,
+                SpecialAttackKind::Drain,
+                object_id,
+                target_id,
+                player_id,
+                action.base_damage.unwrap_or(15),
+            )?;
         }
         Some("overload") => {
             let Some(target_id) = target_id else {
                 return Ok(());
             };
-            apply_overload(world, target_id)?;
+            queue_special_attack(
+                world,
+                SpecialAttackKind::Overload,
+                object_id,
+                target_id,
+                player_id,
+                action.base_damage.unwrap_or_default(),
+            )?;
         }
         Some("debilitate") => {
             let Some(target_id) = target_id else {
                 return Ok(());
             };
-            let damage_type = action
-                .damage_type
-                .as_deref()
-                .unwrap_or(DamageType::Corrosive.as_str());
-            apply_debilitate(world, target_id, damage_type)?;
+            queue_special_attack(
+                world,
+                SpecialAttackKind::Debilitate,
+                object_id,
+                target_id,
+                player_id,
+                action.base_damage.unwrap_or_default(),
+            )?;
         }
         Some("leech") => {
             let Some(target_id) = target_id else {
                 return Ok(());
             };
-            let damage = action.base_damage.unwrap_or(15);
-            let damage_type = action
-                .damage_type
-                .as_deref()
-                .unwrap_or(DamageType::Corrosive.as_str());
-            let dealt = apply_resisted_damage_amount(world, target_id, damage_type, damage)?;
-            heal_drone(
+            queue_special_attack(
                 world,
+                SpecialAttackKind::Leech,
                 object_id,
-                ((dealt as f64) * action.special_param.unwrap_or(0.5)).floor() as u32,
-            );
+                target_id,
+                player_id,
+                action.base_damage.unwrap_or(15),
+            )?;
         }
         Some("scramble_commands") | None => {}
         Some(other) => {
@@ -2704,6 +2798,29 @@ fn apply_custom_action(
             });
         }
     }
+    Ok(())
+}
+
+fn queue_special_attack(
+    world: &mut World,
+    kind: SpecialAttackKind,
+    source_id: ObjectId,
+    target_id: ObjectId,
+    owner: PlayerId,
+    amount: u32,
+) -> CommandResult {
+    let source = entity(source_id)?;
+    let target = entity(target_id)?;
+    world
+        .resource_mut::<PendingSpecialAttack>()
+        .intents
+        .push(StatusActionIntent {
+            kind,
+            source,
+            target,
+            owner,
+            amount,
+        });
     Ok(())
 }
 
@@ -2790,117 +2907,6 @@ fn remember_custom_action_cooldown(
     );
 }
 
-fn apply_fortify_attrs(attrs: &mut Vec<String>) {
-    attrs.retain(|attr| !is_negative_status_attr(attr));
-    if !attrs.iter().any(|attr| attr == "Fortified") {
-        attrs.push("Fortified".to_string());
-    }
-    attrs.retain(|attr| !attr.starts_with("Fortified:"));
-    attrs.push("Fortified:duration=3".to_string());
-}
-
-fn apply_fortify_flags(flags: &mut std::collections::HashMap<String, bool>) {
-    flags.retain(|flag, active| !*active || !is_negative_status_attr(flag));
-    flags.insert("Fortified".to_string(), true);
-}
-
-fn apply_disrupt(world: &mut World, target_id: ObjectId) -> CommandResult {
-    let target = entity(target_id)?;
-    let multiplier = sonic_effect_multiplier(world, target)?;
-    if multiplier <= 0.0 {
-        return Ok(());
-    }
-    {
-        let mut entity_mut = world.entity_mut(target);
-        if let Some(mut attrs) = entity_mut.get_mut::<Attributes>() {
-            attrs.0.retain(|attr| !is_interruptible_action_attr(attr));
-            attrs.0.retain(|attr| !attr.starts_with("Disrupted:"));
-            push_unique(&mut attrs.0, "Disrupted");
-            attrs.0.push("Disrupted:duration=1".to_string());
-        } else {
-            entity_mut.insert(Attributes(vec![
-                "Disrupted".to_string(),
-                "Disrupted:duration=1".to_string(),
-            ]));
-        }
-        if let Some(mut flags) = entity_mut.get_mut::<EntityFlags>() {
-            flags.0.insert("Disrupted".to_string(), true);
-        } else {
-            let mut flags = std::collections::HashMap::new();
-            flags.insert("Disrupted".to_string(), true);
-            entity_mut.insert(EntityFlags(flags));
-        }
-    }
-    if let Some(mut cooldowns) = world.get_resource_mut::<CustomActionCooldowns>() {
-        cooldowns
-            .0
-            .retain(|(cooldown_object_id, _), _| *cooldown_object_id != target_id);
-    }
-    Ok(())
-}
-
-fn sonic_effect_multiplier(world: &World, target: Entity) -> Result<f64, RejectionReason> {
-    let body_registry = world.resource::<BodyPartRegistry>();
-    let damage_registry = world.resource::<DamageTypeRegistry>();
-    let resistance_registry = world.resource::<ResistanceRegistry>();
-    let entity_ref = world
-        .get_entity(target)
-        .map_err(|_| RejectionReason::ObjectNotFound)?;
-    let attrs = entity_ref.get::<Attributes>();
-    let flags = entity_ref.get::<EntityFlags>();
-    if let Some(drone) = entity_ref.get::<Drone>() {
-        Ok(crate::systems::combat_system::final_damage_multiplier(
-            Some(&drone.body),
-            attrs,
-            flags,
-            DamageType::Sonic.as_str(),
-            body_registry,
-            damage_registry,
-            resistance_registry,
-        ))
-    } else if entity_ref.get::<Structure>().is_some() {
-        Ok(crate::systems::combat_system::final_damage_multiplier(
-            None,
-            attrs,
-            flags,
-            DamageType::Sonic.as_str(),
-            body_registry,
-            damage_registry,
-            resistance_registry,
-        ))
-    } else {
-        Err(RejectionReason::ObjectNotFound)
-    }
-}
-
-fn is_negative_status_attr(attr: &str) -> bool {
-    matches!(
-        attr,
-        "Disrupted"
-            | "Scrambled"
-            | "Drained"
-            | "Overloaded"
-            | "Debilitated"
-            | "Leeching"
-            | "Hacking"
-            | "HackSlowed"
-            | "HackRooted"
-            | "HackNeutralized"
-    ) || attr.starts_with("Disrupt:")
-        || attr.starts_with("Scramble:")
-        || attr.starts_with("Drain:")
-        || attr.starts_with("Overload:")
-        || attr.starts_with("Debilitate:")
-        || attr.starts_with("Leech:")
-}
-
-fn is_interruptible_action_attr(attr: &str) -> bool {
-    matches!(attr, "Draining" | "Hacking" | "Channeling")
-        || attr.starts_with("CurrentAction:")
-        || attr.starts_with("Channeling:")
-        || attr.starts_with("ContinuousAction:")
-}
-
 fn effect_multiplier(
     world: &World,
     target: Entity,
@@ -2937,114 +2943,6 @@ fn effect_multiplier(
     } else {
         Err(RejectionReason::ObjectNotFound)
     }
-}
-
-fn ensure_attrs(
-    world: &mut World,
-    target_id: ObjectId,
-    mutate: impl FnOnce(&mut Vec<String>),
-) -> CommandResult {
-    let target = entity(target_id)?;
-    let mut entity_mut = world.entity_mut(target);
-    if let Some(mut attrs) = entity_mut.get_mut::<Attributes>() {
-        mutate(&mut attrs.0);
-    } else {
-        let mut attrs = Vec::new();
-        mutate(&mut attrs);
-        entity_mut.insert(Attributes(attrs));
-    }
-    Ok(())
-}
-
-fn push_unique(attrs: &mut Vec<String>, value: impl Into<String>) {
-    let value = value.into();
-    if !attrs.iter().any(|attr| attr == &value) {
-        attrs.push(value);
-    }
-}
-
-fn apply_hack(world: &mut World, target_id: ObjectId) -> CommandResult {
-    let target = entity(target_id)?;
-    if effect_multiplier(world, target, DamageType::Psionic.as_str())? <= 0.0 {
-        return Ok(());
-    }
-    ensure_attrs(world, target_id, |attrs| {
-        attrs.retain(|attr| !attr.starts_with("Hack:"));
-        push_unique(attrs, "Hacking");
-        push_unique(attrs, "HackSlowed");
-        push_unique(attrs, "HackRooted");
-        push_unique(attrs, "HackNeutralized");
-        attrs.push("Hack:slow_ticks=1-2".to_string());
-        attrs.push("Hack:root_ticks=3-4".to_string());
-        attrs.push("Hack:neutral_tick=5".to_string());
-    })?;
-    if let Some(mut drone) = world.entity_mut(target).get_mut::<Drone>() {
-        drone.owner = 0;
-        drone.fatigue = drone.fatigue.max(4);
-    }
-    Ok(())
-}
-
-fn apply_drain(
-    world: &mut World,
-    object_id: ObjectId,
-    target_id: ObjectId,
-    resource: &str,
-) -> CommandResult {
-    let target = entity(target_id)?;
-    if effect_multiplier(world, target, DamageType::EMP.as_str())? <= 0.0 {
-        return Ok(());
-    }
-    let object = entity(object_id)?;
-    let amount = {
-        let target_amount = target_resource_amount(world, target_id, resource)?.1;
-        let self_space = target_resource_space(world, object_id, resource)?.1;
-        let carry_capacity = world
-            .entity(object)
-            .get::<Drone>()
-            .map(|drone| drone.carry_capacity)
-            .unwrap_or_default();
-        target_amount.min(self_space).min(carry_capacity)
-    };
-    if amount == 0 {
-        return Ok(());
-    }
-    take_from_target(world, target, resource, amount)?;
-    if let Some(mut drone) = world.entity_mut(object).get_mut::<Drone>() {
-        *drone.carry.entry(resource.to_string()).or_default() += amount;
-    }
-    ensure_attrs(world, target_id, |attrs| {
-        push_unique(attrs, "Drained");
-        push_unique(attrs, "Draining");
-        attrs.push(format!("Drain:{resource}:{amount}"));
-    })
-}
-
-fn apply_overload(world: &mut World, target_id: ObjectId) -> CommandResult {
-    let target = entity(target_id)?;
-    if effect_multiplier(world, target, DamageType::EMP.as_str())? <= 0.0 {
-        return Ok(());
-    }
-    ensure_attrs(world, target_id, |attrs| {
-        push_unique(attrs, "Overloaded");
-        attrs.push(format!(
-            "Overload:fuel-{OVERLOAD_FUEL_DRAIN}:floor-{OVERLOAD_FUEL_FLOOR}"
-        ));
-    })
-}
-
-fn apply_debilitate(world: &mut World, target_id: ObjectId, damage_type: &str) -> CommandResult {
-    let target = entity(target_id)?;
-    if effect_multiplier(world, target, DamageType::Corrosive.as_str())? <= 0.0 {
-        return Ok(());
-    }
-    ensure_attrs(world, target_id, |attrs| {
-        push_unique(attrs, "Debilitated");
-        attrs.retain(|attr| !attr.starts_with("Debilitate:"));
-        attrs.push(format!(
-            "Debilitate:{damage_type}:resistance_x2:duration=50"
-        ));
-    })
 }
 
 fn fabricate_target(

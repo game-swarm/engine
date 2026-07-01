@@ -1,20 +1,23 @@
 use bevy::prelude::*;
 
-use crate::components::{DisruptBuffer, DisruptState};
+use crate::components::DisruptBuffer;
+use crate::systems::{PendingSpecialAttack, SpecialAttackKind};
 
 pub fn disrupt_buffer_system(
     mut commands: Commands,
-    states: Query<(Entity, &DisruptState)>,
+    pending: Res<PendingSpecialAttack>,
     mut buffers: Query<&mut DisruptBuffer>,
 ) {
-    for (entity, state) in &states {
-        let next = DisruptBuffer {
-            body_parts: state.body_parts.clone(),
-        };
-        if let Ok(mut buffer) = buffers.get_mut(entity) {
+    for intent in pending
+        .intents
+        .iter()
+        .filter(|intent| intent.kind == SpecialAttackKind::Disrupt)
+    {
+        let next = DisruptBuffer::default();
+        if let Ok(mut buffer) = buffers.get_mut(intent.target) {
             *buffer = next;
         } else {
-            commands.entity(entity).insert(next);
+            commands.entity(intent.target).insert(next);
         }
     }
 }

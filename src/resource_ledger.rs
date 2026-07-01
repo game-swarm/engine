@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::command::Tick;
 use crate::components::PlayerId;
 use crate::resources::{
-    GlobalStorageConfig, PendingGlobalTransfer, PendingGlobalTransfers,
-    PlayerGlobalStorage, PlayerLocalStorage, ResourceAmount, ResourceCost, ResourceName,
+    GlobalStorageConfig, PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage,
+    PlayerLocalStorage, ResourceAmount, ResourceCost, ResourceName,
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -247,8 +247,9 @@ pub fn compute_continuous_storage_tax(
         let next = ppm.saturating_add(1_000).min(utilization_ppm);
         let width = next - ppm;
         let amount = (capacity as u128).saturating_mul(width as u128) / 1_000_000;
-        weighted_sum = weighted_sum
-            .saturating_add(amount.saturating_mul(marginal_storage_tax_rate_bp(ppm, config) as u128));
+        weighted_sum = weighted_sum.saturating_add(
+            amount.saturating_mul(marginal_storage_tax_rate_bp(ppm, config) as u128),
+        );
         ppm = next;
     }
 
@@ -271,14 +272,10 @@ pub fn marginal_storage_tax_rate_bp(utilization_ppm: u32, config: &GlobalStorage
             }
             let offset = utilization_ppm.saturating_sub(left.utilization_ppm);
             let t = (offset as u128).saturating_mul(1_000_000) / span as u128;
-            let smooth = 3_u128
-                .saturating_mul(t)
-                .saturating_mul(t)
-                .saturating_sub(2_u128.saturating_mul(t).saturating_mul(t).saturating_mul(t) / 1_000_000)
-                / 1_000_000;
-            let delta = right
-                .marginal_rate_bp
-                .saturating_sub(left.marginal_rate_bp) as u128;
+            let smooth = 3_u128.saturating_mul(t).saturating_mul(t).saturating_sub(
+                2_u128.saturating_mul(t).saturating_mul(t).saturating_mul(t) / 1_000_000,
+            ) / 1_000_000;
+            let delta = right.marginal_rate_bp.saturating_sub(left.marginal_rate_bp) as u128;
             return left
                 .marginal_rate_bp
                 .saturating_add((delta.saturating_mul(smooth) / 1_000_000) as u32);
@@ -473,10 +470,22 @@ mod tests {
     #[test]
     fn continuous_storage_tax_boundaries() {
         let config = anchors_spec_compliant();
-        assert_eq!(compute_continuous_storage_tax(300_000, 1_000_000, &config), 0);
-        assert_eq!(compute_continuous_storage_tax(500_000, 1_000_000, &config), 0);
-        assert_eq!(compute_continuous_storage_tax(750_000, 1_000_000, &config), 24);
-        assert_eq!(compute_continuous_storage_tax(1_000_000, 1_000_000, &config), 241);
+        assert_eq!(
+            compute_continuous_storage_tax(300_000, 1_000_000, &config),
+            0
+        );
+        assert_eq!(
+            compute_continuous_storage_tax(500_000, 1_000_000, &config),
+            0
+        );
+        assert_eq!(
+            compute_continuous_storage_tax(750_000, 1_000_000, &config),
+            24
+        );
+        assert_eq!(
+            compute_continuous_storage_tax(1_000_000, 1_000_000, &config),
+            241
+        );
     }
 
     #[test]
