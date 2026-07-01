@@ -12,8 +12,8 @@ use std::{
 };
 
 use swarm_engine::{
-    BodyPart, CommandIntent, ExecutorError, PlayerExecutor, PlayerId, TickSnapshot, WorldMode,
-    create_world_with_mode,
+    BodyPart, CommandIntent, ExecutorError, PlayerExecutor, PlayerId, TickBroadcaster,
+    TickSnapshot, WorldMode, create_world_with_mode,
     sandbox_transport::{SandboxBackend, execute_tick_remote},
     sim::{create_local_simulation_world, summarize_local_simulation},
 };
@@ -166,6 +166,15 @@ fn main() {
         vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
     );
 
+    let broadcaster: Arc<dyn TickBroadcaster> = if let Some(ref client) = shared_nats_client {
+        Arc::new(swarm_engine::NatsTickBroadcaster::new(
+            client.clone(),
+            "swarm.delta",
+        ))
+    } else {
+        Arc::new(swarm_engine::InMemoryTickBroadcaster::default())
+    };
+
     let mut scheduler = swarm_engine::MultiPlayerTickScheduler::new(
         world,
         scheduler_executors(&sandbox_backend),
@@ -173,7 +182,7 @@ fn main() {
             Ok(store) => store,
             Err(error) => swarm_engine::RedbStore::unavailable(error.to_string()),
         }),
-        swarm_engine::InMemoryTickBroadcaster::default(),
+        broadcaster,
     );
 
     let mut tick: u64 = 0;

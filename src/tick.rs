@@ -194,6 +194,20 @@ pub trait TickBroadcaster {
     fn broadcast(&mut self, event: TickBroadcast) -> Result<(), BroadcastError>;
 }
 
+impl<B> TickBroadcaster for std::sync::Arc<B>
+where
+    B: TickBroadcaster + ?Sized,
+{
+    fn broadcast(&mut self, event: TickBroadcast) -> Result<(), BroadcastError> {
+        let Some(broadcaster) = std::sync::Arc::get_mut(self) else {
+            return Err(BroadcastError::Failed(
+                "tick broadcaster has shared references".to_string(),
+            ));
+        };
+        broadcaster.broadcast(event)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TickTrace {
     pub tick: Tick,
@@ -247,7 +261,7 @@ pub struct TickTraceEvent {
     pub resource: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickBroadcast {
     pub tick: Tick,
     pub player_id: PlayerId,
@@ -1612,6 +1626,38 @@ impl TickBroadcaster for InMemoryTickBroadcaster {
 
         self.broadcasts.push(event);
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NatsTickBroadcaster {
+    client: async_nats::Client,
+    subject: String,
+}
+
+impl NatsTickBroadcaster {
+    pub fn new(client: async_nats::Client, subject: impl Into<String>) -> Self {
+        Self {
+            client,
+            subject: subject.into(),
+        }
+    }
+}
+
+impl TickBroadcaster for NatsTickBroadcaster {
+    fn broadcast(&mut self, event: TickBroadcast) -> Result<(), BroadcastError> {
+        let payload = serde_json::to_vec(&event)
+            .map_err(|error| BroadcastError::Failed(error.to_string()))?;
+        let client = self.client.clone();
+        let subject = self.subject.clone();
+        tokio::runtime::Runtime::new()
+            .map_err(|error| BroadcastError::Failed(error.to_string()))?
+            .block_on(async move {
+                client
+                    .publish(subject, payload.into())
+                    .await
+                    .map_err(|error| BroadcastError::Failed(error.to_string()))
+            })
     }
 }
 

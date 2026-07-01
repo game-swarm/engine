@@ -1534,7 +1534,9 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         CommandAction::Spawn { spawn_id, body } => {
             apply_spawn_drone(world, player_id, spawn_id, body)
         }
-        CommandAction::Recycle { object_id } => apply_recycle(world, player_id, action_tick, object_id),
+        CommandAction::Recycle { object_id } => {
+            apply_recycle(world, player_id, action_tick, object_id)
+        }
         CommandAction::Build {
             object_id,
             x,
@@ -1838,11 +1840,7 @@ fn validate_spawn_drone(
     Ok(())
 }
 
-fn validate_recycle(
-    world: &mut World,
-    player_id: PlayerId,
-    object_id: ObjectId,
-) -> CommandResult {
+fn validate_recycle(world: &mut World, player_id: PlayerId, object_id: ObjectId) -> CommandResult {
     let (_, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)
 }
@@ -3746,7 +3744,7 @@ fn has_debilitate(
     }))
 }
 
-fn player_fuel_budget(world: &World, player_id: PlayerId) -> u64 {
+fn player_fuel_budget(_world: &World, _player_id: PlayerId) -> u64 {
     // Fuel is tracked per tick; return the standard MAX_FUEL as baseline.
     // In practice this consults the tick engine's fuel state.
     MAX_FUEL
