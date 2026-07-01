@@ -978,6 +978,104 @@ impl WorldConfig {
         );
     }
 }
+
+pub fn ensure_world_config_exists(world_toml_path: &str, mods_lock_path: &str) {
+    if std::path::Path::new(world_toml_path).exists() {
+        return;
+    }
+
+    let config = WorldConfig::default();
+    let toml_str = toml::to_string_pretty(&config).unwrap_or_else(|_| String::new());
+    let mod_annotations = plugin_override_annotations();
+    let generated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let plugin_count = crate::plugins::VANILLA_PLUGIN_NAMES.len();
+
+    let final_content = format!(
+        "# ── Swarm World Configuration ──────────────────────────────────────────\n\
+         # Auto-generated on: {generated_at}\n\
+         # Total plugins: {plugin_count} (all enabled by default)\n\
+         # Edit this file to customise your world, then restart the engine.\n\
+         # ────────────────────────────────────────────────────────────────────────\n\n\
+         {toml_str}\n\
+         # ── Plugin Override Sections ───────────────────────────────────────────\n\
+         # Uncomment and edit a [plugin.<name>] section to override that plugin's\n\
+         # default config values as declared in its mod.toml.\n\
+         # ────────────────────────────────────────────────────────────────────────\n\n\
+         {mod_annotations}"
+    );
+    std::fs::write(world_toml_path, final_content).expect("failed to write world.toml");
+    println!("[init] generated default world.toml");
+
+    let lock = crate::plugins::PluginLock::vanilla();
+    let lock_toml = toml::to_string_pretty(&lock).expect("failed to serialize mods.lock");
+    std::fs::write(mods_lock_path, lock_toml).expect("failed to write mods.lock");
+    println!("[init] generated default mods.lock");
+}
+
+fn plugin_override_annotations() -> String {
+    let mut annotations = String::new();
+    for name in crate::plugins::VANILLA_PLUGIN_NAMES {
+        let mod_path = format!("mods/{name}/mod.toml");
+        let Ok(contents) = std::fs::read_to_string(&mod_path) else {
+            continue;
+        };
+        let Ok(manifest) = contents.parse::<toml::Value>() else {
+            continue;
+        };
+        let Some(config) = manifest.get("config").and_then(toml::Value::as_table) else {
+            continue;
+        };
+
+        annotations.push_str(&format!("# [plugin.{name}]\n"));
+        for (key, value) in config {
+            annotations.push_str("# ");
+            annotations.push_str(key);
+            annotations.push_str(" = ");
+            annotations.push_str(&format_plugin_default(value));
+
+            let field_type = value
+                .get("type")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("value");
+            let description = value
+                .get("description")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("");
+            if description.is_empty() {
+                annotations.push_str(&format!("  # {field_type}"));
+            } else {
+                annotations.push_str(&format!("  # {field_type}: {description}"));
+            }
+            annotations.push('\n');
+        }
+        annotations.push('\n');
+    }
+    annotations
+}
+
+fn format_plugin_default(field: &toml::Value) -> String {
+    field
+        .get("default")
+        .map(toml_value_literal)
+        .unwrap_or_else(|| "\"\"".to_string())
+}
+
+fn toml_value_literal(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(value) => format!("{value:?}"),
+        toml::Value::Integer(value) => value.to_string(),
+        toml::Value::Float(value) => value.to_string(),
+        toml::Value::Boolean(value) => value.to_string(),
+        toml::Value::Datetime(value) => value.to_string(),
+        toml::Value::Array(_) | toml::Value::Table(_) => {
+            toml::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum WorldConfigLoadError {
     Io {

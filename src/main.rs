@@ -149,6 +149,7 @@ fn main() {
         }
     };
 
+    swarm_engine::world::ensure_world_config_exists("world.toml", "mods.lock");
     let mut world = create_world_with_mode(mode);
     world.app.insert_resource(sandbox_backend.clone());
     world
