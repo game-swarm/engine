@@ -12,7 +12,11 @@ use swarm_wasm_sandbox::{
 use crate::arena::{
     ArenaReplay, ReplayPrivacy, TournamentBracket, TournamentElimination, TournamentMatchSchedule,
 };
-use crate::auth::{CertificateIssuer, PlayerCertificate, PlayerCertificatePayload};
+use crate::auth::{
+    AuthCertificate, AuthCertificatePayload, AuthChallenge, CertificateBundle, CertificateIssuer,
+    PlayerCertificate, PlayerCertificatePayload, PlayerRecord, StoredCertificate,
+    public_key_from_csr, validate_pow, verify_csr_signature, verify_renewal_signature,
+};
 use crate::command::{
     CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand, RejectionReason, Tick,
     object_id, validate_command,
@@ -34,6 +38,14 @@ const WEB_ACCESS_TOKEN_TTL_SECONDS: u64 = 15 * 60;
 const WEB_REFRESH_TOKEN_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 const CERTIFICATE_AUDIENCE: &str = "swarm-wasm-deploy";
 const WEB_TOKEN_AUDIENCE: &str = "swarm-web";
+const AUTH_CHALLENGE_TTL_SECONDS: u64 = 5 * 60;
+const AUTH_POW_DIFFICULTY_BITS: u32 = 24;
+const AUTH_POW_MIN_DIFFICULTY_BITS: u32 = 20;
+const AUTH_POW_MAX_DIFFICULTY_BITS: u32 = 32;
+const AUTH_CLIENT_CERT_TTL_SECONDS: u64 = 24 * 60 * 60;
+const AUTH_CODE_SIGNING_CERT_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
+const AUTH_CLIENT_AUDIENCE: &str = "swarm-mcp";
+const AUTH_CODE_SIGNING_AUDIENCE: &str = "swarm-wasm-deploy";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpContext {
@@ -315,6 +327,109 @@ pub struct RevokeAuthParams {
     pub certificate: Option<PlayerCertificate>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterChallengeParams {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterChallengeResult {
+    pub challenge_id: String,
+    pub challenge: String,
+    pub difficulty_bits: u32,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitCsrParams {
+    pub username: String,
+    pub csr: String,
+    pub certificate_profile: String,
+    pub challenge_id: String,
+    pub nonce: String,
+    pub csr_signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmitCsrResult {
+    pub certificate_bundle: CertificateBundle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenewCertificateParams {
+    pub certificate_id: String,
+    pub renewal_csr: String,
+    pub proof_signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenewCertificateResult {
+    pub certificate_bundle: CertificateBundle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeCertificateParams {
+    pub certificate_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokeCertificateResult {
+    pub revoked: bool,
+    pub revocation_time: u64,
+    pub crl_updated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertListParams {
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertListEntry {
+    pub cert_id: String,
+    pub usage: String,
+    pub label: String,
+    pub fingerprint: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertListResult {
+    pub certificates: Vec<CertListEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertCheckParams {
+    pub certificate_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertCheckResult {
+    pub valid: bool,
+    pub player_id: PlayerId,
+    pub usage: String,
+    pub scope: String,
+    pub audience: String,
+    pub expires_at: u64,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerTrustResult {
+    pub server_id: String,
+    pub server_ca_fingerprint: String,
+    pub server_ca_certificate: String,
+    pub supported_algorithms: Vec<String>,
+    pub supported_audiences: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuth2LoginResult {
     pub player_id: PlayerId,
@@ -516,6 +631,7 @@ pub struct TournamentStatusResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
+    Unauthenticated,
     WebSessionOk,
     AppCertRequired,
     AdminCertRequired,
@@ -1174,14 +1290,51 @@ impl McpServer {
             | "swarm_auth_cert_revoke"
             | "swarm_auth_cert_rotate"
             | "swarm_auth_device_list"
-            | "swarm_auth_device_register"
-            | "swarm_register_challenge"
-            | "swarm_submit_csr"
-            | "swarm_renew_certificate"
-            | "swarm_revoke_certificate"
-            | "swarm_cert_list"
-            | "swarm_cert_check"
-            | "swarm_get_server_trust" => Err(McpError::feature_gated(tool)),
+            | "swarm_auth_device_register" => Err(McpError::feature_gated(tool)),
+            "swarm_register_challenge" => {
+                let _params: RegisterChallengeParams = parse_empty_params(params)?;
+                serde_json::to_value(self.swarm_register_challenge(world)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_submit_csr" => {
+                let params: SubmitCsrParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_submit_csr(world, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_renew_certificate" => {
+                let params: RenewCertificateParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_renew_certificate(world, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_revoke_certificate" => {
+                let params: RevokeCertificateParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_revoke_certificate(world, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_cert_list" => {
+                let params: CertListParams = if params.is_null() {
+                    CertListParams { status: None }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                serde_json::to_value(self.swarm_cert_list(world, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_cert_check" => {
+                let params: CertCheckParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_cert_check(world, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_get_server_trust" => {
+                let _params: RegisterChallengeParams = parse_empty_params(params)?;
+                serde_json::to_value(self.swarm_get_server_trust())
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_get_world_config" => Ok(swarm_get_world_config()),
             "swarm_tournament_precommit"
             | "swarm_tournament_create"
@@ -1357,6 +1510,332 @@ impl McpServer {
         Ok(RevokeAuthResult {
             revoked_session,
             revoked_certificate,
+        })
+    }
+
+    pub fn swarm_register_challenge(
+        &mut self,
+        world: &mut SwarmWorld,
+    ) -> Result<RegisterChallengeResult, McpError> {
+        let mut challenge_bytes = [0_u8; 16];
+        getrandom::getrandom(&mut challenge_bytes)
+            .map_err(|error| McpError::invalid_params(error.to_string()))?;
+        let challenge = bytes_to_hex(&challenge_bytes);
+        let challenge_id = format!(
+            "chal_{}",
+            blake3::hash(format!("{challenge}:{}", self.now_seconds()).as_bytes()).to_hex()
+        );
+        let difficulty_bits = AUTH_POW_DIFFICULTY_BITS
+            .clamp(AUTH_POW_MIN_DIFFICULTY_BITS, AUTH_POW_MAX_DIFFICULTY_BITS);
+        let expires_at = self.now_seconds() + AUTH_CHALLENGE_TTL_SECONDS;
+        let row = AuthChallenge {
+            challenge_id: challenge_id.clone(),
+            challenge: challenge.clone(),
+            difficulty_bits,
+            expires_at,
+            consumed: false,
+        };
+        auth_store_write(
+            world,
+            &auth_challenge_key(&challenge_id),
+            &row,
+            "auth challenge",
+        )?;
+        Ok(RegisterChallengeResult {
+            challenge_id,
+            challenge,
+            difficulty_bits,
+            expires_at,
+        })
+    }
+
+    pub fn swarm_submit_csr(
+        &mut self,
+        world: &mut SwarmWorld,
+        params: SubmitCsrParams,
+    ) -> Result<SubmitCsrResult, McpError> {
+        let username = normalized_username(&params.username)?;
+        if params.challenge_id.trim().is_empty() {
+            return Err(McpError::invalid_params("challenge_id is required"));
+        }
+        if params.nonce.trim().is_empty() {
+            return Err(McpError::invalid_params("nonce is required"));
+        }
+        if params.certificate_profile.trim().is_empty() {
+            return Err(McpError::invalid_params("certificate_profile is required"));
+        }
+        let challenge_key = auth_challenge_key(&params.challenge_id);
+        let mut challenge: AuthChallenge = auth_store_read(world, &challenge_key)?
+            .ok_or_else(|| McpError::invalid_params("challenge_id is invalid"))?;
+        let now = self.now_seconds();
+        if challenge.expires_at <= now {
+            return Err(McpError::invalid_params("challenge is expired"));
+        }
+        if challenge.consumed {
+            return Err(McpError::invalid_params("challenge is consumed"));
+        }
+        if !validate_pow(
+            &challenge.challenge,
+            &params.nonce,
+            challenge.difficulty_bits,
+        ) {
+            return Err(McpError::invalid_params("proof of work is invalid"));
+        }
+        let public_key = public_key_from_csr(&params.csr)?;
+        verify_csr_signature(
+            &public_key,
+            &params.csr,
+            &params.challenge_id,
+            &params.nonce,
+            &params.csr_signature,
+        )?;
+        let player_id = local_player_id(&username);
+        let bundle = self.issue_auth_bundle(player_id, &username, &public_key)?;
+        let player = PlayerRecord {
+            username,
+            public_key,
+            created_at: now,
+        };
+        challenge.consumed = true;
+        let writes = auth_bundle_writes(&bundle, &player, &challenge)?;
+        auth_store_write_batch(world, writes)?;
+        Ok(SubmitCsrResult {
+            certificate_bundle: bundle,
+        })
+    }
+
+    pub fn swarm_renew_certificate(
+        &mut self,
+        world: &mut SwarmWorld,
+        params: RenewCertificateParams,
+    ) -> Result<RenewCertificateResult, McpError> {
+        let stored = self.read_stored_certificate(world, &params.certificate_id)?;
+        if stored.revoked {
+            return Err(McpError::invalid_params("certificate is revoked"));
+        }
+        if stored.expires_at <= self.now_seconds() {
+            return Err(McpError::invalid_params("certificate is expired"));
+        }
+        let old_cert = parse_auth_certificate(&stored.certificate_json)?;
+        let old_key =
+            decode_ed25519_public_key(&old_cert.payload.public_key, "certificate public_key")?;
+        verify_renewal_signature(
+            &old_key,
+            &params.renewal_csr,
+            &params.certificate_id,
+            &params.proof_signature,
+        )?;
+        let public_key = public_key_from_csr(&params.renewal_csr)?;
+        let username = auth_store_read::<PlayerRecord>(world, &auth_player_key(stored.player_id))?
+            .map(|record| record.username)
+            .unwrap_or_else(|| format!("player-{}", stored.player_id));
+        let bundle = self.issue_auth_bundle(stored.player_id, &username, &public_key)?;
+        let player = PlayerRecord {
+            username,
+            public_key,
+            created_at: self.now_seconds(),
+        };
+        let writes = auth_bundle_writes_without_challenge(&bundle, &player)?;
+        auth_store_write_batch(world, writes)?;
+        Ok(RenewCertificateResult {
+            certificate_bundle: bundle,
+        })
+    }
+
+    pub fn swarm_revoke_certificate(
+        &mut self,
+        world: &mut SwarmWorld,
+        params: RevokeCertificateParams,
+    ) -> Result<RevokeCertificateResult, McpError> {
+        if params.reason.trim().is_empty() {
+            return Err(McpError::invalid_params("reason is required"));
+        }
+        let key = auth_certificate_key(&params.certificate_id);
+        let mut stored: StoredCertificate = auth_store_read(world, &key)?
+            .ok_or_else(|| McpError::invalid_params("certificate_id is invalid"))?;
+        let already_revoked = stored.revoked;
+        stored.revoked = true;
+        let revocation_time = self.now_seconds();
+        let revocation = json!({
+            "certificate_id": params.certificate_id,
+            "reason": params.reason,
+            "revocation_time": revocation_time,
+        });
+        let writes = vec![
+            (
+                key,
+                crate::redb_store::RedbStore::encode_json(&stored, "auth certificate")
+                    .map_err(redb_to_mcp)?,
+            ),
+            (
+                auth_revocation_key(&params.certificate_id),
+                crate::redb_store::RedbStore::encode_json(&revocation, "auth revocation")
+                    .map_err(redb_to_mcp)?,
+            ),
+        ];
+        auth_store_write_batch(world, writes)?;
+        Ok(RevokeCertificateResult {
+            revoked: !already_revoked,
+            revocation_time,
+            crl_updated: true,
+        })
+    }
+
+    pub fn swarm_cert_list(
+        &self,
+        world: &mut SwarmWorld,
+        params: CertListParams,
+    ) -> Result<CertListResult, McpError> {
+        let now = self.now_seconds();
+        let mut certificates = Vec::new();
+        for (key, stored) in auth_store_scan::<StoredCertificate>(world, b"auth/certificates/")? {
+            let cert_id = String::from_utf8_lossy(&key)
+                .trim_start_matches("auth/certificates/")
+                .to_string();
+            let cert = parse_auth_certificate(&stored.certificate_json)?;
+            let status = certificate_status(&stored, now);
+            if params
+                .status
+                .as_deref()
+                .is_some_and(|filter| filter != status)
+            {
+                continue;
+            }
+            certificates.push(CertListEntry {
+                cert_id,
+                usage: stored.usage,
+                label: cert.payload.label,
+                fingerprint: stored.fingerprint,
+                issued_at: stored.issued_at,
+                expires_at: stored.expires_at,
+                status: status.to_string(),
+            });
+        }
+        certificates.sort_by(|left, right| left.cert_id.cmp(&right.cert_id));
+        Ok(CertListResult { certificates })
+    }
+
+    pub fn swarm_cert_check(
+        &self,
+        world: &mut SwarmWorld,
+        params: CertCheckParams,
+    ) -> Result<CertCheckResult, McpError> {
+        let stored = self.read_stored_certificate(world, &params.certificate_id)?;
+        let cert = parse_auth_certificate(&stored.certificate_json)?;
+        let verified = self.issuer.verify_auth(&cert).is_ok();
+        let revoked = stored.revoked;
+        let valid = verified && !revoked && stored.expires_at > self.now_seconds();
+        Ok(CertCheckResult {
+            valid,
+            player_id: stored.player_id,
+            usage: stored.usage,
+            scope: cert.payload.scope,
+            audience: cert.payload.audience,
+            expires_at: stored.expires_at,
+            revoked,
+        })
+    }
+
+    pub fn swarm_get_server_trust(&self) -> ServerTrustResult {
+        let fingerprint = self.issuer.public_key_fingerprint();
+        ServerTrustResult {
+            server_id: format!("swarm-server-{fingerprint}"),
+            server_ca_fingerprint: fingerprint,
+            server_ca_certificate: self.issuer.public_key(),
+            supported_algorithms: vec!["Ed25519".to_string(), "BLAKE3".to_string()],
+            supported_audiences: vec![
+                AUTH_CLIENT_AUDIENCE.to_string(),
+                AUTH_CODE_SIGNING_AUDIENCE.to_string(),
+            ],
+        }
+    }
+
+    fn read_stored_certificate(
+        &self,
+        world: &mut SwarmWorld,
+        certificate_id: &str,
+    ) -> Result<StoredCertificate, McpError> {
+        if certificate_id.trim().is_empty() {
+            return Err(McpError::invalid_params("certificate_id is required"));
+        }
+        auth_store_read(world, &auth_certificate_key(certificate_id))?
+            .ok_or_else(|| McpError::invalid_params("certificate_id is invalid"))
+    }
+
+    fn issue_auth_bundle(
+        &self,
+        player_id: PlayerId,
+        username: &str,
+        public_key: &str,
+    ) -> Result<CertificateBundle, McpError> {
+        let issued_at = self.now_seconds();
+        let fingerprint = public_key_fingerprint(public_key)?;
+        let cert_id = format!(
+            "cert_{}",
+            blake3::hash(format!("{player_id}:{fingerprint}:{issued_at}").as_bytes()).to_hex()
+        );
+        let client_auth_cert = self.issue_auth_certificate(
+            &cert_id,
+            "client_auth",
+            player_id,
+            public_key,
+            &fingerprint,
+            "mcp rest websocket",
+            AUTH_CLIENT_AUDIENCE,
+            &format!("{username} client auth"),
+            issued_at,
+            issued_at + AUTH_CLIENT_CERT_TTL_SECONDS,
+        )?;
+        let code_signing_cert = self.issue_auth_certificate(
+            &format!("{cert_id}:code"),
+            "code_signing",
+            player_id,
+            public_key,
+            &fingerprint,
+            "wasm:deploy",
+            AUTH_CODE_SIGNING_AUDIENCE,
+            &format!("{username} code signing"),
+            issued_at,
+            issued_at + AUTH_CODE_SIGNING_CERT_TTL_SECONDS,
+        )?;
+        Ok(CertificateBundle {
+            client_auth_cert: serde_json::to_string(&client_auth_cert)
+                .map_err(|error| McpError::invalid_params(error.to_string()))?,
+            code_signing_cert: serde_json::to_string(&code_signing_cert)
+                .map_err(|error| McpError::invalid_params(error.to_string()))?,
+            cert_id,
+            player_id,
+            public_key_fingerprint: fingerprint,
+            issued_at,
+            expires_at: issued_at + AUTH_CLIENT_CERT_TTL_SECONDS,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn issue_auth_certificate(
+        &self,
+        cert_id: &str,
+        usage: &str,
+        player_id: PlayerId,
+        public_key: &str,
+        public_key_fingerprint: &str,
+        scope: &str,
+        audience: &str,
+        label: &str,
+        issued_at: u64,
+        expires_at: u64,
+    ) -> Result<AuthCertificate, McpError> {
+        self.issuer.issue_auth(AuthCertificatePayload {
+            cert_id: cert_id.to_string(),
+            usage: usage.to_string(),
+            player_id,
+            public_key: public_key.to_string(),
+            public_key_fingerprint: public_key_fingerprint.to_string(),
+            scope: scope.to_string(),
+            audience: audience.to_string(),
+            label: label.to_string(),
+            issued_at,
+            expires_at,
         })
     }
 
@@ -2295,6 +2774,12 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
 }
 
 fn mcp_tool_auth_mode(tool: &str) -> Option<AuthMode> {
+    if matches!(
+        tool,
+        "swarm_register_challenge" | "swarm_submit_csr" | "swarm_get_server_trust"
+    ) {
+        return Some(AuthMode::Unauthenticated);
+    }
     match mcp_tool_source(tool)? {
         CommandSource::Admin => Some(AuthMode::AdminCertRequired),
         CommandSource::McpDeploy | CommandSource::DryRun | CommandSource::Simulate => {
@@ -3875,6 +4360,190 @@ fn oauth_player_id(provider: &str, subject: &str) -> PlayerId {
     u32::from_le_bytes(id_bytes)
 }
 
+fn local_player_id(username_lowercase: &str) -> PlayerId {
+    let bytes = blake3::hash(format!("local:{username_lowercase}").as_bytes());
+    let mut id_bytes = [0_u8; 4];
+    id_bytes.copy_from_slice(&bytes.as_bytes()[0..4]);
+    u32::from_le_bytes(id_bytes)
+}
+
+fn normalized_username(username: &str) -> Result<String, McpError> {
+    let normalized = username.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(McpError::invalid_params("username is required"));
+    }
+    Ok(normalized)
+}
+
+fn parse_empty_params<T: for<'de> Deserialize<'de> + Default>(
+    params: Value,
+) -> Result<T, McpError> {
+    if params.is_null() {
+        return Ok(T::default());
+    }
+    serde_json::from_value(params).map_err(|error| McpError::invalid_params(error.to_string()))
+}
+
+fn auth_bundle_writes(
+    bundle: &CertificateBundle,
+    player: &PlayerRecord,
+    challenge: &AuthChallenge,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, McpError> {
+    let mut writes = auth_bundle_writes_without_challenge(bundle, player)?;
+    writes.push((
+        auth_challenge_key(&challenge.challenge_id),
+        crate::redb_store::RedbStore::encode_json(challenge, "auth challenge")
+            .map_err(redb_to_mcp)?,
+    ));
+    Ok(writes)
+}
+
+fn auth_bundle_writes_without_challenge(
+    bundle: &CertificateBundle,
+    player: &PlayerRecord,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, McpError> {
+    let client_cert = parse_auth_certificate(&bundle.client_auth_cert)?;
+    let code_cert = parse_auth_certificate(&bundle.code_signing_cert)?;
+    Ok(vec![
+        (
+            auth_player_key(bundle.player_id),
+            crate::redb_store::RedbStore::encode_json(player, "auth player")
+                .map_err(redb_to_mcp)?,
+        ),
+        (
+            auth_certificate_key(&bundle.cert_id),
+            crate::redb_store::RedbStore::encode_json(
+                &stored_certificate_from_auth(&client_cert, &bundle.client_auth_cert),
+                "auth certificate",
+            )
+            .map_err(redb_to_mcp)?,
+        ),
+        (
+            auth_certificate_key(&format!("{}:code", bundle.cert_id)),
+            crate::redb_store::RedbStore::encode_json(
+                &stored_certificate_from_auth(&code_cert, &bundle.code_signing_cert),
+                "auth certificate",
+            )
+            .map_err(redb_to_mcp)?,
+        ),
+    ])
+}
+
+fn stored_certificate_from_auth(
+    cert: &AuthCertificate,
+    certificate_json: &str,
+) -> StoredCertificate {
+    StoredCertificate {
+        player_id: cert.payload.player_id,
+        usage: cert.payload.usage.clone(),
+        fingerprint: cert.payload.public_key_fingerprint.clone(),
+        issued_at: cert.payload.issued_at,
+        expires_at: cert.payload.expires_at,
+        revoked: false,
+        certificate_json: certificate_json.to_string(),
+    }
+}
+
+fn parse_auth_certificate(certificate_json: &str) -> Result<AuthCertificate, McpError> {
+    serde_json::from_str(certificate_json)
+        .map_err(|error| McpError::invalid_params(format!("certificate_json is invalid: {error}")))
+}
+
+fn public_key_fingerprint(public_key: &str) -> Result<String, McpError> {
+    let key = decode_ed25519_public_key(public_key, "public_key")?;
+    Ok(blake3::hash(key.as_bytes()).to_hex().to_string())
+}
+
+fn certificate_status(stored: &StoredCertificate, now: u64) -> &'static str {
+    if stored.revoked {
+        "revoked"
+    } else if stored.expires_at <= now {
+        "expired"
+    } else {
+        "active"
+    }
+}
+
+fn auth_challenge_key(challenge_id: &str) -> Vec<u8> {
+    format!("auth/challenges/{challenge_id}").into_bytes()
+}
+
+fn auth_player_key(player_id: PlayerId) -> Vec<u8> {
+    format!("auth/players/{player_id}").into_bytes()
+}
+
+fn auth_certificate_key(certificate_id: &str) -> Vec<u8> {
+    format!("auth/certificates/{certificate_id}").into_bytes()
+}
+
+fn auth_revocation_key(certificate_id: &str) -> Vec<u8> {
+    format!("auth/revocations/{certificate_id}").into_bytes()
+}
+
+fn auth_store_write<T: Serialize>(
+    world: &mut SwarmWorld,
+    key: &[u8],
+    value: &T,
+    label: &str,
+) -> Result<(), McpError> {
+    world
+        .app
+        .world_mut()
+        .resource_mut::<crate::redb_store::RedbStore>()
+        .write_json(key, value, label)
+        .map_err(redb_to_mcp)
+}
+
+fn auth_store_write_batch(
+    world: &mut SwarmWorld,
+    writes: Vec<(Vec<u8>, Vec<u8>)>,
+) -> Result<(), McpError> {
+    world
+        .app
+        .world_mut()
+        .resource_mut::<crate::redb_store::RedbStore>()
+        .write_json_batch(writes)
+        .map_err(redb_to_mcp)
+}
+
+fn auth_store_read<T: for<'de> Deserialize<'de>>(
+    world: &mut SwarmWorld,
+    key: &[u8],
+) -> Result<Option<T>, McpError> {
+    world
+        .app
+        .world()
+        .resource::<crate::redb_store::RedbStore>()
+        .read_json_value(key)
+        .map_err(redb_to_mcp)
+}
+
+fn auth_store_scan<T: for<'de> Deserialize<'de>>(
+    world: &mut SwarmWorld,
+    prefix: &[u8],
+) -> Result<Vec<(Vec<u8>, T)>, McpError> {
+    world
+        .app
+        .world()
+        .resource::<crate::redb_store::RedbStore>()
+        .scan_json_prefix(prefix)
+        .map_err(redb_to_mcp)
+}
+
+fn redb_to_mcp(error: crate::redb_store::RedbError) -> McpError {
+    McpError::invalid_params(error.to_string())
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
 fn verify_wasm_signature(
     certificate: &PlayerCertificate,
     wasm_hash: &[u8],
@@ -3890,7 +4559,10 @@ fn verify_wasm_signature(
         .map_err(|_| McpError::invalid_params("wasm_signature is invalid"))
 }
 
-fn decode_ed25519_public_key(input: &str, field: &str) -> Result<VerifyingKey, McpError> {
+pub(crate) fn decode_ed25519_public_key(
+    input: &str,
+    field: &str,
+) -> Result<VerifyingKey, McpError> {
     let bytes = decode_base64_with_message(input, field)?;
     let key_bytes: [u8; 32] = bytes
         .try_into()

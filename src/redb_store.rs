@@ -382,6 +382,74 @@ impl RedbStore {
         self.read_json(&tick_hash_chain_key(tick))
     }
 
+    pub fn write_json<T: Serialize>(
+        &mut self,
+        key: &[u8],
+        value: &T,
+        label: &str,
+    ) -> Result<(), RedbError> {
+        self.commit_tick_writes(vec![(key.to_vec(), encode(value, label)?)])
+    }
+
+    pub fn write_json_batch(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), RedbError> {
+        self.commit_tick_writes(writes)
+    }
+
+    pub fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, RedbError> {
+        encode(value, label)
+    }
+
+    pub fn read_json_value<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>, RedbError> {
+        self.read_json(key)
+    }
+
+    pub fn scan_json_prefix<T: DeserializeOwned>(
+        &self,
+        prefix: &[u8],
+    ) -> Result<Vec<(Vec<u8>, T)>, RedbError> {
+        if let Some(db) = &self.db {
+            let txn = db
+                .begin_read()
+                .map_err(|error| RedbError::Commit(error.to_string()))?;
+            let table = txn
+                .open_table(KV_TABLE)
+                .map_err(|error| RedbError::Commit(error.to_string()))?;
+            let mut rows = Vec::new();
+            for entry in table
+                .range(prefix..)
+                .map_err(|error| RedbError::Commit(error.to_string()))?
+            {
+                let (key, value) = entry.map_err(|error| RedbError::Commit(error.to_string()))?;
+                let key = key.value().to_vec();
+                if !key.starts_with(prefix) {
+                    break;
+                }
+                rows.push((
+                    key,
+                    decode(
+                        value.value(),
+                        std::str::from_utf8(prefix).unwrap_or("prefix scan"),
+                    )?,
+                ));
+            }
+            return Ok(rows);
+        }
+        match &self.backend {
+            RedbBackend::Unavailable(reason) => Err(RedbError::Unavailable(format!(
+                "{reason}; cannot scan prefix"
+            ))),
+            RedbBackend::InMemory(backend) => backend
+                .data
+                .range(prefix.to_vec()..)
+                .take_while(|(key, _)| key.starts_with(prefix))
+                .map(|(key, value)| {
+                    decode(value, std::str::from_utf8(prefix).unwrap_or("prefix scan"))
+                        .map(|row| (key.clone(), row))
+                })
+                .collect(),
+        }
+    }
+
     fn read_json<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>, RedbError> {
         self.read_key(key)?
             .map(|value| decode(&value, std::str::from_utf8(key).unwrap_or("key")))
