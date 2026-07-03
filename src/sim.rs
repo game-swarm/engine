@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::command::Tick;
-use crate::components::{BodyPart, Controller, Drone, PlayerId, RoomId, Source, Structure};
+use crate::components::{BodyPart, Controller, Drone, PlayerId, Source, Structure};
 use crate::visibility::is_visible_to;
 use crate::world::{SwarmWorld, create_world};
 
@@ -150,7 +150,7 @@ pub struct PerDroneSnapshot {
 /// Fog-of-war filter: delegates to visibility module (§1.4 critical entities always visible)
 pub fn fog_of_war_filter(
     world: &mut World,
-    drone_entity: Entity,
+    _drone_entity: Entity,
     target_entity: Entity,
     player_id: PlayerId,
     tick: Tick,
@@ -247,7 +247,7 @@ pub fn build_snapshot(
 
     // Collect all visible entities with distance bucket + entity_id sort key
     let mut sortable_entities: Vec<(SortKey, SnapshotEntity)> = Vec::new();
-    let mut all_entities = world.query::<Entity>().iter(world).collect::<Vec<_>>();
+    let all_entities = world.query::<Entity>().iter(world).collect::<Vec<_>>();
 
     for &entity in &all_entities {
         // Apply fog-of-war filter

@@ -8,7 +8,7 @@ use crate::command::Tick;
 use crate::components::PlayerId;
 use crate::resources::{
     GlobalStorageConfig, PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage,
-    PlayerLocalStorage, ResourceAmount, ResourceCost, ResourceName,
+    PlayerLocalStorage, ResourceAmount, ResourceName,
 };
 
 // ═══════════════════════════════════════════════════════════════════

@@ -37,7 +37,7 @@ pub fn wreckage_decay_system(mut commands: Commands, mut wreckage: Query<(Entity
     for (entity, mut wreckage) in wreckage.iter_mut() {
         wreckage.remaining_ticks = wreckage.remaining_ticks.saturating_sub(1);
         if wreckage.remaining_ticks == 0 {
-            commands.entity(entity).despawn_recursive();
+            commands.entity(entity).despawn();
         }
     }
 }

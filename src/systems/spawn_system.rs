@@ -52,7 +52,7 @@ pub fn spawn_system(
             .0
             .entry((spawn.position.room, spawn.owner))
             .or_default() += 1;
-        onboarding_events.send(OnboardingEvent::DroneSpawned);
+        onboarding_events.write(OnboardingEvent::DroneSpawned);
     }
 }
 

@@ -4,7 +4,7 @@ use crate::components::{
     DebilitateState, DisruptState, DrainState, FabricateState, FortifyState, HackState, LeechState,
     OverloadState,
 };
-use crate::systems::{PendingDamage, PendingIntents, SpecialAttackKind};
+use crate::systems::{PendingIntents, SpecialAttackKind};
 
 /// S22 status_advance_system — UNIQUE WRITER for all StatusState components.
 ///

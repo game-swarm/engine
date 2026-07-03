@@ -394,7 +394,7 @@ fn run_sim(args: &[String]) -> Result<(), String> {
     );
     let started_at = std::time::Instant::now();
     let mut world = create_local_simulation_world();
-    let mut checksum = world.state_checksum();
+    let mut checksum;
     for tick in 1..=ticks {
         world.run_tick();
         checksum = world.state_checksum();

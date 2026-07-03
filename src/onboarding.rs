@@ -193,7 +193,7 @@ pub fn onboarding_system(
 
     for event in events.read() {
         if let Some(achievement) = progress.record(*event) {
-            swarm_events.send(OnboardingSwarmEvent { achievement });
+            swarm_events.write(OnboardingSwarmEvent { achievement });
         }
     }
 }

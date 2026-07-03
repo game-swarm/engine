@@ -31,7 +31,6 @@ pub const MAX_REFUND_PER_TICK: u64 = MAX_FUEL / 10;
 pub const MAX_NEXT_TICK_FUEL_BUDGET: u64 = MAX_FUEL + MAX_REFUND_PER_TICK;
 pub const MAX_RANGED_ATTACK_RANGE: u32 = 3;
 const ENERGY_RESOURCE: &str = "Energy";
-const OVERLOAD_FUEL_DRAIN: u64 = 500_000;
 const OVERLOAD_FUEL_FLOOR: u64 = MAX_FUEL / 5;
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -167,6 +166,7 @@ const SPECIAL_COMMAND_ACTIONS: &[&str] = &[
     "Fabricate",
 ];
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommandActionWire {
@@ -1689,7 +1689,7 @@ fn mark_drone_action(world: &mut World, object_id: ObjectId, tick: Tick) {
 fn validate_move(
     world: &mut World,
     player_id: PlayerId,
-    tick: Tick,
+    _tick: Tick,
     object_id: ObjectId,
     direction: Direction,
 ) -> CommandResult {
@@ -1711,7 +1711,7 @@ fn validate_move(
 fn validate_harvest(
     world: &mut World,
     player_id: PlayerId,
-    tick: Tick,
+    _tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
@@ -1737,7 +1737,7 @@ fn validate_transfer(
     target_id: ObjectId,
     resource: &str,
     amount: u32,
-    tick: Tick,
+    _tick: Tick,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
@@ -1770,7 +1770,7 @@ fn validate_withdraw(
     target_id: ObjectId,
     resource: &str,
     amount: u32,
-    tick: Tick,
+    _tick: Tick,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
@@ -1799,7 +1799,7 @@ fn validate_withdraw(
 fn validate_attack(
     world: &mut World,
     player_id: PlayerId,
-    tick: Tick,
+    _tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
@@ -1816,7 +1816,7 @@ fn validate_attack(
 fn validate_ranged_attack(
     world: &mut World,
     player_id: PlayerId,
-    tick: Tick,
+    _tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
     range: u32,
@@ -1840,7 +1840,7 @@ fn validate_ranged_attack(
 fn validate_heal(
     world: &mut World,
     player_id: PlayerId,
-    tick: Tick,
+    _tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
@@ -1907,7 +1907,7 @@ fn payload_u32(payload: &serde_json::Value, field: &str) -> Option<u32> {
 fn validate_claim_controller(
     world: &mut World,
     player_id: PlayerId,
-    tick: Tick,
+    _tick: Tick,
     object_id: ObjectId,
     controller_id: ObjectId,
 ) -> CommandResult {
@@ -1979,7 +1979,7 @@ fn validate_recycle(world: &mut World, player_id: PlayerId, object_id: ObjectId)
 fn validate_build(
     world: &mut World,
     player_id: PlayerId,
-    tick: Tick,
+    _tick: Tick,
     object_id: ObjectId,
     x: i32,
     y: i32,
@@ -2016,7 +2016,7 @@ fn validate_build(
 fn validate_repair(
     world: &mut World,
     player_id: PlayerId,
-    tick: Tick,
+    _tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
@@ -2036,7 +2036,7 @@ fn validate_repair(
 fn validate_upgrade_controller(
     world: &mut World,
     player_id: PlayerId,
-    tick: Tick,
+    _tick: Tick,
     object_id: ObjectId,
     controller_id: ObjectId,
 ) -> CommandResult {
@@ -2945,32 +2945,6 @@ fn effect_multiplier(
     }
 }
 
-fn fabricate_target(
-    world: &mut World,
-    player_id: PlayerId,
-    target_id: ObjectId,
-    structure_type: Option<StructureType>,
-) -> CommandResult {
-    let target = entity(target_id)?;
-    let position = *world
-        .entity(target)
-        .get::<Position>()
-        .ok_or(RejectionReason::ObjectNotFound)?;
-    if world.entity(target).get::<Drone>().is_none() {
-        return Err(RejectionReason::NotMovable);
-    }
-    world.entity_mut(target).despawn();
-    world.spawn((
-        position,
-        structure_defaults(
-            structure_type.unwrap_or(StructureType::FACTORY),
-            Some(player_id),
-            world,
-        ),
-    ));
-    Ok(())
-}
-
 fn apply_resisted_damage_amount(
     world: &mut World,
     target_id: ObjectId,
@@ -3574,16 +3548,6 @@ fn room_controller_level(world: &mut World, room: RoomId, player_id: PlayerId) -
         .unwrap_or(8)
 }
 
-fn player_global_amount(world: &World, player_id: PlayerId, resource: &str) -> u32 {
-    world
-        .resource::<PlayerGlobalStorage>()
-        .0
-        .get(&player_id)
-        .and_then(|storage| storage.get(resource))
-        .copied()
-        .unwrap_or_default()
-}
-
 fn player_local_amount(world: &World, player_id: PlayerId, resource: &str) -> u32 {
     world
         .resource::<PlayerLocalStorage>()
@@ -3630,16 +3594,6 @@ fn deduct_player_resource_cost(
         }
         subtract_player_resource(storage, resource, *amount);
     }
-}
-
-fn add_player_resource(world: &mut World, player_id: PlayerId, resource: &str, amount: u32) {
-    *world
-        .resource_mut::<PlayerGlobalStorage>()
-        .0
-        .entry(player_id)
-        .or_default()
-        .entry(resource.to_string())
-        .or_default() += amount;
 }
 
 fn recycle_refund_cost(world: &World, _tick: Tick, body: &[BodyPart]) -> ResourceCost {

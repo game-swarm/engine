@@ -38,7 +38,7 @@ pub fn death_cleanup_system(
                 }
             }
         }
-        commands.entity(entity).despawn_recursive();
+        commands.entity(entity).despawn();
     }
 }
 

@@ -8,7 +8,7 @@ use crate::components::{Drone, HackState, Owner, Position};
 /// control effects: owner changed to 0 (neutral), fatigue set, slow/root.
 /// Runs in Status Effects Parallel Set B (disjoint from other status systems).
 pub fn hack_system(mut drones: Query<(Entity, &mut Drone, &mut HackState, &Owner, &Position)>) {
-    for (_entity, mut drone, mut state, owner, _pos) in drones.iter_mut() {
+    for (_entity, mut drone, mut state, _owner, _pos) in drones.iter_mut() {
         if state.remaining_ticks == 0 {
             continue;
         }

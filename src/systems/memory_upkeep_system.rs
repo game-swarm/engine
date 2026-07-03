@@ -4,7 +4,7 @@ use indexmap::{IndexMap, IndexSet};
 
 use crate::components::{Drone, PlayerId, Position};
 use crate::resources::PlayerGlobalStorage;
-use crate::systems::starting_resources_system::{PlayerFirstSpawnTick, StartingResourcesGranted};
+use crate::systems::starting_resources_system::PlayerFirstSpawnTick;
 use crate::world::WorldConfig;
 
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]

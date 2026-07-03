@@ -817,7 +817,7 @@ pub struct MultiPlayerTickScheduler<C, B> {
     pub broadcaster: B,
     pub tick_counter: Tick,
     pub metrics: TickMetrics,
-    pub collect_cache: Option<CollectCache>,
+    collect_cache: Option<CollectCache>,
     pub degraded_mode: DegradedModeState,
 }
 

@@ -7,7 +7,7 @@ use crate::components::{DebilitateState, Drone};
 /// Reads DebilitateState (written by S22) and doubles damage from
 /// the debilitated damage type against the affected drone.
 pub fn debilitate_system(mut debilitated: Query<(&mut Drone, &DebilitateState)>) {
-    for (mut drone, state) in debilitated.iter_mut() {
+    for (drone, state) in debilitated.iter_mut() {
         if state.remaining_ticks == 0 {
             continue;
         }
