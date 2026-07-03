@@ -418,7 +418,7 @@ pub fn summarize_local_simulation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{BodyPart, Drone, Position, RoomId};
+    use crate::components::{BodyPart, Drone};
 
     #[test]
     fn local_simulation_runs_ticks_and_reports_summary() {
@@ -483,14 +483,14 @@ mod tests {
     #[test]
     fn snapshot_fog_of_war_filters_distant_entities() {
         let mut world = create_test_world();
-        let w = world.app.world_mut();
         // Collect owned entity IDs to avoid borrow issues
-        let entities: Vec<(Entity, PlayerId)> = w
-            .query::<(Entity, &Drone)>()
-            .iter(w)
-            .map(|(e, d)| (e, d.owner))
-            .collect();
-        drop(w); // release immutable borrow
+        let entities: Vec<(Entity, PlayerId)> = {
+            let w = world.app.world_mut();
+            w.query::<(Entity, &Drone)>()
+                .iter(w)
+                .map(|(e, d)| (e, d.owner))
+                .collect()
+        };
 
         // Find player 1's drone (at 5,5)
         let drone1 = entities.iter().find(|(_, owner)| *owner == 1).unwrap();

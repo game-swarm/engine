@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use bevy::prelude::Resource;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::command::Tick;

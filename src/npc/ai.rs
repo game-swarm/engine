@@ -393,6 +393,7 @@ mod tests {
     use super::*;
     use crate::components::{BodyPart, RoomId};
     use crate::create_world;
+    use crate::systems::PendingIntents;
 
     fn position(x: i32, y: i32) -> Position {
         Position {

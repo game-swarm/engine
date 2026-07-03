@@ -28,7 +28,7 @@ pub fn spawn_system(
     mut pending_entities: ResMut<PendingEntityCreation>,
     mut stable_ids: ResMut<StableEntityIdAllocator>,
     terrains: Res<RoomTerrains>,
-    mut onboarding_events: EventWriter<OnboardingEvent>,
+    mut onboarding_events: MessageWriter<OnboardingEvent>,
 ) {
     let pending = std::mem::take(&mut queue.0);
     for spawn in pending {

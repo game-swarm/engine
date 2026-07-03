@@ -4,7 +4,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use swarm_engine::components::BodyPart;
 use swarm_engine::tick::WorldSnapshot;
-use swarm_engine::{create_world, spawn_drone};
+use swarm_engine::create_world;
 
 fn bench_snapshot_capture(c: &mut Criterion) {
     let mut group = c.benchmark_group("snapshot");
@@ -13,8 +13,7 @@ fn bench_snapshot_capture(c: &mut Criterion) {
     // Build a world with 50 drones
     let mut world = create_world();
     for i in 0..50 {
-        spawn_drone(
-            &mut world,
+        world.spawn_drone(
             (i % 5) + 1, // 5 players
             (i % 40) as i32,
             (i / 40) as i32,

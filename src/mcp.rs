@@ -1519,7 +1519,7 @@ impl McpServer {
         world: &mut SwarmWorld,
     ) -> Result<RegisterChallengeResult, McpError> {
         let mut challenge_bytes = [0_u8; 16];
-        getrandom::getrandom(&mut challenge_bytes)
+        getrandom::fill(&mut challenge_bytes)
             .map_err(|error| McpError::invalid_params(error.to_string()))?;
         let challenge = bytes_to_hex(&challenge_bytes);
         let challenge_id = format!(

@@ -743,7 +743,7 @@ mod tests {
 
     #[test]
     fn session_lifecycle_active_to_closed() {
-        let mut session = SessionState::new(1, 42, 100);
+        let session = SessionState::new(1, 42, 100);
         assert_eq!(session.status, SessionStatus::Active);
         assert!(!session.is_expired(100));
         assert!(!session.is_expired(159));

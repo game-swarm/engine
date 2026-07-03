@@ -23,7 +23,7 @@ pub struct OnboardingAchievement {
     pub description: &'static str,
 }
 
-#[derive(Event, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnboardingEvent {
     ResourceHarvested,
     ResourceCollected,
@@ -35,7 +35,7 @@ pub enum OnboardingEvent {
     ArenaCompleted,
 }
 
-#[derive(Event, Debug, Clone, PartialEq, Eq)]
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
 pub struct OnboardingSwarmEvent {
     pub achievement: OnboardingAchievement,
 }
@@ -183,8 +183,8 @@ pub fn onboarding_achievements() -> &'static [OnboardingAchievement; 6] {
 pub fn onboarding_system(
     config: Res<OnboardingConfig>,
     mut progress: ResMut<OnboardingProgress>,
-    mut events: EventReader<OnboardingEvent>,
-    mut swarm_events: EventWriter<OnboardingSwarmEvent>,
+    mut events: MessageReader<OnboardingEvent>,
+    mut swarm_events: MessageWriter<OnboardingSwarmEvent>,
 ) {
     if !config.enabled {
         events.clear();
@@ -206,7 +206,7 @@ pub fn send_onboarding_event(world: &mut World, event: OnboardingEvent) {
         return;
     }
 
-    world.send_event(event);
+    world.write_message(event);
 }
 
 #[cfg(test)]

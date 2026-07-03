@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn controller_repair_cost_increases_with_distance() {
-        let mut world = create_world();
+        let world = create_world();
         let registry = world.app.world().resource::<ResourceRegistry>();
         let body_cost = registry.body_energy_cost(&[BodyPart::Move, BodyPart::Work]);
         let config = &world.app.world().resource::<WorldConfig>().empire_upkeep;

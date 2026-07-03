@@ -104,7 +104,7 @@ impl Default for CertificateIssuer {
 impl CertificateIssuer {
     pub fn new() -> Self {
         let mut seed = [0_u8; 32];
-        getrandom::getrandom(&mut seed).expect("OS randomness is required for certificate issuer");
+        getrandom::fill(&mut seed).expect("OS randomness is required for certificate issuer");
         Self {
             signing_key: SigningKey::from_bytes(&seed),
         }

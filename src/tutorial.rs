@@ -47,7 +47,7 @@ impl TutorialStep {
     }
 }
 
-#[derive(Event, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Message, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TutorialStepEvent {
     pub step: TutorialStep,
     pub tick: Tick,
@@ -172,8 +172,8 @@ pub fn tutorial_bot_system(
     config: Res<TutorialConfig>,
     mut state: ResMut<TutorialState>,
     mut queue: ResMut<PendingSpawnQueue>,
-    mut onboarding_events: EventWriter<OnboardingEvent>,
-    mut step_events: EventWriter<TutorialStepEvent>,
+    mut onboarding_events: MessageWriter<OnboardingEvent>,
+    mut step_events: MessageWriter<TutorialStepEvent>,
     mut sources: Query<(Entity, &Position, &mut Source), With<TutorialSource>>,
     drones: Query<(Entity, &Position, &Owner), With<Drone>>,
 ) {

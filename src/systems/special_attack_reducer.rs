@@ -148,6 +148,10 @@ pub fn special_attack_reducer(
 mod tests {
     use super::*;
 
+    fn entity(index: u32) -> Entity {
+        Entity::from_raw_u32(index).expect("test entity index must fit")
+    }
+
     #[test]
     fn reducer_sorts_by_priority_desc() {
         let mut app = App::new();
@@ -155,15 +159,15 @@ mod tests {
             intents: vec![
                 StatusActionIntent {
                     kind: SpecialAttackKind::Fortify,
-                    source: Entity::from_raw(1),
-                    target: Entity::from_raw(10),
+                    source: entity(1),
+                    target: entity(10),
                     owner: 1,
                     amount: 5,
                 },
                 StatusActionIntent {
                     kind: SpecialAttackKind::Hack,
-                    source: Entity::from_raw(2),
-                    target: Entity::from_raw(10),
+                    source: entity(2),
+                    target: entity(10),
                     owner: 1,
                     amount: 10,
                 },
@@ -195,15 +199,15 @@ mod tests {
             intents: vec![
                 StatusActionIntent {
                     kind: SpecialAttackKind::Drain,
-                    source: Entity::from_raw(1),
-                    target: Entity::from_raw(10),
+                    source: entity(1),
+                    target: entity(10),
                     owner: 1,
                     amount: 3,
                 },
                 StatusActionIntent {
                     kind: SpecialAttackKind::Drain,
-                    source: Entity::from_raw(2),
-                    target: Entity::from_raw(10),
+                    source: entity(2),
+                    target: entity(10),
                     owner: 2,
                     amount: 7,
                 },
@@ -231,15 +235,15 @@ mod tests {
             intents: vec![
                 StatusActionIntent {
                     kind: SpecialAttackKind::Hack,
-                    source: Entity::from_raw(1),
-                    target: Entity::from_raw(10),
+                    source: entity(1),
+                    target: entity(10),
                     owner: 1,
                     amount: 5,
                 },
                 StatusActionIntent {
                     kind: SpecialAttackKind::Drain,
-                    source: Entity::from_raw(2),
-                    target: Entity::from_raw(20),
+                    source: entity(2),
+                    target: entity(20),
                     owner: 2,
                     amount: 3,
                 },

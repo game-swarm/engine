@@ -43,7 +43,7 @@ pub fn hack_system(mut drones: Query<(Entity, &mut Drone, &mut HackState, &Owner
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{BodyPartRegistry, DEFAULT_DRONE_LIFESPAN};
+    use crate::components::DEFAULT_DRONE_LIFESPAN;
     use indexmap::IndexMap;
 
     fn test_drone() -> Drone {

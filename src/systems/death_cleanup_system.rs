@@ -45,7 +45,6 @@ pub fn death_cleanup_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::BodyPartRegistry;
     use crate::world::create_world;
     use indexmap::IndexMap;
 

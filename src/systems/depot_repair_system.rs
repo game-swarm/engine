@@ -102,7 +102,6 @@ mod tests {
     use super::*;
     use crate::components::{DEFAULT_DRONE_LIFESPAN, RoomId};
     use crate::world::create_world;
-    use bevy::prelude::*;
 
     #[test]
     fn depot_repairs_drone_in_range() {

@@ -139,6 +139,7 @@ pub fn status_advance_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::systems::PendingDamage;
     use crate::systems::ResolvedIntent;
 
     #[test]

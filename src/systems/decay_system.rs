@@ -17,7 +17,7 @@ pub fn decay_system(mut drones: Query<&mut Drone>, mut structures: Query<&mut St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{BodyPartRegistry, DEFAULT_DRONE_LIFESPAN};
+    use crate::components::DEFAULT_DRONE_LIFESPAN;
     use crate::world::create_world;
     use indexmap::IndexMap;
 

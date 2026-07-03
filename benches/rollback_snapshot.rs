@@ -2,9 +2,10 @@
 //!
 //! Gate: 500 entities, all components, p99 < 50ms, entity ID allocator verified.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::collections::HashMap;
+use std::hint::black_box;
 
+use criterion::{Criterion, criterion_group, criterion_main};
 use bevy::prelude::*;
 use swarm_engine::components::*;
 use swarm_engine::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
@@ -115,10 +116,10 @@ fn bench_allocator_determinism(c: &mut Criterion) {
                 let _entity_map = snapshot.restore(&mut world);
                 let next = world.spawn_empty().id();
                 assert!(
-                    next.index() <= total_before + 1,
+                    next.index().index() <= total_before + 1,
                     "allocator drifted: expected index <= {}, got {}",
                     total_before + 1,
-                    next.index()
+                    next.index().index()
                 );
                 world.entity_mut(next).despawn();
             },

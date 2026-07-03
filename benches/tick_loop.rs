@@ -4,7 +4,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use swarm_engine::components::{BodyPart, Position, RoomId};
 use swarm_engine::npc::ai::{Npc, NpcBehavior, NpcSpecialAttack, NpcType};
-use swarm_engine::{create_world, spawn_drone};
+use swarm_engine::create_world;
 
 fn bench_tick_loop(c: &mut Criterion) {
     let mut group = c.benchmark_group("tick_loop");
@@ -15,8 +15,7 @@ fn bench_tick_loop(c: &mut Criterion) {
             let mut world = create_world();
 
             for i in 0..10 {
-                spawn_drone(
-                    &mut world,
+                world.spawn_drone(
                     (i % 5) + 1,
                     (i * 3) as i32,
                     5,

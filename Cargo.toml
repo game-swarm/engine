@@ -25,19 +25,19 @@ name = "swarm-engine"
 path = "src/main.rs"
 
 [dependencies]
-bevy = "0.16"
-async-nats = "0.42"
+bevy = "0.19"
+async-nats = "0.49"
 blake3 = "1"
 ed25519-dalek = "2"
 futures-util = "0.3"
-getrandom = "0.2"
+getrandom = "0.4"
 indexmap = { version = "2", features = ["serde"] }
-redb = "2"
+redb = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 tokio = { version = "1", features = ["full"] }
-toml = "0.8"
+toml = "1"
 
 [features]
 default = []
@@ -61,7 +61,7 @@ vanilla_mods = [
 ]
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 swarm-mod-combat-core = { path = "mods/combat-core" }
 swarm-mod-depot-storage = { path = "mods/depot-storage" }
 swarm-mod-empire-upkeep = { path = "mods/empire-upkeep" }

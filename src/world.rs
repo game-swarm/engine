@@ -42,6 +42,20 @@ pub use shard::*;
 
 static NEXT_TUTORIAL_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum EngineTickSet {
+    Spawn,
+    NpcSpawn,
+    NpcAi,
+    NpcCombat,
+    Regeneration,
+    Combat,
+    DamageApplication,
+    GlobalStorage,
+    Decay,
+    DroneEnvVars,
+}
+
 #[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorldConfig {
@@ -876,53 +890,67 @@ impl WorldConfig {
         // propagation, world events, strongholds, NPCs, starting resources, cargo/global storage,
         // allied transfer, repair/projectile combat, status buffers, cleanup, and entity flush.
         if self.propagation_system_enabled() {
-            app.add_systems(Update, code_propagation_system.before(spawn_system));
+            app.add_systems(Update, code_propagation_system.before(EngineTickSet::Spawn));
         }
         app.add_systems(
             Update,
             spawning_grace_system
-                .after(spawn_system)
-                .before(combat_system),
+                .after(EngineTickSet::Spawn)
+                .before(EngineTickSet::Combat),
         );
         app.add_systems(
             Update,
             spawning_grace_expiry_system
-                .after(combat_system)
-                .before(decay_system),
+                .after(EngineTickSet::Combat)
+                .before(EngineTickSet::Decay),
         );
         app.add_systems(
             Update,
             (world_event_system, event_effect_system)
                 .chain()
-                .after(spawn_system)
-                .before(regeneration_system),
+                .after(EngineTickSet::Spawn)
+                .before(EngineTickSet::Regeneration),
         );
-        app.add_systems(Update, stronghold_spawn_system.before(npc_spawn_system));
+        app.add_systems(
+            Update,
+            stronghold_spawn_system.before(EngineTickSet::NpcSpawn),
+        );
         app.add_systems(
             Update,
             stronghold_production_system
-                .after(spawn_system)
-                .before(regeneration_system),
+                .after(EngineTickSet::Spawn)
+                .before(EngineTickSet::Regeneration),
         );
         app.add_systems(
             Update,
-            npc_ai_system.after(spawn_system).before(npc_combat_system),
+            npc_ai_system
+                .in_set(EngineTickSet::NpcAi)
+                .after(EngineTickSet::Spawn)
+                .before(EngineTickSet::NpcCombat),
         );
         app.add_systems(
             Update,
-            npc_combat_system.after(npc_ai_system).before(combat_system),
+            npc_combat_system
+                .in_set(EngineTickSet::NpcCombat)
+                .after(EngineTickSet::NpcAi)
+                .before(EngineTickSet::Combat),
         );
-        app.add_systems(Update, npc_spawn_system.before(spawn_system));
+        app.add_systems(
+            Update,
+            npc_spawn_system
+                .in_set(EngineTickSet::NpcSpawn)
+                .before(EngineTickSet::Spawn),
+        );
         app.add_systems(
             Update,
             (
                 death_mark_system,
-                spawn_system,
+                spawn_system.in_set(EngineTickSet::Spawn),
                 starting_resources_system,
-                regeneration_system,
+                regeneration_system.in_set(EngineTickSet::Regeneration),
                 seed_rotation_system,
                 cargo_in_transit_system,
-                global_storage_system,
+                global_storage_system.in_set(EngineTickSet::GlobalStorage),
                 allied_transfer_system,
             )
                 .chain(),
@@ -936,12 +964,12 @@ impl WorldConfig {
                 ranged_attack_system,
                 projectile_system,
                 heal_system,
-                combat_system,
+                combat_system.in_set(EngineTickSet::Combat),
                 special_attack_reducer,
-                damage_application_system,
+                damage_application_system.in_set(EngineTickSet::DamageApplication),
             )
                 .chain()
-                .after(global_storage_system),
+                .after(EngineTickSet::GlobalStorage),
         );
         app.add_systems(
             Update,
@@ -956,13 +984,13 @@ impl WorldConfig {
                 fabricate_buffer_system,
                 status_advance_system,
                 aging_system,
-                decay_system,
+                decay_system.in_set(EngineTickSet::Decay),
                 wreckage_decay_system,
                 memory_upkeep_system,
-                drone_env_var_system,
+                drone_env_var_system.in_set(EngineTickSet::DroneEnvVars),
             )
                 .chain()
-                .after(damage_application_system),
+                .after(EngineTickSet::DamageApplication),
         );
         app.add_systems(
             Update,
@@ -977,7 +1005,7 @@ impl WorldConfig {
                 flush_pending_entity_creation_system,
             )
                 .chain()
-                .after(drone_env_var_system),
+                .after(EngineTickSet::DroneEnvVars),
         );
     }
 }
@@ -1411,8 +1439,8 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<PendingRoomClaims>();
     app.insert_resource(OnboardingConfig::for_mode(mode));
     app.init_resource::<OnboardingProgress>();
-    app.add_event::<OnboardingEvent>();
-    app.add_event::<OnboardingSwarmEvent>();
+    app.add_message::<OnboardingEvent>();
+    app.add_message::<OnboardingSwarmEvent>();
     register_mods(&mut app, &load_default_plugin_lock());
 
     let namespace = match mode {

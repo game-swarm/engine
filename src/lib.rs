@@ -129,25 +129,6 @@ mod tests {
             .id()
     }
 
-    fn spawn_terminal(world: &mut crate::SwarmWorld, owner: PlayerId, x: i32, y: i32) {
-        world.app.world_mut().spawn((
-            Position {
-                x,
-                y,
-                room: RoomId(0),
-            },
-            Structure {
-                structure_type: StructureType::Terminal,
-                owner: Some(owner),
-                hits: 5_000,
-                hits_max: 5_000,
-                energy: None,
-                energy_capacity: None,
-                cooldown: 0,
-            },
-        ));
-    }
-
     fn first_source_id(world: &mut crate::SwarmWorld) -> ObjectId {
         object_id(
             world
@@ -1008,7 +989,7 @@ mod tests {
             world
                 .app
                 .world()
-                .resource::<bevy::prelude::Events<OnboardingSwarmEvent>>()
+                .resource::<bevy::prelude::Messages<OnboardingSwarmEvent>>()
                 .len(),
             3
         );
@@ -1044,7 +1025,7 @@ mod tests {
             world
                 .app
                 .world()
-                .resource::<bevy::prelude::Events<OnboardingSwarmEvent>>()
+                .resource::<bevy::prelude::Messages<OnboardingSwarmEvent>>()
                 .len(),
             1
         );

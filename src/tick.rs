@@ -1899,8 +1899,8 @@ impl WorldSnapshot {
                 .resource::<crate::systems::PlayerFirstSpawnTick>()
                 .clone(),
             event_log: world.resource::<EventLog>().clone(),
-            entity_total_count: allocator.total_count() as u32,
-            entity_alive_count: allocator.len(),
+            entity_total_count: allocator.len(),
+            entity_alive_count: allocator.count_spawned(),
         }
     }
 
