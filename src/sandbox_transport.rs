@@ -3,41 +3,15 @@ use std::time::Duration;
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use swarm_wasm_sandbox::{
-    CompiledModuleCache, HostCallBudget, SandboxError, SandboxRuntime, TickOutput,
-};
 
 const DEFAULT_COLLECT_TIMEOUT_MS: u64 = 2_500;
 
 #[derive(Resource, Clone)]
 pub enum SandboxBackend {
-    Local(SandboxRuntime),
     Remote {
         nats_client: async_nats::Client,
         instance_id: String,
     },
-}
-
-impl Default for SandboxBackend {
-    fn default() -> Self {
-        Self::Local(SandboxRuntime::default())
-    }
-}
-
-impl SandboxBackend {
-    pub fn local_runtime(&self) -> Option<&SandboxRuntime> {
-        match self {
-            Self::Local(runtime) => Some(runtime),
-            Self::Remote { .. } => None,
-        }
-    }
-
-    pub fn local_runtime_or_default(&self) -> SandboxRuntime {
-        match self {
-            Self::Local(runtime) => runtime.clone(),
-            Self::Remote { .. } => SandboxRuntime::default(),
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,16 +51,6 @@ struct SandboxDeployRequest {
     validation_policy_version: String,
 }
 
-pub async fn execute_tick_local(
-    runtime: &SandboxRuntime,
-    cache: &mut CompiledModuleCache,
-    wasm_bytes: &[u8],
-    snapshot_json: &[u8],
-) -> Result<TickOutput, SandboxError> {
-    let compiled = runtime.compile_cached(cache, wasm_bytes)?;
-    runtime.execute_tick(&compiled, snapshot_json)
-}
-
 pub async fn execute_tick_remote(
     nats: &async_nats::Client,
     tick: u64,
@@ -121,35 +85,18 @@ pub async fn deploy_module_remote(
     module_hash: &[u8],
     wasm_bytes: &[u8],
 ) -> Result<(), String> {
-    let runtime = SandboxRuntime::default();
-    let cached = runtime
-        .precompile_native(wasm_bytes)
-        .map_err(|error| error.to_string())?;
-    let artifact_hash = blake3::hash(&cached.native_bytes).as_bytes().to_vec();
+    let artifact_hash = blake3::hash(wasm_bytes).as_bytes().to_vec();
     let request = SandboxDeployRequest {
         module_hash: module_hash.to_vec(),
         compiled_artifact_hash: artifact_hash.clone(),
         module_bytes: wasm_bytes.to_vec(),
-        compiled_native_bytes: cached.native_bytes,
-        wasmtime_version: cached.key.wasmtime_version,
-        validation_policy_version: "v1".to_string(),
+        compiled_native_bytes: Vec::new(),
+        wasmtime_version: String::new(),
+        validation_policy_version: "raw-wasm-v1".to_string(),
     };
-    let subject = format!("swarm.deploy.{}", bytes_to_hex(&artifact_hash));
+    let subject = format!("swarm.deploy.{}", blake3::hash(wasm_bytes).to_hex());
     let payload = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     nats.publish(subject, payload.into())
         .await
         .map_err(|error| error.to_string())
-}
-
-pub fn metrics_from_host_budget(host_call_budget: &HostCallBudget) -> SandboxExecutionMetrics {
-    SandboxExecutionMetrics {
-        fuel_consumed: 0,
-        wall_clock_ms: 0,
-        memory_peak_bytes: 0,
-        host_function_calls: host_call_budget.total_calls,
-    }
-}
-
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

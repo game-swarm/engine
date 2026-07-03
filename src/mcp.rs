@@ -5,9 +5,6 @@ use bevy::prelude::*;
 use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use swarm_wasm_sandbox::{
-    CachedNativeModule, CompiledModule, CompiledModuleCache, ModuleCacheKey, wasmtime_version,
-};
 
 use crate::arena::{
     ArenaReplay, ReplayPrivacy, TournamentBracket, TournamentElimination, TournamentMatchSchedule,
@@ -481,7 +478,6 @@ pub struct DeployResult {
     pub status: String,
     pub deployed_at: String,
     pub module_hash: String,
-    pub wasmtime_version: String,
     pub cache_status: String,
 }
 
@@ -535,9 +531,7 @@ pub struct StoredModule {
     pub player_id: PlayerId,
     pub room_id: RoomId,
     pub wasm_bytes: Vec<u8>,
-    pub cached_native_module: CachedNativeModule,
     pub wasm_hash: String,
-    pub wasmtime_version: String,
     pub certificate: PlayerCertificate,
     pub wasm_signature: String,
     pub language: String,
@@ -710,7 +704,19 @@ pub struct SandboxStats {
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub cached_modules: usize,
-    pub wasmtime_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleMetadata {
+    pub module_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModuleCacheStats {
+    pub entries: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub recompiles: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -853,7 +859,6 @@ pub struct StoredModuleSummary {
     pub player_id: PlayerId,
     pub room_id: u32,
     pub wasm_hash: String,
-    pub wasmtime_version: String,
     pub language: String,
     pub version_tag: String,
     pub deployed_at: String,
@@ -866,7 +871,6 @@ fn stored_module_summary(module: &StoredModule) -> StoredModuleSummary {
         player_id: module.player_id,
         room_id: module.room_id.0,
         wasm_hash: module.wasm_hash.clone(),
-        wasmtime_version: module.wasmtime_version.clone(),
         language: module.language.clone(),
         version_tag: module.version_tag.clone(),
         deployed_at: module.deployed_at.clone(),
@@ -999,8 +1003,7 @@ pub struct ResourceReadParams {
 #[derive(Default)]
 pub struct McpServer {
     modules: Vec<StoredModule>,
-    module_cache: CompiledModuleCache,
-    sandbox_backend: SandboxBackend,
+    sandbox_backend: Option<SandboxBackend>,
     tournament_locks: BTreeMap<PlayerId, TournamentLockedModule>,
     tournaments: BTreeMap<String, TournamentBracket>,
     issuer: CertificateIssuer,
@@ -1015,8 +1018,7 @@ impl McpServer {
     pub fn new() -> Self {
         Self {
             modules: Vec::new(),
-            module_cache: CompiledModuleCache::new(),
-            sandbox_backend: SandboxBackend::default(),
+            sandbox_backend: None,
             tournament_locks: BTreeMap::new(),
             tournaments: BTreeMap::new(),
             issuer: CertificateIssuer::new(),
@@ -1031,8 +1033,7 @@ impl McpServer {
     pub fn with_issuer_for_tests(issuer: SigningKey, now_seconds: u64) -> Self {
         Self {
             modules: Vec::new(),
-            module_cache: CompiledModuleCache::new(),
-            sandbox_backend: SandboxBackend::default(),
+            sandbox_backend: None,
             tournament_locks: BTreeMap::new(),
             tournaments: BTreeMap::new(),
             issuer: CertificateIssuer::from_signing_key_for_tests(issuer),
@@ -1046,7 +1047,7 @@ impl McpServer {
 
     pub fn with_sandbox_backend(sandbox_backend: SandboxBackend) -> Self {
         Self {
-            sandbox_backend,
+            sandbox_backend: Some(sandbox_backend),
             ..Self::new()
         }
     }
@@ -1949,16 +1950,7 @@ impl McpServer {
             wasm_hash.as_bytes(),
             &params.wasm_signature,
         )?;
-
-        let cached_native_module = self
-            .sandbox_backend
-            .local_runtime_or_default()
-            .precompile_native(&wasm_bytes)
-            .map_err(|error| {
-                McpError::invalid_params(format!("wasm precompile failed: {error}"))
-            })?;
-        let cache_key = cached_native_module.key.clone();
-        self.module_cache.insert(cached_native_module.clone());
+        let wasm_hash_hex = wasm_hash.to_hex().to_string();
 
         let module_id = format!(
             "mod_{}_{}_{}",
@@ -1972,9 +1964,7 @@ impl McpServer {
             player_id: context.player_id,
             room_id,
             wasm_bytes: wasm_bytes.clone(),
-            cached_native_module,
-            wasm_hash: cache_key.module_hash.clone(),
-            wasmtime_version: cache_key.wasmtime_version.clone(),
+            wasm_hash: wasm_hash_hex.clone(),
             certificate: params.certificate,
             wasm_signature: params.wasm_signature,
             language: params.language,
@@ -1983,11 +1973,11 @@ impl McpServer {
             load_after_tick: context.tick + 1,
         });
 
-        if let SandboxBackend::Remote { nats_client, .. } = &self.sandbox_backend {
+        if let Some(SandboxBackend::Remote { nats_client, .. }) = &self.sandbox_backend {
             let _ = tokio::runtime::Handle::try_current().map(|handle| {
                 handle.spawn({
                     let nats_client = nats_client.clone();
-                    let module_hash = cache_key.module_hash.as_bytes().to_vec();
+                    let module_hash = wasm_hash_hex.as_bytes().to_vec();
                     let wasm_bytes = wasm_bytes.clone();
                     async move {
                         let _ = deploy_module_remote(&nats_client, &module_hash, &wasm_bytes).await;
@@ -2000,9 +1990,8 @@ impl McpServer {
             module_id,
             status: "pending_next_tick".to_string(),
             deployed_at,
-            module_hash: cache_key.module_hash,
-            wasmtime_version: cache_key.wasmtime_version,
-            cache_status: "precompiled".to_string(),
+            module_hash: wasm_hash_hex,
+            cache_status: "remote_pending".to_string(),
         })
     }
 
@@ -2268,45 +2257,20 @@ impl McpServer {
         self.now_seconds.unwrap_or_else(unix_timestamp_seconds)
     }
 
-    pub fn compile_module_for_tick(&mut self, module_id: &str) -> Result<CompiledModule, McpError> {
+    pub fn compile_module_for_tick(&mut self, module_id: &str) -> Result<ModuleMetadata, McpError> {
         let module = self
             .modules
-            .iter_mut()
+            .iter()
             .find(|module| module.module_id == module_id)
             .ok_or_else(|| McpError::invalid_params("module_id is not deployed"))?;
 
-        let runtime = self.sandbox_backend.local_runtime_or_default();
-        let compiled = if module.wasmtime_version == wasmtime_version() {
-            runtime.compile_from_cached_native(&module.cached_native_module, &module.wasm_bytes)
-        } else {
-            runtime.compile_cached_with_version(
-                &mut self.module_cache,
-                &module.wasm_bytes,
-                &module.wasmtime_version,
-            )
-        }
-        .map_err(|error| {
-            McpError::invalid_params(format!("wasm module compile failed: {error}"))
-        })?;
-
-        if module.wasmtime_version != compiled.wasmtime_version()
-            || module.wasm_hash != compiled.module_hash()
-        {
-            let refreshed = self
-                .module_cache
-                .get(&ModuleCacheKey::for_wasm(&module.wasm_bytes))
-                .cloned()
-                .ok_or_else(|| McpError::invalid_params("module cache refresh failed"))?;
-            module.cached_native_module = refreshed;
-            module.wasm_hash = compiled.module_hash().to_string();
-            module.wasmtime_version = compiled.wasmtime_version().to_string();
-        }
-
-        Ok(compiled)
+        Ok(ModuleMetadata {
+            module_hash: module.wasm_hash.clone(),
+        })
     }
 
-    pub fn module_cache_stats(&self) -> swarm_wasm_sandbox::ModuleCacheStats {
-        self.module_cache.stats()
+    pub fn module_cache_stats(&self) -> ModuleCacheStats {
+        ModuleCacheStats::default()
     }
 
     pub fn swarm_profile(&self, world: &mut SwarmWorld, context: McpContext) -> ProfileResult {
@@ -2336,13 +2300,12 @@ impl McpServer {
 
     pub fn swarm_get_engine_stats(&self, world: &mut SwarmWorld) -> EngineStatsResult {
         let metrics = aggregate_tick_metrics(&self.tick_traces);
-        let cache_stats = self.module_cache.stats();
         EngineStatsResult {
             tick_duration: metrics.duration_ms,
             player_count: world_player_count(world),
             memory: EngineMemoryStats {
                 deployed_modules: self.modules.len(),
-                cached_modules: cache_stats.entries,
+                cached_modules: 0,
                 wasm_bytes: self
                     .modules
                     .iter()
@@ -2357,10 +2320,9 @@ impl McpServer {
                 duration_ms: metrics.duration_ms,
             },
             sandbox_stats: SandboxStats {
-                cache_hits: cache_stats.hits,
-                cache_misses: cache_stats.misses,
-                cached_modules: cache_stats.entries,
-                wasmtime_version: wasmtime_version().to_string(),
+                cache_hits: 0,
+                cache_misses: 0,
+                cached_modules: 0,
             },
         }
     }
@@ -5275,16 +5237,11 @@ mod tests {
             .expect("deploy should succeed");
 
         assert_eq!(result.status, "pending_next_tick");
-        assert_eq!(result.cache_status, "precompiled");
+        assert_eq!(result.cache_status, "remote_pending");
         assert_eq!(
             result.module_hash,
             blake3::hash(&valid_deploy_wasm()).to_hex().to_string()
         );
-        assert_eq!(
-            result.wasmtime_version,
-            swarm_wasm_sandbox::wasmtime_version()
-        );
-        assert_eq!(server.module_cache_stats().entries, 1);
         assert_eq!(server.modules().len(), 1);
         assert_eq!(server.modules()[0].module_id, result.module_id);
         assert_eq!(server.modules()[0].load_after_tick, 12);
@@ -5295,16 +5252,10 @@ mod tests {
             server.modules()[0].wasm_hash,
             blake3::hash(&valid_deploy_wasm()).to_hex().to_string()
         );
-        assert_eq!(
-            server.modules()[0].wasmtime_version,
-            swarm_wasm_sandbox::wasmtime_version()
-        );
-
-        let compiled = server
+        let metadata = server
             .compile_module_for_tick(&result.module_id)
-            .expect("cached native module should instantiate at tick time");
-        assert_eq!(compiled.module_hash(), result.module_hash);
-        assert_eq!(compiled.wasmtime_version(), result.wasmtime_version);
+            .expect("deployed module metadata should be available at tick time");
+        assert_eq!(metadata.module_hash, result.module_hash);
     }
 
     #[test]

@@ -18,7 +18,6 @@ use swarm_engine::{
     sandbox_transport::{SandboxBackend, execute_tick_remote},
     sim::{create_local_simulation_world, summarize_local_simulation},
 };
-use swarm_wasm_sandbox::SandboxRuntime;
 
 #[cfg(feature = "mod_combat_core")]
 #[path = "../mods/combat-core/src/lib.rs"]
@@ -118,7 +117,8 @@ fn main() {
 
     let redb_path = env::var("REDB_PATH").unwrap_or_else(|_| "swarm.redb".to_string());
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
-    let sandbox_backend = env::var("SANDBOX_BACKEND").unwrap_or_else(|_| "local".to_string());
+    let requested_sandbox_backend =
+        env::var("SANDBOX_BACKEND").unwrap_or_else(|_| "nats".to_string());
     let health_addr =
         env::var("ENGINE_HEALTH_ADDR").unwrap_or_else(|_| DEFAULT_HEALTH_ADDR.to_string());
     let tick_interval = Duration::from_millis(
@@ -149,30 +149,32 @@ fn main() {
         ),
         Err(error) => eprintln!("nats unavailable: {error}"),
     }
-    let shared_nats_client = if sandbox_backend == "nats" {
-        match connect_nats_client(&nats_url) {
-            Ok(client) => Some(client),
-            Err(error) => {
-                eprintln!("sandbox_backend=nats nats_client=unavailable error={error}");
-                None
-            }
+    if requested_sandbox_backend != "nats" {
+        eprintln!(
+            "SANDBOX_BACKEND={requested_sandbox_backend} ignored; remote NATS sandbox is required"
+        );
+    }
+    let shared_nats_client = match connect_nats_client(&nats_url) {
+        Ok(client) => Some(client),
+        Err(error) => {
+            eprintln!("sandbox_backend=nats nats_client=unavailable error={error}");
+            None
         }
-    } else {
-        None
     };
-    let sandbox_backend = match (sandbox_backend.as_str(), shared_nats_client.clone()) {
-        ("local", _) => SandboxBackend::Local(SandboxRuntime::default()),
-        ("nats", Some(nats_client)) => SandboxBackend::Remote {
-            nats_client,
-            instance_id: env::var("INSTANCE_ID")
-                .or_else(|_| env::var("ENGINE_INSTANCE_ID"))
-                .unwrap_or_else(|_| "engine-0".to_string()),
-        },
-        ("nats", None) => SandboxBackend::Local(SandboxRuntime::default()),
-        (other, _) => {
-            eprintln!("unknown SANDBOX_BACKEND={other}; using local");
-            SandboxBackend::Local(SandboxRuntime::default())
+    let Some(nats_client) = shared_nats_client.clone() else {
+        eprintln!(
+            "remote sandbox requires NATS; waiting for dependency instead of using local fallback"
+        );
+        loop {
+            healthy.store(false, Ordering::Relaxed);
+            thread::sleep(tick_interval);
         }
+    };
+    let sandbox_backend = SandboxBackend::Remote {
+        nats_client,
+        instance_id: env::var("INSTANCE_ID")
+            .or_else(|_| env::var("ENGINE_INSTANCE_ID"))
+            .unwrap_or_else(|_| "engine-0".to_string()),
     };
 
     swarm_engine::world::ensure_world_config_exists("world.toml", "mods.lock");
@@ -322,7 +324,6 @@ impl PlayerExecutor for SandboxPlayerExecutor {
                 }
                 Ok(Vec::new())
             }
-            SandboxBackend::Local(_) => Ok(Vec::new()),
         }
     }
 }
