@@ -6,3 +6,5 @@ target/
 *.cert
 .env
 .env.*
+mods/
+.tmp/

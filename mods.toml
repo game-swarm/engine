@@ -1,0 +1,18 @@
+# Engine mod sources
+# Each mod is fetched from its git repository at build time.
+# Local dev: run `scripts/fetch-mods.sh` to populate engine/mods/.
+# Docker build: the Dockerfile runs fetch-mods.sh automatically.
+#
+# To use a local checkout instead of git, set `path` instead of `git` + `rev`.
+# Format: name = { git = "url", rev = "branch" }
+#         name = { path = "/path/to/local/checkout" }
+
+[mods]
+combat-core = { git = "https://github.com/game-swarm/mod-combat-core.git", rev = "main" }
+empire-upkeep = { git = "https://github.com/game-swarm/mod-empire-upkeep.git", rev = "main" }
+fog-of-war = { git = "https://github.com/game-swarm/mod-fog-of-war.git", rev = "main" }
+pve-spawning = { git = "https://github.com/game-swarm/mod-pve-spawning.git", rev = "main" }
+resource-decay = { git = "https://github.com/game-swarm/mod-resource-decay.git", rev = "main" }
+special-attacks = { git = "https://github.com/game-swarm/mod-special-attacks.git", rev = "main" }
+depot-storage = { git = "https://github.com/game-swarm/mod-depot-storage.git", rev = "main" }
+vanilla-boss = { git = "https://github.com/game-swarm/mod-vanilla-boss.git", rev = "main" }

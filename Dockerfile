@@ -9,6 +9,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY mods.toml scripts/ ./scripts/
+RUN git config --global advice.detachedHead false \
+    && ./scripts/fetch-mods.sh
 COPY . .
 RUN cargo build --release
 RUN ./target/release/swarm-engine generate-sdk world.toml /app/sdk-output
