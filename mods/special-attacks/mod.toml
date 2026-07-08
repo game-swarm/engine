@@ -1,0 +1,15 @@
+[meta]
+name = "special-attacks"
+version = "0.1.0"
+description = "Special attack status effects — Hack, Drain, Overload, Debilitate, Disrupt, Fortify for Swarm"
+author = "Swarm Team"
+
+[dependencies]
+combat-core = ">=0.1.0"
+
+[config]
+special_attacks_enabled = { type = "bool", default = true, description = "Enable special attack status effects" }
+custom_actions = { type = "string", default = "", description = "JSON definition of custom attack actions" }
+
+[compatibility]
+engine_abi_min = "1.0"

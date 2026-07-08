@@ -1,0 +1,16 @@
+[meta]
+name = "depot-storage"
+version = "0.1.0"
+description = "Depot and global storage system — resource storage, cargo transit, and per-room depot for Swarm"
+author = "Swarm Team"
+
+[dependencies]
+empire-upkeep = ">=0.1.0"
+
+[config]
+storage_cap_energy = { type = "int", default = 10000, description = "Maximum energy storage per depot" }
+storage_cap_mineral = { type = "int", default = 5000, description = "Maximum mineral storage per depot" }
+transfer_rate = { type = "int", default = 100, description = "Cargo transfer rate per tick" }
+
+[compatibility]
+engine_abi_min = "1.0"

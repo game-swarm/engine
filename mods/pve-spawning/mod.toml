@@ -1,0 +1,16 @@
+[meta]
+name = "pve-spawning"
+version = "0.1.0"
+description = "PvE NPC spawning system — spawn rates, difficulty zones, and NPC type configuration for Swarm"
+author = "Swarm Team"
+
+[dependencies]
+empire-upkeep = ">=0.1.0"
+
+[config]
+spawn_rate = { type = "int", default = 5, description = "Base spawn rate (entities per tick per zone)" }
+npc_types = { type = "string", default = "basic", description = "Comma-separated list of NPC types to spawn" }
+difficulty_zones = { type = "string", default = "", description = "JSON map of room:difficulty for zone-based scaling" }
+
+[compatibility]
+engine_abi_min = "1.0"

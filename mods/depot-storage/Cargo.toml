@@ -1,0 +1,8 @@
+[package]
+name = "swarm-mod-depot-storage"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = "0.19"
+swarm-engine = { path = "../.." }

@@ -1,11 +1,8 @@
-# Rust
-/target
-**/*.rs.bk
-*.pdb
-rustc-ice-*.txt
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*~
+sccache-cache/
+sdk-cache/
+target/
+*.pem
+*.key
+*.cert
+.env
+.env.*

@@ -1,0 +1,18 @@
+[meta]
+name = "empire-upkeep"
+version = "0.1.0"
+description = "Empire maintenance fee system — per-room upkeep, controller repair, and recycle refund for Swarm"
+author = "Swarm Team"
+
+[dependencies]
+
+[config]
+base_upkeep = { type = "int", default = 50, description = "Base upkeep cost per room per tick (in bp)" }
+room_soft_cap = { type = "int", default = 10, description = "Soft cap on room count before quadratic scaling" }
+repair_cap = { type = "int", default = 3500, description = "Maximum repair percentage in bp (3500 = 35%)" }
+distance_decay_bp = { type = "int", default = 500, description = "Repair efficiency decay per tile in bp (500 = 5%/tile)" }
+recycle_refund_base = { type = "int", default = 5000, description = "Base refund ratio in bp (5000 = 50%)" }
+recycle_refund_min = { type = "int", default = 1000, description = "Minimum refund floor in bp (1000 = 10%)" }
+
+[compatibility]
+engine_abi_min = "1.0"

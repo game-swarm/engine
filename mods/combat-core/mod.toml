@@ -1,0 +1,16 @@
+[meta]
+name = "combat-core"
+version = "0.1.0"
+description = "Core combat systems — melee, ranged, healing, damage application, and death for Swarm"
+author = "Swarm Team"
+
+[dependencies]
+empire-upkeep = ">=0.1.0"
+fog-of-war = ">=0.1.0"
+
+[config]
+damage_multiplier = { type = "int", default = 100, description = "Global damage multiplier in bp (10000 = 100%)" }
+body_part_types = { type = "string", default = "core,movement,attack", description = "Comma-separated body part type names" }
+
+[compatibility]
+engine_abi_min = "1.0"

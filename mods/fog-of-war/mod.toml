@@ -1,0 +1,16 @@
+[meta]
+name = "fog-of-war"
+version = "0.1.0"
+description = "Vision and visibility control — fog of war, player view, and spectator modes for Swarm"
+author = "Swarm Team"
+
+[dependencies]
+empire-upkeep = ">=0.1.0"
+
+[config]
+fog_of_war = { type = "bool", default = true, description = "Enable fog of war vision filtering" }
+player_view = { type = "bool", default = true, description = "Enable per-player visibility computation" }
+public_spectate = { type = "bool", default = false, description = "Enable public spectate without authentication" }
+
+[compatibility]
+engine_abi_min = "1.0"
