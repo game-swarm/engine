@@ -4,15 +4,17 @@ Rust game engine component of Swarm.
 
 ## Local Development
 
-From the repository root, start the development services:
+From the engine repository, fetch the optional mod sources and run the engine:
 
 ```bash
-docker compose up --build
+./scripts/fetch-mods.sh
+cargo run
 ```
 
-The compose stack starts:
+The engine starts with:
 
 - the engine with an embedded `redb` database at `REDB_PATH` (defaults to `swarm.redb`)
+- NATS at `NATS_URL` when available (defaults to `nats://127.0.0.1:4222`)
 
 `redb` provides pure-Rust embedded ACID key-value storage with no external database service and no C dependencies.
 

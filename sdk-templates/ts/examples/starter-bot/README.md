@@ -6,7 +6,7 @@ Goal: harvest `100 Energy` -> spawn one worker -> keep harvesting and spawning a
 
 ## 1. Install
 
-From the repository root:
+From the TypeScript SDK repository root:
 
 ```bash
 npm install
