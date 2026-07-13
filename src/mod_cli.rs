@@ -193,8 +193,7 @@ fn plugins_mut(doc: &mut Value) -> Result<&mut Map<String, Value>, String> {
 
 fn read(path: &Path) -> Result<Value, String> {
     match fs::read_to_string(path) {
-        Ok(contents) => contents
-            .parse()
+        Ok(contents) => toml::from_str(&contents)
             .map_err(|error| format!("failed to parse {}: {error}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Value::Table(Map::new())),
         Err(error) => Err(format!("failed to read {}: {error}", path.display())),
@@ -253,5 +252,27 @@ mod tests {
         assert!(list_mods(&lock).unwrap()[0].enabled);
         remove_mod(&lock, "combat-core").unwrap();
         assert!(list_mods(&lock).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reads_existing_table_document_lock_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let lock = temp.path().join("mods.lock");
+        fs::write(
+            &lock,
+            r#"
+[plugins.combat-core]
+version = "0.1.0"
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let plugins = list_mods(&lock).unwrap();
+
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "combat-core");
+        assert_eq!(plugins[0].version, "0.1.0");
+        assert!(plugins[0].enabled);
     }
 }

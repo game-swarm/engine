@@ -86,14 +86,15 @@ parse_mods | while IFS='|' read -r type name url rev; do
     GIT)
       rev="${rev:-main}"
       if [ -d "$target/.git" ]; then
-        echo "[mod] $name: updating (origin/$rev)..."
-        cd "$target"
-        git fetch origin
-        git checkout -q "$rev" 2>/dev/null || git checkout -q "origin/$rev"
-        cd "$ENGINE_DIR"
+        echo "[mod] $name: updating ($rev)..."
+        git -C "$target" fetch --depth 1 origin "$rev"
+        git -C "$target" checkout --detach -q FETCH_HEAD
       else
-        echo "[mod] $name: cloning (branch: $rev)..."
-        git clone --single-branch --branch "$rev" --depth 1 "$url" "$target"
+        echo "[mod] $name: fetching ($rev)..."
+        git init -q "$target"
+        git -C "$target" remote add origin "$url"
+        git -C "$target" fetch --depth 1 origin "$rev"
+        git -C "$target" checkout --detach -q FETCH_HEAD
       fi
       ;;
 
