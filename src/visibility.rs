@@ -87,13 +87,39 @@ pub fn visible_positions(world: &mut World, player_id: PlayerId) -> BTreeSet<Vis
 }
 
 pub fn visible_entity_ids(world: &mut World, player_id: PlayerId, tick: Tick) -> BTreeSet<Entity> {
+    let visible = visible_positions(world, player_id);
+    visible_entity_ids_with_positions(world, player_id, tick, &visible)
+}
+
+pub fn visible_entity_ids_with_positions(
+    world: &mut World,
+    player_id: PlayerId,
+    tick: Tick,
+    visible_positions: &VisibilitySet,
+) -> BTreeSet<Entity> {
+    let _ = tick;
+
     let all_entities = {
-        let mut query = world.query::<Entity>();
-        query.iter(world).collect::<Vec<_>>()
+        let mut query = world.query::<(Entity, Option<&Position>)>();
+        query
+            .iter(world)
+            .map(|(entity, position)| (entity, position.copied()))
+            .collect::<Vec<_>>()
     };
+
     let mut entities = all_entities
         .into_iter()
-        .filter(|entity| is_visible_to(world, *entity, player_id, tick))
+        .filter_map(|(entity, position)| {
+            if is_owned_by(world, entity, player_id)
+                || position.is_some_and(|position| {
+                    visible_positions.contains(&(position.room, position.x, position.y))
+                })
+            {
+                Some(entity)
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>();
     entities.sort_by_key(|entity| entity.index());
     entities.into_iter().collect()
@@ -343,6 +369,48 @@ mod tests {
         let enemy = world.spawn_drone(2, 40, 40, vec![BodyPart::Move]);
 
         assert!(is_visible_to(world.app.world_mut(), enemy, 1, 7));
+    }
+
+    #[test]
+    fn visible_entity_ids_with_positions_includes_owned_entity_without_position() {
+        let mut world = create_world();
+        let body_registry = world.app.world().resource::<BodyPartRegistry>().clone();
+        let owned = world
+            .app
+            .world_mut()
+            .spawn(Drone::new(1, vec![BodyPart::Move], &body_registry))
+            .id();
+        let visible = visible_positions(world.app.world_mut(), 1);
+
+        assert!(
+            visible_entity_ids_with_positions(world.app.world_mut(), 1, 7, &visible)
+                .contains(&owned)
+        );
+    }
+
+    #[test]
+    fn visible_entity_ids_with_positions_preserves_owned_off_map_visibility() {
+        let mut world = create_world();
+        let owned = world.spawn_drone(1, 99, 99, vec![BodyPart::Move]);
+        let visible = visible_positions(world.app.world_mut(), 1);
+
+        assert!(
+            visible_entity_ids_with_positions(world.app.world_mut(), 1, 7, &visible)
+                .contains(&owned)
+        );
+    }
+
+    #[test]
+    fn visible_entity_ids_with_positions_hides_unowned_off_map_entity() {
+        let mut world = create_world();
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let enemy = world.spawn_drone(2, 99, 99, vec![BodyPart::Move]);
+        let visible = visible_positions(world.app.world_mut(), 1);
+
+        assert!(
+            !visible_entity_ids_with_positions(world.app.world_mut(), 1, 7, &visible)
+                .contains(&enemy)
+        );
     }
 
     #[test]

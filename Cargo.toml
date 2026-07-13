@@ -25,7 +25,7 @@ name = "swarm-engine"
 path = "src/main.rs"
 
 [dependencies]
-bevy = "0.19"
+bevy = { version = "0.19", default-features = false, features = ["serialize"] }
 async-nats = "0.49"
 blake3 = "1"
 ed25519-dalek = "2"
@@ -33,6 +33,7 @@ futures-util = "0.3"
 getrandom = "0.4"
 indexmap = { version = "2", features = ["serde"] }
 redb = "4"
+rayon = "1.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

@@ -491,7 +491,12 @@ impl RedbStore {
 
 impl RedbSnapshotStore for RedbStore {
     fn get_snapshot(&self, key: SnapshotKey) -> Option<CachedSnapshot> {
-        self.snapshots.get(&key).cloned()
+        if let Some(snapshot) = self.snapshots.get(&key).cloned() {
+            return Some(snapshot);
+        }
+        let key_bytes = visible_snapshot_key(key);
+        let value = self.read_key(&key_bytes).ok().flatten()?;
+        decode::<CachedSnapshot>(&value, "visible_snapshot").ok()
     }
 
     fn put_snapshot(&mut self, key: SnapshotKey, snapshot: CachedSnapshot) {
@@ -823,5 +828,20 @@ mod tests {
         assert_eq!(recovered.tick, 2);
         assert_eq!(recovered.head.state_checksum, 22);
         assert!(recovered.snapshot.is_some());
+    }
+
+    #[test]
+    fn visible_snapshot_reads_back_from_redb_after_cache_miss() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("swarm.redb");
+        let path = path.to_str().unwrap();
+        let mut writer = RedbStore::open(path).unwrap();
+        let key = SnapshotKey::new(1, 8);
+        let cached = writer.write_visible_snapshot(visible_snapshot(8, 1, 0));
+        drop(writer);
+
+        let reader = RedbStore::open(path).unwrap();
+
+        assert_eq!(reader.get_snapshot(key), Some(cached));
     }
 }

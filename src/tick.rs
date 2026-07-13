@@ -1,6 +1,7 @@
-use std::{collections::HashMap, thread, time::Instant};
+use std::{collections::HashMap, time::Instant};
 
 use bevy::prelude::*;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::command::{
@@ -9,6 +10,8 @@ use crate::command::{
     validate_command,
 };
 use crate::components::*;
+use crate::mcp::{VisibleEntity, visible_entities_for_player};
+use crate::realtime::{RealtimeDelta, RealtimeEnvelope, compute_realtime_delta};
 use crate::resource_ledger::ResourceLedger;
 use crate::resources::{
     CurrentTick, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
@@ -18,6 +21,8 @@ use crate::security::{SecurityAlert, SecurityAuditor};
 use crate::sim::{SnapshotConfig, collect_snapshots};
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
 use crate::world::{SwarmWorld, WorldConfig};
+
+type TickTraceWrite = (Vec<u8>, Vec<u8>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TickPhase {
@@ -264,10 +269,28 @@ pub struct TickTraceEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickBroadcast {
     pub tick: Tick,
+    pub last_tick: Tick,
     pub player_id: PlayerId,
+    pub full_snapshot: bool,
     pub accepted: Vec<RawCommand>,
     pub rejections: Vec<CommandRejection>,
+    pub changed_entities: Vec<VisibleEntity>,
+    pub removed_entities: Vec<ObjectId>,
     pub state_checksum: u64,
+}
+
+impl TickBroadcast {
+    pub fn realtime_delta(&self) -> RealtimeDelta {
+        RealtimeDelta {
+            tick: self.tick,
+            last_tick: self.last_tick,
+            player_id: self.player_id,
+            full_snapshot: self.full_snapshot,
+            changed_entities: self.changed_entities.clone(),
+            removed_entities: self.removed_entities.clone(),
+            state_checksum: self.state_checksum,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,11 +326,10 @@ impl TickMetrics {
                 .detail
                 .get("refund_fuel")
                 .and_then(serde_json::Value::as_u64)
+                && refund_fuel > 0
             {
-                if refund_fuel > 0 {
-                    self.refund_events += 1;
-                    self.refund_fuel += refund_fuel;
-                }
+                self.refund_events += 1;
+                self.refund_fuel += refund_fuel;
             }
         }
     }
@@ -810,6 +832,28 @@ fn serial_execution_queue(collected: Vec<CollectedPlayerCommands>) -> Vec<RawCom
     queue
 }
 
+fn collect_player_results(
+    executors: &mut HashMap<PlayerId, Box<dyn PlayerExecutor>>,
+    tick: Tick,
+    state_checksum: u64,
+) -> Vec<PlayerCollectResult> {
+    if executors.len() <= 1 {
+        return executors
+            .iter_mut()
+            .map(|(&player_id, executor)| {
+                collect_player_commands(tick, player_id, state_checksum, executor.as_mut())
+            })
+            .collect();
+    }
+
+    executors
+        .par_iter_mut()
+        .map(|(&player_id, executor)| {
+            collect_player_commands(tick, player_id, state_checksum, executor.as_mut())
+        })
+        .collect()
+}
+
 pub struct MultiPlayerTickScheduler<C, B> {
     pub world: SwarmWorld,
     pub executors: HashMap<PlayerId, Box<dyn PlayerExecutor>>,
@@ -850,6 +894,18 @@ where
         let mut tick_loop = TickLoop::new(tick);
         let started_at = Instant::now();
         let state_checksum = self.world.state_checksum();
+        let mut realtime_before = self
+            .executors
+            .keys()
+            .copied()
+            .map(|player_id| {
+                (
+                    player_id,
+                    visible_entities_for_player(self.world.app.world_mut(), player_id),
+                )
+            })
+            .collect::<Vec<_>>();
+        realtime_before.sort_by_key(|(player_id, _)| *player_id);
 
         // S1: Check COLLECT cache before executing WASM.
         // If redb commit failed last tick and we're retrying with the same state,
@@ -868,24 +924,7 @@ where
             );
             cache.raw_commands()
         } else {
-            let mut results = thread::scope(|scope| {
-                self.executors
-                    .iter_mut()
-                    .map(|(&player_id, executor)| {
-                        scope.spawn(move || {
-                            collect_player_commands(
-                                tick,
-                                player_id,
-                                state_checksum,
-                                executor.as_mut(),
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|handle| handle.join().expect("player executor thread panicked"))
-                    .collect::<Vec<_>>()
-            });
+            let mut results = collect_player_results(&mut self.executors, tick, state_checksum);
             results.sort_by_key(|result| result.player_id);
 
             for result in &results {
@@ -1016,19 +1055,32 @@ where
         tick_loop.finish();
         self.collect_cache = None;
         self.degraded_mode.record_committed_tick();
-        let broadcast = TickBroadcast {
-            tick,
-            player_id: 0,
-            accepted: trace.commands.clone(),
-            rejections: trace.rejections.clone(),
-            state_checksum: trace.state_checksum,
-        };
-        let broadcasted = if self.broadcaster.broadcast(broadcast).is_ok() {
-            true
-        } else {
-            self.metrics.broadcast_failures += 1;
-            false
-        };
+        let mut broadcasted = true;
+        for (player_id, before) in realtime_before {
+            let delta = compute_realtime_delta(
+                &mut self.world,
+                player_id,
+                tick,
+                tick.saturating_sub(1),
+                &before,
+            );
+            let after = visible_entities_for_player(self.world.app.world_mut(), player_id);
+            let broadcast = TickBroadcast {
+                tick,
+                last_tick: delta.last_tick,
+                player_id,
+                full_snapshot: true,
+                accepted: trace.commands.clone(),
+                rejections: trace.rejections.clone(),
+                changed_entities: after,
+                removed_entities: delta.removed_entities,
+                state_checksum: trace.state_checksum,
+            };
+            if self.broadcaster.broadcast(broadcast).is_err() {
+                self.metrics.broadcast_failures += 1;
+                broadcasted = false;
+            }
+        }
 
         self.metrics.duration_ms = started_at.elapsed().as_millis() as u64;
 
@@ -1086,6 +1138,8 @@ where
         let tick = self.tick_counter;
         let mut tick_loop = TickLoop::new(tick);
         let started_at = Instant::now();
+        let realtime_before =
+            visible_entities_for_player(self.world.app.world_mut(), self.player_id);
         let snapshot = TickSnapshot {
             tick,
             player_id: self.player_id,
@@ -1206,11 +1260,25 @@ where
         self.tick_counter += 1;
         tick_loop.finish();
         self.degraded_mode.record_committed_tick();
+        let delta = compute_realtime_delta(
+            &mut self.world,
+            self.player_id,
+            tick,
+            tick.saturating_sub(1),
+            &realtime_before,
+        );
         let broadcast = TickBroadcast {
             tick,
+            last_tick: delta.last_tick,
             player_id: self.player_id,
+            full_snapshot: true,
             accepted: trace.commands.clone(),
             rejections: trace.rejections.clone(),
+            changed_entities: visible_entities_for_player(
+                self.world.app.world_mut(),
+                self.player_id,
+            ),
+            removed_entities: delta.removed_entities,
             state_checksum: trace.state_checksum,
         };
         let broadcasted = if self.broadcaster.broadcast(broadcast).is_ok() {
@@ -1262,7 +1330,7 @@ impl TickCommitter for InMemoryTickCommitter {
 }
 
 pub trait AtomicTickStore {
-    fn atomic_commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), CommitError>;
+    fn atomic_commit(&mut self, writes: Vec<TickTraceWrite>) -> Result<(), CommitError>;
 }
 
 #[derive(Debug, Clone)]
@@ -1304,7 +1372,7 @@ where
     }
 }
 
-pub fn tick_trace_writes(trace: &TickTrace) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommitError> {
+pub fn tick_trace_writes(trace: &TickTrace) -> Result<Vec<TickTraceWrite>, CommitError> {
     let environment = ReplayEnvironment {
         mods_lock: ModsLock::default(),
         world_config: WorldConfigSnapshot {
@@ -1317,7 +1385,7 @@ pub fn tick_trace_writes(trace: &TickTrace) -> Result<Vec<(Vec<u8>, Vec<u8>)>, C
 pub fn tick_trace_writes_with_environment(
     trace: &TickTrace,
     environment: &ReplayEnvironment,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommitError> {
+) -> Result<Vec<TickTraceWrite>, CommitError> {
     fn encode<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, CommitError> {
         serde_json::to_vec(value)
             .map_err(|error| CommitError::Failed(format!("encode {label}: {error}")))
@@ -1346,7 +1414,7 @@ pub fn tick_trace_writes_with_environment(
         ),
     ];
 
-    if trace.tick == 0 || trace.tick % DEFAULT_KEYFRAME_INTERVAL == 0 {
+    if trace.tick == 0 || trace.tick.is_multiple_of(DEFAULT_KEYFRAME_INTERVAL) {
         writes.push((
             tick_key(trace.tick, "keyframe"),
             encode(&trace.state, "tick keyframe")?,
@@ -1661,8 +1729,11 @@ impl NatsTickBroadcaster {
 
 impl TickBroadcaster for NatsTickBroadcaster {
     fn broadcast(&mut self, event: TickBroadcast) -> Result<(), BroadcastError> {
-        let payload = serde_json::to_vec(&event)
-            .map_err(|error| BroadcastError::Failed(error.to_string()))?;
+        let payload = serde_json::to_vec(&RealtimeEnvelope {
+            schema: "swarm.realtime.v1".to_string(),
+            payload: event.realtime_delta(),
+        })
+        .map_err(|error| BroadcastError::Failed(error.to_string()))?;
         let client = self.client.clone();
         let subject = self.subject.clone();
         tokio::runtime::Runtime::new()
@@ -1821,10 +1892,10 @@ impl WorldSnapshot {
             if let Some(drone) = &snapshot.drone {
                 *totals.entry(drone.owner).or_default() += resource_total(&drone.carry);
             }
-            if let Some(structure) = &snapshot.structure {
-                if let (Some(owner), Some(energy)) = (structure.owner, structure.energy) {
-                    *totals.entry(owner).or_default() += energy as u64;
-                }
+            if let Some(structure) = &snapshot.structure
+                && let (Some(owner), Some(energy)) = (structure.owner, structure.energy)
+            {
+                *totals.entry(owner).or_default() += energy as u64;
             }
         }
 
@@ -2194,7 +2265,7 @@ mod tests {
     }
 
     impl AtomicTickStore for FakeAtomicStore {
-        fn atomic_commit(&mut self, writes: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), CommitError> {
+        fn atomic_commit(&mut self, writes: Vec<TickTraceWrite>) -> Result<(), CommitError> {
             if self.fail_next {
                 self.fail_next = false;
                 return Err(CommitError::Failed("fake redb commit failed".to_string()));
@@ -2362,7 +2433,23 @@ mod tests {
         assert!(report.broadcasted);
         assert_eq!(scheduler.tick_counter, 1);
         assert_eq!(scheduler.committer.records.len(), 1);
-        assert_eq!(scheduler.broadcaster.broadcasts.len(), 1);
+        assert_eq!(scheduler.broadcaster.broadcasts.len(), 2);
+        assert_eq!(scheduler.broadcaster.broadcasts[0].player_id, 1);
+        assert_eq!(scheduler.broadcaster.broadcasts[1].player_id, 2);
+        assert!(scheduler.broadcaster.broadcasts[0].full_snapshot);
+        assert!(scheduler.broadcaster.broadcasts[1].full_snapshot);
+        assert!(
+            scheduler.broadcaster.broadcasts[0]
+                .changed_entities
+                .iter()
+                .any(|entity| matches!(entity, VisibleEntity::Drone(drone) if drone.id == object_id(first)))
+        );
+        assert!(
+            scheduler.broadcaster.broadcasts[1]
+                .changed_entities
+                .iter()
+                .any(|entity| matches!(entity, VisibleEntity::Drone(drone) if drone.id == object_id(second)))
+        );
         assert_eq!(report.accepted.len(), 2);
         assert_eq!(report.rejections.len(), 0);
         assert_eq!(overlap.0.lock().unwrap().max_active, 2);
@@ -2423,6 +2510,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(10, 2), (20, 1), (20, 3)]
         );
+    }
+
+    #[test]
+    fn collect_player_results_uses_single_executor_fast_path() {
+        let calls = Arc::new(Mutex::new(0));
+        let mut executors: HashMap<PlayerId, Box<dyn PlayerExecutor>> = HashMap::new();
+        executors.insert(
+            7,
+            Box::new(CountingExecutor {
+                calls: calls.clone(),
+                result: Ok(Vec::new()),
+            }),
+        );
+
+        let results = collect_player_results(&mut executors, 3, 99);
+
+        assert_eq!(*calls.lock().unwrap(), 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].player_id, 7);
+        assert!(results[0].commands.is_empty());
     }
 
     #[test]
@@ -2601,11 +2708,12 @@ mod tests {
     fn normal_tick_collects_executes_commits_broadcasts_and_increments() {
         let mut world = create_world();
         let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let drone_id = object_id(drone);
         let executor = StaticExecutor {
             result: Ok(vec![CommandIntent {
                 sequence: 2,
                 action: CommandAction::Move {
-                    object_id: object_id(drone),
+                    object_id: drone_id,
                     direction: Direction::Top,
                 },
             }]),
@@ -2625,6 +2733,21 @@ mod tests {
         assert_eq!(scheduler.tick_counter, 1);
         assert_eq!(scheduler.committer.records.len(), 1);
         assert_eq!(scheduler.broadcaster.broadcasts.len(), 1);
+        assert_eq!(scheduler.broadcaster.broadcasts[0].player_id, 1);
+        assert!(scheduler.broadcaster.broadcasts[0].full_snapshot);
+        assert!(
+            scheduler.broadcaster.broadcasts[0]
+                .changed_entities
+                .iter()
+                .any(
+                    |entity| matches!(entity, VisibleEntity::Drone(drone) if drone.id == drone_id)
+                )
+        );
+        assert!(
+            scheduler.broadcaster.broadcasts[0]
+                .removed_entities
+                .is_empty()
+        );
         assert_eq!(report.accepted.len(), 1);
         assert_eq!(report.rejections.len(), 0);
         assert_eq!(
@@ -2650,6 +2773,43 @@ mod tests {
                 .age,
             1
         );
+    }
+
+    #[test]
+    fn normal_tick_broadcast_includes_removed_visible_entities() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let drone_id = object_id(drone);
+        let executor = StaticExecutor {
+            result: Ok(vec![CommandIntent {
+                sequence: 1,
+                action: CommandAction::Recycle {
+                    object_id: drone_id,
+                },
+            }]),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(report.committed);
+        assert!(report.broadcasted);
+        assert_eq!(scheduler.broadcaster.broadcasts.len(), 1);
+        let broadcast = &scheduler.broadcaster.broadcasts[0];
+        assert_eq!(broadcast.player_id, 1);
+        assert!(broadcast.full_snapshot);
+        assert!(
+            !broadcast.changed_entities.iter().any(
+                |entity| matches!(entity, VisibleEntity::Drone(drone) if drone.id == drone_id)
+            )
+        );
+        assert_eq!(broadcast.removed_entities, vec![drone_id]);
     }
 
     #[test]
@@ -3190,7 +3350,8 @@ mod tests {
         assert_eq!(execution.next_tick_fuel_credit, 5_000);
         let rejection = &execution.rejections[0];
         assert_eq!(rejection.rejection, RejectionReason::SourceEmpty);
-        assert_eq!(rejection.detail["reason"], "SourceEmpty");
+        assert_eq!(rejection.detail["reason"], "InsufficientResource");
+        assert_eq!(rejection.detail["internal_reason"], "SourceEmpty");
         assert_eq!(rejection.detail["conflict"], "first_come_first_served");
         assert_eq!(rejection.detail["refund_policy"]["fuel_percent"], 50);
         assert_eq!(rejection.detail["target_id"], source_id);
@@ -3215,7 +3376,8 @@ mod tests {
         assert_eq!(execution.next_tick_fuel_credit, 5_000);
         let rejection = &execution.rejections[0];
         assert_eq!(rejection.rejection, RejectionReason::TileOccupied);
-        assert_eq!(rejection.detail["reason"], "TileOccupied");
+        assert_eq!(rejection.detail["reason"], "PositionOccupied");
+        assert_eq!(rejection.detail["internal_reason"], "TileOccupied");
         assert_eq!(rejection.detail["conflict"], "first_come_first_served");
         assert_eq!(rejection.detail["refund_policy"]["fuel_percent"], 50);
         assert_eq!(rejection.detail["position"]["x"], 11);
@@ -3252,7 +3414,8 @@ mod tests {
         assert_eq!(execution.next_tick_fuel_credit, 5_000);
         let rejection = &execution.rejections[0];
         assert_eq!(rejection.rejection, RejectionReason::TargetFull);
-        assert_eq!(rejection.detail["reason"], "TargetFull");
+        assert_eq!(rejection.detail["reason"], "InsufficientResource");
+        assert_eq!(rejection.detail["internal_reason"], "TargetFull");
         assert_eq!(rejection.detail["conflict"], "first_come_first_served");
         assert_eq!(rejection.detail["refund_policy"]["fuel_percent"], 50);
         assert_eq!(rejection.detail["target_id"], object_id(target));

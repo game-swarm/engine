@@ -13,9 +13,17 @@ pub struct RealtimeDelta {
     pub tick: Tick,
     pub last_tick: Tick,
     pub player_id: PlayerId,
+    #[serde(default)]
+    pub full_snapshot: bool,
     pub changed_entities: Vec<VisibleEntity>,
     pub removed_entities: Vec<ObjectId>,
     pub state_checksum: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealtimeEnvelope {
+    pub schema: String,
+    pub payload: RealtimeDelta,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,9 +86,12 @@ where
     }
 
     pub fn publish_delta(&mut self, delta: &RealtimeDelta) -> Result<(), RealtimeError> {
-        let payload = serde_json::to_vec(delta)
-            .map_err(|error| RealtimeError::Serialize(error.to_string()))?;
-        self.nats.publish(&format!("tick.{}", delta.tick), payload)
+        let payload = serde_json::to_vec(&RealtimeEnvelope {
+            schema: "swarm.realtime.v1".to_string(),
+            payload: delta.clone(),
+        })
+        .map_err(|error| RealtimeError::Serialize(error.to_string()))?;
+        self.nats.publish("swarm.realtime.v1", payload)
     }
 }
 
@@ -111,18 +122,18 @@ impl WebSocketClient {
             Ok(message) => {
                 match &message {
                     WebSocketMessage::Delta(delta) => {
-                        if let Some(last_tick) = self.last_tick {
-                            if delta.last_tick != last_tick {
-                                let expected_tick = last_tick + 1;
-                                let actual_tick = delta.tick;
-                                self.last_tick = Some(actual_tick);
-                                self.fetch_from_tick = Some(expected_tick);
-                                self.pending.push_back(message);
-                                return Some(WebSocketMessage::TickGap {
-                                    expected_tick,
-                                    actual_tick,
-                                });
-                            }
+                        if let Some(last_tick) = self.last_tick
+                            && delta.last_tick != last_tick
+                        {
+                            let expected_tick = last_tick + 1;
+                            let actual_tick = delta.tick;
+                            self.last_tick = Some(actual_tick);
+                            self.fetch_from_tick = Some(expected_tick);
+                            self.pending.push_back(message);
+                            return Some(WebSocketMessage::TickGap {
+                                expected_tick,
+                                actual_tick,
+                            });
                         }
                         self.last_tick = Some(delta.tick);
                     }
@@ -173,8 +184,15 @@ impl RealtimeGateway {
     }
 
     pub fn receive_nats(&mut self, payload: &[u8]) -> Result<(), RealtimeError> {
-        let delta: RealtimeDelta = serde_json::from_slice(payload)
+        let envelope: RealtimeEnvelope = serde_json::from_slice(payload)
             .map_err(|error| RealtimeError::Serialize(error.to_string()))?;
+        if envelope.schema != "swarm.realtime.v1" {
+            return Err(RealtimeError::Serialize(format!(
+                "unsupported realtime schema {}",
+                envelope.schema
+            )));
+        }
+        let delta = envelope.payload;
 
         self.clients.retain_mut(|client| {
             if client.player_id != delta.player_id {
@@ -224,6 +242,7 @@ pub fn compute_realtime_delta(
         tick,
         last_tick,
         player_id,
+        full_snapshot: false,
         changed_entities,
         removed_entities,
         state_checksum: world.state_checksum(),
@@ -291,7 +310,11 @@ mod tests {
         let mut publisher = NatsRealtimePublisher::new(InMemoryNats::default());
         publisher.publish_delta(&delta).expect("publish delta");
         let nats = publisher.into_inner();
-        assert_eq!(nats.messages[0].0, "tick.1");
+        assert_eq!(nats.messages[0].0, "swarm.realtime.v1");
+        let envelope: super::RealtimeEnvelope =
+            serde_json::from_slice(&nats.messages[0].1).unwrap();
+        assert_eq!(envelope.schema, "swarm.realtime.v1");
+        assert_eq!(envelope.payload, delta);
 
         let mut gateway = RealtimeGateway::new();
         let mut client = gateway.connect_websocket(1);
@@ -310,7 +333,11 @@ mod tests {
             last_tick: 2,
             ..delta
         };
-        let payload = serde_json::to_vec(&gap_delta).expect("serialize gap delta");
+        let payload = serde_json::to_vec(&super::RealtimeEnvelope {
+            schema: "swarm.realtime.v1".to_string(),
+            payload: gap_delta.clone(),
+        })
+        .expect("serialize gap delta");
         gateway
             .receive_nats(&payload)
             .expect("gateway consumes gap payload");

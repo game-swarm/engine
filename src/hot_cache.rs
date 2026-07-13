@@ -97,10 +97,10 @@ where
     S: RedbSnapshotStore,
 {
     let authoritative = store.get_snapshot(key)?;
-    if let Some(cached) = cache.get_snapshot(key) {
-        if cached.matches_authoritative(&authoritative) {
-            return Some(cached.snapshot);
-        }
+    if let Some(cached) = cache.get_snapshot(key)
+        && cached.matches_authoritative(&authoritative)
+    {
+        return Some(cached.snapshot);
     }
 
     cache.put_snapshot(key, authoritative.clone());
