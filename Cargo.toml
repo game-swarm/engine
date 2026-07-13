@@ -11,6 +11,9 @@ members = [
     "mods/vanilla-boss",
 ]
 
+[patch."https://github.com/game-swarm/engine.git"]
+swarm-engine = { path = "." }
+
 [package]
 name = "swarm-engine"
 version = "0.1.0"
