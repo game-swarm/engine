@@ -79,62 +79,62 @@ impl SecurityAuditor {
             return alerts;
         }
 
-        if let Some(previous) = previous {
-            if previous.player_id == trace.player_id {
-                let baseline_fuel = previous.metrics.fuel_consumed.max(1);
-                let fuel_delta = trace.metrics.fuel_consumed.saturating_sub(baseline_fuel);
-                if fuel_delta >= self.min_fuel_spike_delta
-                    && trace.metrics.fuel_consumed
-                        > baseline_fuel.saturating_mul(self.fuel_spike_multiplier)
-                {
-                    alerts.push(SecurityAlert::FuelSpike {
-                        player_id: trace.player_id,
-                        tick: trace.tick,
-                        fuel_used: trace.metrics.fuel_consumed,
-                        baseline: baseline_fuel,
-                    });
-                }
+        if let Some(previous) = previous
+            && previous.player_id == trace.player_id
+        {
+            let baseline_fuel = previous.metrics.fuel_consumed.max(1);
+            let fuel_delta = trace.metrics.fuel_consumed.saturating_sub(baseline_fuel);
+            if fuel_delta >= self.min_fuel_spike_delta
+                && trace.metrics.fuel_consumed
+                    > baseline_fuel.saturating_mul(self.fuel_spike_multiplier)
+            {
+                alerts.push(SecurityAlert::FuelSpike {
+                    player_id: trace.player_id,
+                    tick: trace.tick,
+                    fuel_used: trace.metrics.fuel_consumed,
+                    baseline: baseline_fuel,
+                });
+            }
 
-                let rejection_rate = trace.metrics.command_rejection_rate();
-                let baseline_rate = previous.metrics.command_rejection_rate();
-                if trace.metrics.total_commands > 0
-                    && rejection_rate >= baseline_rate + self.rejection_rate_spike_delta
-                {
-                    alerts.push(SecurityAlert::RejectionRateSpike {
-                        player_id: trace.player_id,
-                        tick: trace.tick,
-                        rejection_rate,
-                        baseline: baseline_rate,
-                    });
-                }
+            let rejection_rate = trace.metrics.command_rejection_rate();
+            let baseline_rate = previous.metrics.command_rejection_rate();
+            if trace.metrics.total_commands > 0
+                && rejection_rate >= baseline_rate + self.rejection_rate_spike_delta
+            {
+                alerts.push(SecurityAlert::RejectionRateSpike {
+                    player_id: trace.player_id,
+                    tick: trace.tick,
+                    rejection_rate,
+                    baseline: baseline_rate,
+                });
+            }
 
-                if previous.tick.saturating_add(1) == trace.tick {
-                    match replay_tick(&previous.state, trace) {
-                        Ok(replayed_state) if replayed_state != trace.state => {
-                            alerts.push(SecurityAlert::StateInconsistency {
-                                player_id: trace.player_id,
-                                tick: trace.tick,
-                                expected_checksum: trace.state_checksum,
-                                actual_checksum: checksum_state(&replayed_state),
-                            });
-                        }
-                        Err(ReplayError::StateMismatch {
-                            expected_checksum,
-                            actual_checksum,
-                            ..
-                        }) => alerts.push(SecurityAlert::StateInconsistency {
+            if previous.tick.saturating_add(1) == trace.tick {
+                match replay_tick(&previous.state, trace) {
+                    Ok(replayed_state) if replayed_state != trace.state => {
+                        alerts.push(SecurityAlert::StateInconsistency {
                             player_id: trace.player_id,
                             tick: trace.tick,
-                            expected_checksum,
-                            actual_checksum,
-                        }),
-                        Err(error) => alerts.push(SecurityAlert::Anomaly {
-                            player_id: trace.player_id,
-                            tick: trace.tick,
-                            description: format!("replay mismatch: {error:?}"),
-                        }),
-                        Ok(_) => {}
+                            expected_checksum: trace.state_checksum,
+                            actual_checksum: checksum_state(&replayed_state),
+                        });
                     }
+                    Err(ReplayError::StateMismatch {
+                        expected_checksum,
+                        actual_checksum,
+                        ..
+                    }) => alerts.push(SecurityAlert::StateInconsistency {
+                        player_id: trace.player_id,
+                        tick: trace.tick,
+                        expected_checksum,
+                        actual_checksum,
+                    }),
+                    Err(error) => alerts.push(SecurityAlert::Anomaly {
+                        player_id: trace.player_id,
+                        tick: trace.tick,
+                        description: format!("replay mismatch: {error:?}"),
+                    }),
+                    Ok(_) => {}
                 }
             }
         }
