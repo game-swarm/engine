@@ -1,4 +1,4 @@
-FROM rust:latest AS build
+FROM rust:1.97.0-bookworm AS build
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -9,11 +9,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY mods.toml scripts/ ./scripts/
+COPY mods.toml ./mods.toml
+COPY scripts/ ./scripts/
 RUN git config --global advice.detachedHead false \
     && ./scripts/fetch-mods.sh
 COPY . .
-RUN cargo build --release
+RUN cargo build --release --locked --features vanilla_mods
 RUN ./target/release/swarm-engine generate-sdk world.toml /app/sdk-output
 
 FROM debian:trixie-slim AS runtime
