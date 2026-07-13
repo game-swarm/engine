@@ -156,10 +156,10 @@ pub fn fog_of_war_filter(
     tick: Tick,
 ) -> bool {
     // Critical: own entities always visible
-    if let Some(owner) = world.get::<crate::components::Owner>(target_entity) {
-        if owner.0 == player_id {
-            return true;
-        }
+    if let Some(owner) = world.get::<crate::components::Owner>(target_entity)
+        && owner.0 == player_id
+    {
+        return true;
     }
     // Critical: controllers always visible (room contention)
     if world.get::<Controller>(target_entity).is_some() {
@@ -346,11 +346,11 @@ pub fn collect_snapshots(
     for &player_id in player_ids {
         // Find all drones owned by this player
         for &entity in &all_entities {
-            if let Some(drone) = world.get::<Drone>(entity) {
-                if drone.owner == player_id {
-                    let snapshot = build_snapshot(world, entity, player_id, tick, config);
-                    snapshots.push(snapshot);
-                }
+            if let Some(drone) = world.get::<Drone>(entity)
+                && drone.owner == player_id
+            {
+                let snapshot = build_snapshot(world, entity, player_id, tick, config);
+                snapshots.push(snapshot);
             }
         }
     }
@@ -517,11 +517,7 @@ mod tests {
     fn snapshot_fog_of_war_disabled_shows_all() {
         let mut world = create_test_world();
         let w = world.app.world_mut();
-        let entities: Vec<(Entity, &Drone)> = w
-            .query::<(Entity, &Drone)>()
-            .iter(w)
-            .map(|(e, d)| (e, d))
-            .collect();
+        let entities: Vec<(Entity, &Drone)> = w.query::<(Entity, &Drone)>().iter(w).collect();
         let drone1 = entities.iter().find(|(_, d)| d.owner == 1).unwrap().0;
 
         let config = SnapshotConfig {
@@ -547,11 +543,7 @@ mod tests {
     fn snapshot_deterministic_truncation_order() {
         let mut world = create_test_world();
         let w = world.app.world_mut();
-        let entities: Vec<(Entity, &Drone)> = w
-            .query::<(Entity, &Drone)>()
-            .iter(w)
-            .map(|(e, d)| (e, d))
-            .collect();
+        let entities: Vec<(Entity, &Drone)> = w.query::<(Entity, &Drone)>().iter(w).collect();
         let drone1 = entities.iter().find(|(_, d)| d.owner == 1).unwrap().0;
 
         // Build two snapshots from same state
@@ -577,11 +569,7 @@ mod tests {
     fn snapshot_critical_entities_never_truncated() {
         let mut world = create_test_world();
         let w = world.app.world_mut();
-        let entities: Vec<(Entity, &Drone)> = w
-            .query::<(Entity, &Drone)>()
-            .iter(w)
-            .map(|(e, d)| (e, d))
-            .collect();
+        let entities: Vec<(Entity, &Drone)> = w.query::<(Entity, &Drone)>().iter(w).collect();
         let drone1 = entities.iter().find(|(_, d)| d.owner == 1).unwrap().0;
         let drone1_eid = format!("{:?}", drone1);
 

@@ -75,20 +75,23 @@ fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
     );
     assert_eq!(first.before.drones, PLAYERS as usize);
 
-    // Non-drone resources must not leak (structures, storage, transfers)
+    // Non-drone resources must not leak (structures, local storage, transfers)
     assert_eq!(first.before.structures, first.after.structures);
     assert_eq!(
         first.before.local_storage_players,
         first.after.local_storage_players
     );
     assert_eq!(
-        first.before.global_storage_players,
-        first.after.global_storage_players
-    );
-    assert_eq!(
         first.before.pending_global_transfers,
         first.after.pending_global_transfers
     );
+
+    // Starting resources intentionally create one global-storage record per
+    // first-spawned player during the first tick.
+    assert_eq!(first.before.global_storage_players, 0);
+    assert_eq!(second.before.global_storage_players, 0);
+    assert_eq!(first.after.global_storage_players, PLAYERS as usize);
+    assert_eq!(second.after.global_storage_players, PLAYERS as usize);
 
     // NPC spawning is deterministic — verify spawned count matches expectation
     let actual_npcs_first = first.after.npcs;

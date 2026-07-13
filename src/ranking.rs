@@ -414,8 +414,10 @@ mod tests {
 
     #[test]
     fn season_finalize_awards_legacy_bonus_and_resets_season_stats() {
-        let mut rankings = RankingState::default();
-        rankings.mode = WorldMode::Arena;
+        let mut rankings = RankingState {
+            mode: WorldMode::Arena,
+            ..Default::default()
+        };
         for tick in 1..=8 {
             rankings
                 .record_match(tick, 1, 2, MatchOutcome::PlayerOneWin)

@@ -92,15 +92,17 @@ pub struct WorldSectionConfig {
     pub seed_rotation_interval: u64,
     pub world_seed: u64,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpawnPolicy {
+    #[default]
     RandomRoom,
     ManualSelect,
     FixedSpawn,
     Inherit,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RespawnPolicy {
+    #[default]
     NewRoom,
     OriginalRoom,
 }
@@ -113,14 +115,15 @@ pub struct SpawnConfig {
     #[serde(alias = "respawn")]
     pub respawn_policy: RespawnPolicy,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodeUpdateWindow {
     pub every: Tick,
     pub duration: Tick,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodePropagationSource {
+    #[default]
     Spawn,
     Controller,
     #[serde(alias = "Global")]
@@ -259,17 +262,19 @@ pub struct StartingResourcesConfig {
     pub free_upkeep_ticks: Tick,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PlayerViewMode {
+    #[default]
     Drone,
     Full,
     Allied,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReplayPrivacy {
+    #[default]
     Private,
     Allies,
     World,
@@ -659,16 +664,6 @@ impl Default for WorldSectionConfig {
         }
     }
 }
-impl Default for SpawnPolicy {
-    fn default() -> Self {
-        Self::RandomRoom
-    }
-}
-impl Default for RespawnPolicy {
-    fn default() -> Self {
-        Self::NewRoom
-    }
-}
 impl Default for SpawnConfig {
     fn default() -> Self {
         Self {
@@ -677,19 +672,6 @@ impl Default for SpawnConfig {
             safe_mode_duration: 500,
             respawn_policy: RespawnPolicy::NewRoom,
         }
-    }
-}
-impl Default for CodeUpdateWindow {
-    fn default() -> Self {
-        Self {
-            every: 0,
-            duration: 0,
-        }
-    }
-}
-impl Default for CodePropagationSource {
-    fn default() -> Self {
-        Self::Spawn
     }
 }
 impl Default for CodeConfig {
@@ -746,18 +728,6 @@ impl Default for StartingResourcesConfig {
             free_upkeep_drones: 3,
             free_upkeep_ticks: 2000,
         }
-    }
-}
-
-impl Default for PlayerViewMode {
-    fn default() -> Self {
-        Self::Drone
-    }
-}
-
-impl Default for ReplayPrivacy {
-    fn default() -> Self {
-        Self::Private
     }
 }
 
@@ -1053,7 +1023,7 @@ fn plugin_override_annotations() -> String {
         let Ok(contents) = std::fs::read_to_string(&mod_path) else {
             continue;
         };
-        let Ok(manifest) = contents.parse::<toml::Value>() else {
+        let Ok(manifest) = toml::from_str::<toml::Value>(&contents) else {
             continue;
         };
         let Some(config) = manifest.get("config").and_then(toml::Value::as_table) else {
