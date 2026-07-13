@@ -139,23 +139,6 @@ fn apply_continuous_tax(storage: &mut ResourceCost, config: &GlobalStorageConfig
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::resources::GlobalStorageConfig;
-
-    #[test]
-    fn continuous_tax_uses_configured_anchors() {
-        let config = GlobalStorageConfig::default();
-
-        assert_eq!(compute_continuous_storage_tax(30_000, 100_000, &config), 0);
-        assert_eq!(
-            compute_continuous_storage_tax(100_000, 100_000, &config),
-            24
-        );
-    }
-}
-
 // ── Associated Functions ──
 
 /// Process pending allied transfers — decrement timers and deliver when ready.
@@ -179,5 +162,22 @@ pub fn allied_transfer_system(
     for transfer in delivered {
         let target = global_storage.0.entry(transfer.to_player).or_default();
         add_resource(target, transfer.resource, transfer.deliver_amount);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resources::GlobalStorageConfig;
+
+    #[test]
+    fn continuous_tax_uses_configured_anchors() {
+        let config = GlobalStorageConfig::default();
+
+        assert_eq!(compute_continuous_storage_tax(30_000, 100_000, &config), 0);
+        assert_eq!(
+            compute_continuous_storage_tax(100_000, 100_000, &config),
+            24
+        );
     }
 }

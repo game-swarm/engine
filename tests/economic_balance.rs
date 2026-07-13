@@ -4,11 +4,10 @@
 
 #[cfg(test)]
 mod tests {
-    use swarm_engine::command::Tick;
-    use swarm_engine::components::PlayerId;
     use swarm_engine::resource_ledger::{
-        ResourceLedger, ResourceOperation, compute_continuous_storage_tax, compute_fee,
-        execute_global_deposit, execute_global_withdraw, execute_storage_tax,
+        GlobalDepositRequest, GlobalWithdrawRequest, ResourceLedger, ResourceOperation,
+        compute_continuous_storage_tax, compute_fee, execute_global_deposit,
+        execute_global_withdraw, execute_storage_tax,
     };
     use swarm_engine::resources::{
         GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
@@ -83,10 +82,12 @@ mod tests {
             &mut global,
             &mut pending,
             &config,
-            1,
-            "energy",
-            1000,
-            0,
+            GlobalDepositRequest {
+                player_id: 1,
+                resource: "energy",
+                amount: 1000,
+                tick: 0,
+            },
         );
         assert!(result.success);
         // 0.5% fee = 5, net = 995
@@ -113,10 +114,12 @@ mod tests {
             &mut global,
             &mut pending,
             &config,
-            1,
-            "energy",
-            1000,
-            0,
+            GlobalWithdrawRequest {
+                player_id: 1,
+                resource: "energy",
+                amount: 1000,
+                tick: 0,
+            },
         );
         assert!(result.success);
         // 1.0% fee = 10, net = 990
@@ -143,10 +146,12 @@ mod tests {
             &mut global,
             &mut pending,
             &config,
-            1,
-            "energy",
-            1000,
-            0,
+            GlobalDepositRequest {
+                player_id: 1,
+                resource: "energy",
+                amount: 1000,
+                tick: 0,
+            },
         );
         assert!(!result.success);
     }

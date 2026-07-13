@@ -76,17 +76,33 @@ pub fn compute_fee(amount: ResourceAmount, bps: u32) -> ResourceAmount {
     (amount as u64 * bps as u64 / 10000) as ResourceAmount
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalDepositRequest<'a> {
+    pub player_id: PlayerId,
+    pub resource: &'a str,
+    pub amount: ResourceAmount,
+    pub tick: Tick,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalWithdrawRequest<'a> {
+    pub player_id: PlayerId,
+    pub resource: &'a str,
+    pub amount: ResourceAmount,
+    pub tick: Tick,
+}
+
 /// Global deposit: local → global, with fee
 pub fn execute_global_deposit(
     local_storage: &mut PlayerLocalStorage,
     global_storage: &mut PlayerGlobalStorage,
     pending: &mut PendingGlobalTransfers,
     config: &GlobalStorageConfig,
-    player_id: PlayerId,
-    resource: &str,
-    amount: ResourceAmount,
-    tick: Tick,
+    request: GlobalDepositRequest<'_>,
 ) -> TransferResult {
+    let player_id = request.player_id;
+    let resource = request.resource;
+    let amount = request.amount;
     let fee_bps = config.transfer_to_global_fee_per_10_000;
     let fee = compute_fee(amount, fee_bps);
     let net = amount.saturating_sub(fee);
@@ -140,7 +156,7 @@ pub fn execute_global_deposit(
         fee_paid: fee,
         basis_points_used: fee_bps,
         delayed_until: if config.transfer_to_global_ticks > 0 {
-            Some(tick + config.transfer_to_global_ticks as u64)
+            Some(request.tick + config.transfer_to_global_ticks)
         } else {
             None
         },
@@ -155,11 +171,11 @@ pub fn execute_global_withdraw(
     global_storage: &mut PlayerGlobalStorage,
     pending: &mut PendingGlobalTransfers,
     config: &GlobalStorageConfig,
-    player_id: PlayerId,
-    resource: &str,
-    amount: ResourceAmount,
-    tick: Tick,
+    request: GlobalWithdrawRequest<'_>,
 ) -> TransferResult {
+    let player_id = request.player_id;
+    let resource = request.resource;
+    let amount = request.amount;
     let fee_bps = config.transfer_from_global_fee_per_10_000;
     let fee = compute_fee(amount, fee_bps);
     let net = amount.saturating_sub(fee);
@@ -213,7 +229,7 @@ pub fn execute_global_withdraw(
         fee_paid: fee,
         basis_points_used: fee_bps,
         delayed_until: if config.transfer_from_global_ticks > 0 {
-            Some(tick + config.transfer_from_global_ticks as u64)
+            Some(request.tick + config.transfer_from_global_ticks)
         } else {
             None
         },

@@ -277,16 +277,15 @@ pub fn get_drone_efficiency(
     for (entity, drone) in query.iter(world.app.world()) {
         if object_id(entity) == params.drone_id {
             let carry_used: u32 = drone.carry.values().copied().sum();
-            let carry_utilization = if drone.carry_capacity == 0 {
-                0
-            } else {
-                carry_used.saturating_mul(100) / drone.carry_capacity
-            };
-            let hits_percent = if drone.hits_max == 0 {
-                0
-            } else {
-                drone.hits.saturating_mul(100) / drone.hits_max
-            };
+            let carry_utilization = carry_used
+                .saturating_mul(100)
+                .checked_div(drone.carry_capacity)
+                .unwrap_or(0);
+            let hits_percent = drone
+                .hits
+                .saturating_mul(100)
+                .checked_div(drone.hits_max)
+                .unwrap_or(0);
             let fatigue_penalty = drone.fatigue.min(100);
             let spawning_penalty = if drone.spawning { 50 } else { 0 };
             let efficiency = 100_u32
