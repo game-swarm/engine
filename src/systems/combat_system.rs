@@ -1,3 +1,4 @@
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -31,17 +32,15 @@ impl Default for CombatRules {
 
 impl CombatRules {
     pub fn from_toml_str(contents: &str) -> Result<Self, String> {
-        let value = contents
-            .parse::<toml::Value>()
+        let value: toml::Value = toml::from_str(contents)
             .map_err(|error| format!("failed to parse world.toml: {error}"))?;
         let mut rules = Self::default();
-        if let Some(combat) = value.get("combat").and_then(toml::Value::as_table) {
-            if let Some(raw) = combat
+        if let Some(combat) = value.get("combat").and_then(toml::Value::as_table)
+            && let Some(raw) = combat
                 .get("damage_multiplier")
                 .or_else(|| combat.get("damage"))
-            {
-                rules.damage_multiplier = parse_fixed_multiplier(raw)?;
-            }
+        {
+            rules.damage_multiplier = parse_fixed_multiplier(raw)?;
         }
         Ok(rules)
     }
@@ -392,20 +391,39 @@ fn fortify_multiplier(attrs: Option<&Attributes>) -> f64 {
         .unwrap_or(1.0)
 }
 
+type CombatDroneItem<'a> = (
+    &'a Drone,
+    Option<&'a Attributes>,
+    Option<&'a EntityFlags>,
+    Option<&'a SpawningGrace>,
+);
+type CombatStructureItem<'a> = (
+    &'a Structure,
+    Option<&'a Attributes>,
+    Option<&'a EntityFlags>,
+);
+type CombatDroneQuery<'w, 's> = Query<'w, 's, CombatDroneItem<'static>>;
+type CombatStructureQuery<'w, 's> = Query<'w, 's, CombatStructureItem<'static>, Without<Drone>>;
+
+#[derive(SystemParam)]
+pub struct CombatRegistries<'w> {
+    body: Res<'w, BodyPartRegistry>,
+    damage: Res<'w, DamageTypeRegistry>,
+    resistance: Res<'w, ResistanceRegistry>,
+}
+
+#[derive(SystemParam)]
+pub struct CombatOutputs<'w> {
+    damage: ResMut<'w, PendingDamage>,
+    heal: ResMut<'w, PendingHeal>,
+}
+
 pub fn combat_system(
     mut combat: ResMut<PendingCombat>,
-    body_registry: Res<BodyPartRegistry>,
-    damage_registry: Res<DamageTypeRegistry>,
-    resistance_registry: Res<ResistanceRegistry>,
-    mut pending_damage: ResMut<PendingDamage>,
-    mut pending_heal: ResMut<PendingHeal>,
-    drones: Query<(
-        &Drone,
-        Option<&Attributes>,
-        Option<&EntityFlags>,
-        Option<&SpawningGrace>,
-    )>,
-    structures: Query<(&Structure, Option<&Attributes>, Option<&EntityFlags>), Without<Drone>>,
+    registries: CombatRegistries,
+    mut outputs: CombatOutputs,
+    drones: CombatDroneQuery,
+    structures: CombatStructureQuery,
 ) {
     // --- Damage phase (first) ---
     // Accumulate total damage per target, then apply in deterministic order.
@@ -436,14 +454,14 @@ pub fn combat_system(
                     attrs,
                     flags,
                     dt,
-                    &body_registry,
-                    &damage_registry,
-                    &resistance_registry,
+                    &registries.body,
+                    &registries.damage,
+                    &registries.resistance,
                 );
                 acc.saturating_add(((*amount as f64) * multiplier).floor() as u32)
             });
             if total > 0 {
-                pending_damage.push(*entity, total, "Kinetic");
+                outputs.damage.push(*entity, total, "Kinetic");
             }
         } else if let Ok((_structure, attrs, flags)) = structures.get(*entity) {
             let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
@@ -452,14 +470,14 @@ pub fn combat_system(
                     attrs,
                     flags,
                     dt,
-                    &body_registry,
-                    &damage_registry,
-                    &resistance_registry,
+                    &registries.body,
+                    &registries.damage,
+                    &registries.resistance,
                 );
                 acc.saturating_add(((*amount as f64) * multiplier).floor() as u32)
             });
             if total > 0 {
-                pending_damage.push(*entity, total, "Kinetic");
+                outputs.damage.push(*entity, total, "Kinetic");
             }
         }
     }
@@ -473,7 +491,7 @@ pub fn combat_system(
 
     for (entity, amount) in &heal_by_target {
         if drones.get(*entity).is_ok() {
-            pending_heal.push(*entity, *amount);
+            outputs.heal.push(*entity, *amount);
         }
     }
 }

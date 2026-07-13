@@ -116,12 +116,12 @@ pub fn special_attack_reducer(
     // 1. Drain all intents
     let mut raw: Vec<StatusActionIntent> = std::mem::take(&mut pending.intents);
 
-    // 2. Canonical sort: (priority DESC, source, target)
+    // 2. Canonical sort: (priority DESC, source identity, target identity)
     raw.sort_by(|a, b| {
         b.kind
             .cmp(&a.kind)
-            .then_with(|| a.source.cmp(&b.source))
-            .then_with(|| a.target.cmp(&b.target))
+            .then_with(|| entity_identity(a.source).cmp(&entity_identity(b.source)))
+            .then_with(|| entity_identity(a.target).cmp(&entity_identity(b.target)))
     });
 
     // 3. Reducer resolve: same target → highest priority wins
@@ -142,6 +142,10 @@ pub fn special_attack_reducer(
 
     // 4. Deliver to S22
     intents.intents = resolved;
+}
+
+fn entity_identity(entity: Entity) -> u64 {
+    u64::from(entity.index_u32())
 }
 
 #[cfg(test)]
@@ -225,6 +229,37 @@ mod tests {
             "same priority same target → one intent"
         );
         // First in sort order wins (lower source entity)
+        assert_eq!(intents.intents[0].amount, 3);
+    }
+
+    #[test]
+    fn reducer_same_priority_uses_numeric_source_identity() {
+        let mut app = App::new();
+        app.insert_resource(PendingSpecialAttack {
+            intents: vec![
+                StatusActionIntent {
+                    kind: SpecialAttackKind::Drain,
+                    source: entity(2),
+                    target: entity(10),
+                    owner: 2,
+                    amount: 7,
+                },
+                StatusActionIntent {
+                    kind: SpecialAttackKind::Drain,
+                    source: entity(1),
+                    target: entity(10),
+                    owner: 1,
+                    amount: 3,
+                },
+            ],
+        });
+        app.insert_resource(PendingIntents::default());
+        app.add_systems(Update, special_attack_reducer);
+
+        app.update();
+
+        let intents = app.world().resource::<PendingIntents>();
+        assert_eq!(intents.intents.len(), 1);
         assert_eq!(intents.intents[0].amount, 3);
     }
 

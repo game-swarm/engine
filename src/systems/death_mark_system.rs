@@ -12,10 +12,10 @@ pub fn death_mark_system(
     for (entity, drone, position) in drones.iter() {
         if drone.hits == 0 || drone.age >= drone.lifespan {
             commands.entity(entity).insert(DeathMark);
-            if let Some(position) = position {
-                if let Some(count) = room_counts.0.get_mut(&(position.room, drone.owner)) {
-                    *count = count.saturating_sub(1);
-                }
+            if let Some(position) = position
+                && let Some(count) = room_counts.0.get_mut(&(position.room, drone.owner))
+            {
+                *count = count.saturating_sub(1);
             }
         }
     }

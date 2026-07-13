@@ -57,7 +57,7 @@ pub fn controller_repair_system(
             // Check range
             let dx = (drone_pos.x - ctrl_pos.x).unsigned_abs();
             let dy = (drone_pos.y - ctrl_pos.y).unsigned_abs();
-            let distance = dx.max(dy) as u32;
+            let distance = dx.max(dy);
             if distance > controller.repair_range {
                 continue;
             }

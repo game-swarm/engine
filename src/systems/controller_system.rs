@@ -153,16 +153,17 @@ pub fn controller_system(
     mut global_storage: ResMut<PlayerGlobalStorage>,
 ) {
     for (entity_bits, amount) in pending.0.drain(..) {
-        if let Ok(mut controller) = controllers.get_mut(Entity::from_bits(entity_bits)) {
-            if controller.owner.is_some() && controller.level < 8 {
-                controller.progress = controller.progress.saturating_add(amount);
-                while controller.level < 8
-                    && controller.progress >= rcl_progress_total(controller.level + 1)
-                {
-                    controller.level += 1;
-                    controller.progress_total = rcl_progress_total((controller.level + 1).min(8));
-                    controller.downgrade_timer = DEFAULT_CONTROLLER_DOWNGRADE_TIMER;
-                }
+        if let Ok(mut controller) = controllers.get_mut(Entity::from_bits(entity_bits))
+            && controller.owner.is_some()
+            && controller.level < 8
+        {
+            controller.progress = controller.progress.saturating_add(amount);
+            while controller.level < 8
+                && controller.progress >= rcl_progress_total(controller.level + 1)
+            {
+                controller.level += 1;
+                controller.progress_total = rcl_progress_total((controller.level + 1).min(8));
+                controller.downgrade_timer = DEFAULT_CONTROLLER_DOWNGRADE_TIMER;
             }
         }
     }
@@ -181,8 +182,9 @@ pub fn controller_system(
                 controller.progress_total = rcl_progress_total((controller.level + 1).min(8));
                 controller.downgrade_timer = DEFAULT_CONTROLLER_DOWNGRADE_TIMER;
             }
-        } else if config.empire_upkeep.controller_passive_income > 0 {
-            let owner = controller.owner.expect("checked above");
+        } else if let Some(owner) = controller.owner
+            && config.empire_upkeep.controller_passive_income > 0
+        {
             *global_storage
                 .0
                 .entry(owner)

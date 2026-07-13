@@ -69,7 +69,7 @@ pub fn depot_repair_system(
             // Check range
             let dx = (drone_pos.x - depot_pos.x).unsigned_abs();
             let dy = (drone_pos.y - depot_pos.y).unsigned_abs();
-            let distance = dx.max(dy) as u32;
+            let distance = dx.max(dy);
             if distance > repair_range {
                 continue;
             }

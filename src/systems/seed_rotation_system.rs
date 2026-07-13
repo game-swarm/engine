@@ -3,19 +3,10 @@ use bevy::prelude::*;
 use crate::world::WorldConfig;
 
 /// Tracks ticks since last seed rotation. Registered as a Bevy resource.
-#[derive(Resource, Debug, Clone)]
+#[derive(Resource, Debug, Clone, Default)]
 pub struct SeedRotationState {
     pub ticks_since_rotation: u64,
     pub next_rotation_at: u64,
-}
-
-impl Default for SeedRotationState {
-    fn default() -> Self {
-        Self {
-            ticks_since_rotation: 0,
-            next_rotation_at: 0,
-        }
-    }
 }
 
 /// System that rotates the world seed at the configured interval.

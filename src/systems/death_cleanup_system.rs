@@ -2,39 +2,41 @@ use bevy::prelude::*;
 
 use crate::components::{DeathMark, Drone, Position, Source};
 
+type DeathCleanupItem<'a> = (Entity, Option<&'a Drone>, Option<&'a Position>);
+type DeathCleanupFilter = With<DeathMark>;
+
 /// Death cleanup system (S25) — deterministic despawn of all DeathMark
 /// entities, ordered by entity index descending (stable ordering).
 /// When a Drone dies carrying resources, the carry is dropped into any Source
 /// at the same position (capped at the Source's capacity).
 pub fn death_cleanup_system(
     mut commands: Commands,
-    marked: Query<(Entity, Option<&Drone>, Option<&Position>), With<DeathMark>>,
+    marked: Query<DeathCleanupItem<'_>, DeathCleanupFilter>,
     mut sources: Query<(&Position, &mut Source)>,
 ) {
     // Collect all marked entities with their entity index for deterministic ordering
-    let mut marked_entities: Vec<(Entity, Option<&Drone>, Option<&Position>)> =
-        marked.iter().map(|(e, d, p)| (e, d, p)).collect();
+    let mut marked_entities: Vec<DeathCleanupItem<'_>> = marked.iter().collect();
     // Sort by entity index descending (deterministic despawn order)
     marked_entities.sort_by_key(|(entity, _, _)| std::cmp::Reverse(entity.index()));
 
     for (entity, drone, position) in marked_entities {
         // Drop carried resources to a Source at the same position (if any)
-        if let (Some(drone), Some(position)) = (drone, position) {
-            if !drone.carry.is_empty() {
-                for (pos, mut source) in sources.iter_mut() {
-                    if pos == position {
-                        let mut total_dropped: u32 = 0;
-                        for amount in drone.carry.values() {
-                            total_dropped = total_dropped.saturating_add(*amount);
-                        }
-                        // Carry drop accelerates source regeneration
-                        let free_capacity =
-                            source.capacity.saturating_sub(source.ticks_to_regeneration);
-                        let effective = total_dropped.min(free_capacity);
-                        source.ticks_to_regeneration =
-                            source.ticks_to_regeneration.saturating_sub(effective);
-                        break;
+        if let (Some(drone), Some(position)) = (drone, position)
+            && !drone.carry.is_empty()
+        {
+            for (pos, mut source) in sources.iter_mut() {
+                if pos == position {
+                    let mut total_dropped: u32 = 0;
+                    for amount in drone.carry.values() {
+                        total_dropped = total_dropped.saturating_add(*amount);
                     }
+                    // Carry drop accelerates source regeneration
+                    let free_capacity =
+                        source.capacity.saturating_sub(source.ticks_to_regeneration);
+                    let effective = total_dropped.min(free_capacity);
+                    source.ticks_to_regeneration =
+                        source.ticks_to_regeneration.saturating_sub(effective);
+                    break;
                 }
             }
         }
@@ -152,7 +154,7 @@ mod tests {
 
         // Source regeneration timer should be reduced by the dropped resources
         let ticks = {
-            let source = world
+            world
                 .app
                 .world_mut()
                 .query::<(&Position, &Source)>()
@@ -160,8 +162,7 @@ mod tests {
                 .find(|(pos, _)| pos.x == 10 && pos.y == 10)
                 .unwrap()
                 .1
-                .ticks_to_regeneration;
-            source
+                .ticks_to_regeneration
         };
         assert_eq!(
             ticks, 50,
