@@ -5220,25 +5220,25 @@ mod tests {
         properties.iter().all(|(key, property_schema)| {
             action
                 .get(key)
-                .map_or(true, |value| schema_value_matches(property_schema, value))
+                .is_none_or(|value| schema_value_matches(property_schema, value))
         })
     }
 
     fn schema_value_matches(schema: &Value, value: &Value) -> bool {
-        if let Some(const_value) = schema.get("const") {
-            if value != const_value {
-                return false;
-            }
+        if let Some(const_value) = schema.get("const")
+            && value != const_value
+        {
+            return false;
         }
-        if let Some(enum_values) = schema.get("enum").and_then(Value::as_array) {
-            if !enum_values.iter().any(|allowed| allowed == value) {
-                return false;
-            }
+        if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
+            && !enum_values.iter().any(|allowed| allowed == value)
+        {
+            return false;
         }
-        if let Some(not_schema) = schema.get("not") {
-            if schema_value_matches(not_schema, value) {
-                return false;
-            }
+        if let Some(not_schema) = schema.get("not")
+            && schema_value_matches(not_schema, value)
+        {
+            return false;
         }
         match schema.get("type").and_then(Value::as_str) {
             Some("string") => schema_string_matches(schema, value),
@@ -5253,10 +5253,10 @@ mod tests {
         let Some(value) = value.as_str() else {
             return false;
         };
-        if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64) {
-            if value.chars().count() < min_length as usize {
-                return false;
-            }
+        if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64)
+            && value.chars().count() < min_length as usize
+        {
+            return false;
         }
         true
     }
@@ -5265,15 +5265,15 @@ mod tests {
         let Some(value) = integer_value(value) else {
             return false;
         };
-        if let Some(minimum) = schema.get("minimum").and_then(integer_value) {
-            if value < minimum {
-                return false;
-            }
+        if let Some(minimum) = schema.get("minimum").and_then(integer_value)
+            && value < minimum
+        {
+            return false;
         }
-        if let Some(maximum) = schema.get("maximum").and_then(integer_value) {
-            if value > maximum {
-                return false;
-            }
+        if let Some(maximum) = schema.get("maximum").and_then(integer_value)
+            && value > maximum
+        {
+            return false;
         }
         true
     }
@@ -5282,17 +5282,17 @@ mod tests {
         let Some(items) = value.as_array() else {
             return false;
         };
-        if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64) {
-            if items.len() < min_items as usize {
-                return false;
-            }
+        if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64)
+            && items.len() < min_items as usize
+        {
+            return false;
         }
-        if let Some(max_items) = schema.get("maxItems").and_then(Value::as_u64) {
-            if items.len() > max_items as usize {
-                return false;
-            }
+        if let Some(max_items) = schema.get("maxItems").and_then(Value::as_u64)
+            && items.len() > max_items as usize
+        {
+            return false;
         }
-        schema.get("items").map_or(true, |item_schema| {
+        schema.get("items").is_none_or(|item_schema| {
             items
                 .iter()
                 .all(|item| schema_value_matches(item_schema, item))
