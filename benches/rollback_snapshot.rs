@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::hint::black_box;
 
-use criterion::{Criterion, criterion_group, criterion_main};
 use bevy::prelude::*;
+use criterion::{Criterion, criterion_group, criterion_main};
 use swarm_engine::components::*;
 use swarm_engine::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use swarm_engine::systems::{PendingCombat, PendingSpawnQueue, Projectile, RoomDroneCounts};

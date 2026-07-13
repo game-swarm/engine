@@ -34,12 +34,7 @@ fn bench_command_throughput(c: &mut Criterion) {
 
     group.bench_function("validate_1k_attack_commands", |b| {
         let mut world = create_world();
-        let attacker = world.spawn_drone(
-            1,
-            10,
-            10,
-            vec![BodyPart::Move, BodyPart::Attack],
-        );
+        let attacker = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Attack]);
         let target = world.spawn_drone(2, 11, 10, vec![BodyPart::Move]);
         let intents: Vec<CommandIntent> = (0..1000)
             .map(|i| CommandIntent {

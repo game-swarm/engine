@@ -3,8 +3,8 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use swarm_engine::components::{BodyPart, Position, RoomId};
-use swarm_engine::npc::ai::{Npc, NpcBehavior, NpcSpecialAttack, NpcType};
 use swarm_engine::create_world;
+use swarm_engine::npc::ai::{Npc, NpcBehavior, NpcSpecialAttack, NpcType};
 
 fn bench_tick_loop(c: &mut Criterion) {
     let mut group = c.benchmark_group("tick_loop");
