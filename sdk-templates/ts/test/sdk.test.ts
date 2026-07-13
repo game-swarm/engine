@@ -18,7 +18,8 @@ describe("command intents", () => {
   it("builds and serializes valid CommandIntent JSON", () => {
     const output = serializeTickOutput([
       command(0, actions.move(1001, "TopRight")),
-      command(1, actions.spawn(2001, ["Move", "Work", "Carry"]))
+      command(1, actions.spawn(1001, 2001, ["Move", "Work", "Carry"])),
+      command(2, actions.claimController(1001, 3001))
     ]);
     const parsed = parseCommandsFromTickOutput(output);
     expect(parsed.ok).toBe(true);
@@ -32,10 +33,21 @@ describe("command intents", () => {
   });
 
   it("rejects unknown action fields and oversized spawn bodies", () => {
-    const result = validateCommandIntents([{ sequence: 0, action: { ...actions.spawn(1, Array(51).fill("Move")), extra: true } }]);
+    const result = validateCommandIntents([{ sequence: 0, action: { ...actions.spawn(1, 2, Array(51).fill("Move")), extra: true } }]);
     expect(result.ok).toBe(false);
     expect(result.issues.map((issue) => issue.code)).toContain("AdditionalProperty");
     expect(result.issues.map((issue) => issue.code)).toContain("BodyTooLarge");
+  });
+
+  it("rejects legacy spawn and claim controller fields", () => {
+    const result = validateCommandIntents([
+      { sequence: 0, action: { type: "Spawn", spawn_id: 1, body: ["Move"] } },
+      { sequence: 1, action: { type: "ClaimController", object_id: 1, controller_id: 2 } }
+    ]);
+    expect(result.ok).toBe(false);
+    expect(result.issues.some((issue) => issue.path === "$[0].action.object_id" && issue.code === "Required")).toBe(true);
+    expect(result.issues.some((issue) => issue.path === "$[0].action.body" && issue.code === "AdditionalProperty")).toBe(true);
+    expect(result.issues.some((issue) => issue.path === "$[1].action.controller_id" && issue.code === "AdditionalProperty")).toBe(true);
   });
 
   it("computes default body costs from the frozen IDL table", () => {

@@ -712,8 +712,12 @@ mod tests {
 
     #[test]
     fn command_action_and_rejection_registries_match_api_surface() {
-        assert_eq!(CORE_COMMAND_ACTIONS.len(), 12);
-        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 48);
+        assert_eq!(CORE_COMMAND_ACTIONS.len(), 14);
+        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 37);
+        assert_eq!(CANONICAL_REJECTION_REASONS[0], "InvalidJson");
+        assert_eq!(CANONICAL_REJECTION_REASONS[2], "ObjectNotFound");
+        assert_eq!(CANONICAL_REJECTION_REASONS[28], "RateLimited");
+        assert_eq!(CANONICAL_REJECTION_REASONS[36], "InternalError");
 
         let action: CommandAction =
             serde_json::from_str(r#"{"type":"Hack","object_id":1,"target_id":2}"#).unwrap();
@@ -739,14 +743,72 @@ mod tests {
             &CustomActionRegistry::default(),
         );
 
-        assert_eq!(idl.core.commands.len(), 12);
+        assert_eq!(idl.core.commands.len(), 14);
         assert!(
             idl.core
                 .commands
                 .iter()
                 .any(|command| command.name == "Action")
         );
-        assert_eq!(idl.core.enums.rejection_reason.len(), 48);
+        let spawn = idl
+            .core
+            .commands
+            .iter()
+            .find(|command| command.name == "Spawn")
+            .expect("Spawn command must be present in extracted IDL");
+        let expected_spawn_fields = IndexMap::from([
+            ("object_id".to_string(), "ObjectId".to_string()),
+            ("spawn_id".to_string(), "ObjectId".to_string()),
+            ("body_parts".to_string(), "BodyPart[]".to_string()),
+        ]);
+        assert_eq!(spawn.fields, expected_spawn_fields);
+
+        let claim_controller = idl
+            .core
+            .commands
+            .iter()
+            .find(|command| command.name == "ClaimController")
+            .expect("ClaimController command must be present in extracted IDL");
+        let expected_claim_controller_fields = IndexMap::from([
+            ("object_id".to_string(), "ObjectId".to_string()),
+            ("target_id".to_string(), "ObjectId".to_string()),
+        ]);
+        assert_eq!(claim_controller.fields, expected_claim_controller_fields);
+
+        let canonical_spawn = serde_json::to_value(CommandAction::Spawn {
+            object_id: 1,
+            spawn_id: 2,
+            body_parts: vec![BodyPart::Move],
+        })
+        .unwrap();
+        let canonical_spawn = canonical_spawn.as_object().unwrap();
+        let canonical_spawn_fields = canonical_spawn
+            .keys()
+            .filter(|field| field.as_str() != "type")
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            spawn
+                .fields
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            canonical_spawn_fields
+        );
+
+        let ts = crate::sdk_gen::generate_typescript(&idl);
+        assert!(ts.contains("export interface SpawnAction {\n  type: \"Spawn\";\n  object_id: ObjectId;\n  spawn_id: ObjectId;\n  body_parts: BodyPart[];\n}"));
+        assert!(ts.contains("spawn: (object_id: ObjectId, spawn_id: ObjectId, body_parts: BodyPart[]) => ({ type: \"Spawn\", object_id, spawn_id, body_parts }) as const"));
+        assert!(ts.contains("export interface ClaimControllerAction {\n  type: \"ClaimController\";\n  object_id: ObjectId;\n  target_id: ObjectId;\n}"));
+        assert!(ts.contains("claimController: (object_id: ObjectId, target_id: ObjectId) => ({ type: \"ClaimController\", object_id, target_id }) as const"));
+        assert_eq!(idl.core.enums.rejection_reason.len(), 37);
+        assert_eq!(
+            idl.core.enums.rejection_reason,
+            CANONICAL_REJECTION_REASONS
+                .iter()
+                .map(|reason| reason.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

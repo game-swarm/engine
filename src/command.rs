@@ -34,7 +34,7 @@ const ENERGY_RESOURCE: &str = "Energy";
 const OVERLOAD_FUEL_FLOOR: u64 = MAX_FUEL / 5;
 
 #[derive(Resource, Debug, Clone, Default)]
-struct CustomActionCooldowns(IndexMap<(ObjectId, String), Tick>);
+pub struct CustomActionCooldowns(pub(crate) IndexMap<(ObjectId, String), Tick>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommandSource {
@@ -152,7 +152,7 @@ pub const CORE_COMMAND_ACTIONS: &[&str] = &[
     "AlliedTransfer",
 ];
 
-const SPECIAL_COMMAND_ACTIONS: &[&str] = &[
+pub const SPECIAL_COMMAND_ACTIONS: &[&str] = &[
     "Attack",
     "RangedAttack",
     "Heal",
@@ -171,8 +171,9 @@ const SPECIAL_COMMAND_ACTIONS: &[&str] = &[
 #[serde(deny_unknown_fields)]
 struct CommandActionWire {
     #[serde(rename = "type")]
-    action_type: String,
-    action_name: Option<String>,
+    command_type: String,
+    #[serde(rename = "action_type", alias = "action_name")]
+    action_type: Option<String>,
     object_id: Option<ObjectId>,
     target_id: Option<ObjectId>,
     controller_id: Option<ObjectId>,
@@ -204,7 +205,7 @@ impl<'de> Deserialize<'de> for CommandAction {
                 $value.ok_or_else(|| serde::de::Error::missing_field($field))?
             };
         }
-        Ok(match wire.action_type.as_str() {
+        Ok(match wire.command_type.as_str() {
             "Move" => Self::Move {
                 object_id: required!(wire.object_id, "object_id"),
                 direction: required!(wire.direction, "direction"),
@@ -226,12 +227,20 @@ impl<'de> Deserialize<'de> for CommandAction {
                 resource: required!(wire.resource, "resource"),
                 amount: required!(wire.amount, "amount"),
             },
-            "Action" => Self::Action {
-                action_type: required!(wire.action_name.clone(), "action_name"),
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: wire.target_id,
-                payload: command_action_payload(&wire),
-            },
+            "Action" => {
+                let action_type = required!(wire.action_type.clone(), "action_type");
+                if CORE_COMMAND_ACTIONS.contains(&action_type.as_str()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "Action wrapper action_type must not be a core command action: {action_type}"
+                    )));
+                }
+                Self::Action {
+                    action_type,
+                    object_id: required!(wire.object_id, "object_id"),
+                    target_id: wire.target_id,
+                    payload: command_action_payload(&wire),
+                }
+            }
             "ClaimController" => Self::ClaimController {
                 object_id: required!(wire.object_id, "object_id"),
                 target_id: wire
@@ -632,54 +641,43 @@ pub enum AuthError {
 }
 
 pub const CANONICAL_REJECTION_REASONS: &[&str] = &[
-    "CommandBufferFull",
-    "TimeoutExceeded",
-    "SourceNotAllowed",
-    "AuthContextInvalid",
-    "NotVisibleOrNotFound",
-    "ObjectNotFound",
-    "TargetNotVisible",
-    "NotOwner",
-    "InvalidBodyPart",
-    "NotEnoughBodyParts",
-    "PositionOccupied",
-    "InvalidDirection",
-    "InsufficientResource",
-    "OutOfRange",
-    "InvalidStructureType",
-    "InvalidResourceType",
-    "ConstructionLimitReached",
-    "NotStructure",
-    "NotController",
-    "SpawnOnCooldown",
-    "CooldownActive",
-    "RoomDroneCapReached",
-    "GlobalStorageDisabled",
-    "TransferInProgress",
-    "DailyTransferCapExceeded",
-    "FuelExhausted",
-    "SafeModeActive",
-    "TargetFortifyCooldown",
-    "TargetOverloadCooldown",
-    "DisruptedResisted",
-    "UnknownAction",
     "InvalidJson",
     "SchemaViolation",
+    "ObjectNotFound",
+    "NotOwner",
+    "InsufficientResource",
+    "OutOfRange",
+    "NotStructure",
+    "NotController",
+    "NotVisibleOrNotFound",
+    "TargetNotVisible",
+    "SpawnOnCooldown",
+    "RoomDroneCapReached",
+    "AuthContextInvalid",
+    "CooldownActive",
+    "InvalidDirection",
+    "PositionOccupied",
+    "ConstructionLimitReached",
+    "SafeModeActive",
+    "TargetOverloadCooldown",
+    "TargetFortifyCooldown",
+    "NotEnoughBodyParts",
+    "InvalidBodyPart",
+    "InvalidStructureType",
+    "InvalidResourceType",
+    "SourceNotAllowed",
+    "UnknownAction",
+    "GlobalStorageDisabled",
+    "TransferInProgress",
     "RateLimited",
-    "ServerOverloaded",
+    "InvalidCertificate",
+    "NotAuthorized",
+    "FuelExhausted",
+    "TimeoutExceeded",
     "SnapshotOverBudget",
+    "CommandBufferFull",
+    "ServerOverloaded",
     "InternalError",
-    "NotMovable",
-    "Fatigued",
-    "StillSpawning",
-    "TileBlocked",
-    "OutOfRoom",
-    "NoPath",
-    "PathTooLong",
-    "CarryFull",
-    "SourceEmpty",
-    "TargetFull",
-    "TargetEmpty",
 ];
 
 pub type CommandResult = Result<(), RejectionReason>;
@@ -1411,9 +1409,10 @@ fn add_canonical_rejection_detail(
     let mut detail = detail;
     let canonical_reason = canonical_rejection_reason(rejection);
     if let serde_json::Value::Object(fields) = &mut detail {
-        fields
-            .entry("reason".to_string())
-            .or_insert_with(|| serde_json::Value::String(canonical_reason.to_string()));
+        fields.insert(
+            "reason".to_string(),
+            serde_json::Value::String(canonical_reason.to_string()),
+        );
         if non_canonical_rejection_reason(rejection) {
             fields.insert(
                 "canonical_reason".to_string(),
@@ -1432,7 +1431,7 @@ fn add_canonical_rejection_detail(
     detail
 }
 
-fn canonical_rejection_reason(rejection: &RejectionReason) -> &'static str {
+pub(crate) fn canonical_rejection_reason(rejection: &RejectionReason) -> &'static str {
     match rejection {
         RejectionReason::InvalidJson => "InvalidJson",
         RejectionReason::SchemaViolation => "SchemaViolation",
@@ -1495,13 +1494,13 @@ fn canonical_rejection_reason(rejection: &RejectionReason) -> &'static str {
         RejectionReason::GlobalStorageDisabled => "GlobalStorageDisabled",
         RejectionReason::TransferInProgress => "TransferInProgress",
         RejectionReason::TargetTransferLocked => "RateLimited",
-        RejectionReason::DailyTransferCapExceeded => "DailyTransferCapExceeded",
+        RejectionReason::DailyTransferCapExceeded => "RateLimited",
         RejectionReason::PlayerNotFound => "NotVisibleOrNotFound",
         RejectionReason::FuelExhausted => "FuelExhausted",
         RejectionReason::SafeModeActive => "SafeModeActive",
         RejectionReason::TargetFortifyCooldown => "TargetFortifyCooldown",
         RejectionReason::TargetOverloadCooldown => "TargetOverloadCooldown",
-        RejectionReason::DisruptedResisted { .. } => "DisruptedResisted",
+        RejectionReason::DisruptedResisted { .. } => "NotEnoughBodyParts",
         RejectionReason::RateLimited => "RateLimited",
         RejectionReason::InternalError => "InternalError",
         RejectionReason::ServerOverloaded => "ServerOverloaded",
@@ -1523,7 +1522,6 @@ fn non_canonical_rejection_reason(rejection: &RejectionReason) -> bool {
             | RejectionReason::ObjectNotFound
             | RejectionReason::TargetNotVisible
             | RejectionReason::NotOwner
-            | RejectionReason::AlreadyActed
             | RejectionReason::InvalidBodyPart
             | RejectionReason::NotEnoughBodyParts
             | RejectionReason::PositionOccupied
@@ -1669,20 +1667,20 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
         } => apply_allied_transfer(world, player_id, target_player, &resource, amount),
     };
 
-    if result.is_ok() {
-        if let Some(object_id) = actor_id {
-            mark_drone_action(world, object_id, action_tick);
-        }
+    if result.is_ok()
+        && let Some(object_id) = actor_id
+    {
+        mark_drone_action(world, object_id, action_tick);
     }
 
     result
 }
 
 fn mark_drone_action(world: &mut World, object_id: ObjectId, tick: Tick) {
-    if let Ok(entity) = entity(object_id) {
-        if let Some(mut drone) = world.entity_mut(entity).get_mut::<Drone>() {
-            drone.last_action_tick = tick;
-        }
+    if let Ok(entity) = entity(object_id)
+        && let Some(mut drone) = world.entity_mut(entity).get_mut::<Drone>()
+    {
+        drone.last_action_tick = tick;
     }
 }
 
@@ -1751,10 +1749,10 @@ fn validate_transfer(
         });
     }
 
-    if let Ok((_, controller)) = controller_snapshot(world, target_id) {
-        if controller.owner != Some(player_id) {
-            return Err(RejectionReason::NotOwner);
-        }
+    if let Ok((_, controller)) = controller_snapshot(world, target_id)
+        && controller.owner != Some(player_id)
+    {
+        return Err(RejectionReason::NotOwner);
     }
     let (target_position, space) = target_resource_space(world, target_id, resource)?;
     if space < amount {
@@ -2964,10 +2962,10 @@ fn heal_drone(world: &mut World, object_id: ObjectId, amount: u32) {
     if amount == 0 {
         return;
     }
-    if let Ok(object) = entity(object_id) {
-        if world.entity(object).get::<Drone>().is_some() {
-            world.resource_mut::<PendingHeal>().push(object, amount);
-        }
+    if let Ok(object) = entity(object_id)
+        && world.entity(object).get::<Drone>().is_some()
+    {
+        world.resource_mut::<PendingHeal>().push(object, amount);
     }
 }
 
@@ -2992,10 +2990,10 @@ fn validate_allied_transfer(
 
     // Check cooldown
     let cooldowns = world.resource::<AlliedTransferCooldowns>();
-    if let Some(next_allowed) = cooldowns.0.get(&(from_player, to_player)) {
-        if current_tick < *next_allowed {
-            return Err(RejectionReason::CooldownActive);
-        }
+    if let Some(next_allowed) = cooldowns.0.get(&(from_player, to_player))
+        && current_tick < *next_allowed
+    {
+        return Err(RejectionReason::CooldownActive);
     }
 
     // Check daily cap
@@ -3661,22 +3659,19 @@ fn add_to_target(world: &mut World, entity: Entity, resource: &str, amount: u32)
         *drone.carry.entry(resource.to_string()).or_default() += amount;
         return Ok(());
     }
-    if let Some(mut structure) = world.entity_mut(entity).get_mut::<Structure>() {
-        if resource == "Energy" {
-            if let Some(energy) = &mut structure.energy {
-                *energy += amount;
-                return Ok(());
-            }
-        }
+    if let Some(mut structure) = world.entity_mut(entity).get_mut::<Structure>()
+        && resource == "Energy"
+        && let Some(energy) = &mut structure.energy
+    {
+        *energy += amount;
+        return Ok(());
     }
-    if world.entity(entity).contains::<Controller>() {
-        if resource == "Energy" {
-            world
-                .resource_mut::<PendingControllerUpgrade>()
-                .0
-                .push((entity.to_bits(), amount));
-            return Ok(());
-        }
+    if world.entity(entity).contains::<Controller>() && resource == "Energy" {
+        world
+            .resource_mut::<PendingControllerUpgrade>()
+            .0
+            .push((entity.to_bits(), amount));
+        return Ok(());
     }
     Err(RejectionReason::ObjectNotFound)
 }
@@ -3692,13 +3687,12 @@ fn take_from_target(
         *value -= amount;
         return Ok(());
     }
-    if let Some(mut structure) = world.entity_mut(entity).get_mut::<Structure>() {
-        if resource == "Energy" {
-            if let Some(energy) = &mut structure.energy {
-                *energy -= amount;
-                return Ok(());
-            }
-        }
+    if let Some(mut structure) = world.entity_mut(entity).get_mut::<Structure>()
+        && resource == "Energy"
+        && let Some(energy) = &mut structure.energy
+    {
+        *energy -= amount;
+        return Ok(());
     }
     if let Some(mut resource_store) = world
         .entity_mut(entity)
@@ -3852,6 +3846,7 @@ mod tests {
         world
             .submit_raw_command(raw_custom(1, "Disrupt", attacker_id, Some(target_id)))
             .unwrap();
+        world.run_tick_for(1);
 
         let target_ref = world.app.world().entity(target);
         let attrs = &target_ref.get::<Attributes>().unwrap().0;
@@ -3897,6 +3892,7 @@ mod tests {
         world
             .submit_raw_command(raw_custom(1, "Fortify", drone_id, None))
             .unwrap();
+        world.run_tick_for(1);
 
         let drone_ref = world.app.world().entity(drone);
         let attrs = &drone_ref.get::<Attributes>().unwrap().0;

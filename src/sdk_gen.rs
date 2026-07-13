@@ -13,21 +13,21 @@ pub fn generate_typescript(idl: &IdlDoc) -> String {
     let mut out = String::new();
 
     out.push_str(&ts_header(idl));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&ts_primitive_types());
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&ts_enums(&idl.core.enums));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&ts_structure_types(idl));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&ts_core_actions(idl));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&ts_custom_actions(&idl.mods.custom_actions));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&ts_action_union(idl));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&ts_command_factories(idl));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&ts_constants(idl));
     out
 }
@@ -165,7 +165,7 @@ fn idl_to_ts_type(idl_type: &str) -> String {
         "BodyPart[]" => "BodyPart[]".into(),
         other => {
             if let Some(base) = other.strip_suffix('?') {
-                format!("{}", idl_to_ts_type(base)) // optional fields just omit the ?
+                idl_to_ts_type(base).to_string() // optional fields just omit the ?
             } else {
                 format!("unknown /* {other} */")
             }
@@ -356,18 +356,18 @@ pub fn generate_rust(idl: &IdlDoc) -> String {
     let mut out = String::new();
 
     out.push_str(&rust_header(idl));
-    out.push_str("\n");
+    out.push('\n');
     // Type aliases live in types_template.rs; only enums + commands generated here.
     out.push_str(&rust_enums(idl));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&rust_structure_types(idl));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&rust_command_action(idl));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&rust_command_struct());
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&rust_custom_constructors(&idl.mods.custom_actions));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&rust_constants(idl));
     out
 }
@@ -574,15 +574,12 @@ fn rust_constants(idl: &IdlDoc) -> String {
     let mut out = String::from("// ── Constants ──\n\n");
 
     for (name, value) in &idl.core.constants {
-        match value {
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_u64() {
-                    out.push_str(&format!("pub const {name}: u64 = {i};\n"));
-                } else if let Some(f) = n.as_f64() {
-                    out.push_str(&format!("pub const {name}: f64 = {f};\n"));
-                }
+        if let serde_json::Value::Number(n) = value {
+            if let Some(i) = n.as_u64() {
+                out.push_str(&format!("pub const {name}: u64 = {i};\n"));
+            } else if let Some(f) = n.as_f64() {
+                out.push_str(&format!("pub const {name}: f64 = {f};\n"));
             }
-            _ => {}
         }
     }
 

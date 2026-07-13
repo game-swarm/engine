@@ -179,9 +179,16 @@ fn core_commands() -> Vec<CommandDef> {
         ),
         def(
             "ClaimController",
-            &[("object_id", "ObjectId"), ("controller_id", "ObjectId")],
+            &[("object_id", "ObjectId"), ("target_id", "ObjectId")],
         ),
-        def("Spawn", &[("spawn_id", "ObjectId"), ("body", "BodyPart[]")]),
+        def(
+            "Spawn",
+            &[
+                ("object_id", "ObjectId"),
+                ("spawn_id", "ObjectId"),
+                ("body_parts", "BodyPart[]"),
+            ],
+        ),
         def("Recycle", &[("object_id", "ObjectId")]),
         def(
             "Build",
@@ -191,6 +198,14 @@ fn core_commands() -> Vec<CommandDef> {
                 ("y", "i32"),
                 ("structure", "StructureType"),
             ],
+        ),
+        def(
+            "Repair",
+            &[("object_id", "ObjectId"), ("target_id", "ObjectId")],
+        ),
+        def(
+            "UpgradeController",
+            &[("object_id", "ObjectId"), ("target_id", "ObjectId")],
         ),
         def(
             "TransferToGlobal",

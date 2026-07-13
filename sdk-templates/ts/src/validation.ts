@@ -29,7 +29,8 @@ const actionFields: Record<string, readonly string[]> = {
   Attack: ["type", "object_id", "target_id"],
   RangedAttack: ["type", "object_id", "target_id"],
   Heal: ["type", "object_id", "target_id"],
-  Spawn: ["type", "spawn_id", "body"],
+  ClaimController: ["type", "object_id", "target_id"],
+  Spawn: ["type", "object_id", "spawn_id", "body_parts"],
   Recycle: ["type", "object_id", "spawn_id"],
   Hack: ["type", "object_id", "target_id"],
   Drain: ["type", "object_id", "target_id", "resource"],
@@ -153,12 +154,17 @@ export function validateAction(value: unknown, path = "$", issues: ValidationIss
       objectId(value.target_id, `${path}.target_id`, issues);
       break;
     case "Spawn":
+      objectId(value.object_id, `${path}.object_id`, issues);
       objectId(value.spawn_id, `${path}.spawn_id`, issues);
-      if (!Array.isArray(value.body)) issue(issues, `${path}.body`, "body must be an array", "ArrayRequired");
+      if (!Array.isArray(value.body_parts)) issue(issues, `${path}.body_parts`, "body_parts must be an array", "ArrayRequired");
       else {
-        if (value.body.length > MAX_BODY_PARTS) issue(issues, `${path}.body`, `body exceeds ${MAX_BODY_PARTS} parts`, "BodyTooLarge");
-        value.body.forEach((part, index) => enumValue(part, bodyParts, `${path}.body[${index}]`, issues));
+        if (value.body_parts.length > MAX_BODY_PARTS) issue(issues, `${path}.body_parts`, `body_parts exceeds ${MAX_BODY_PARTS} parts`, "BodyTooLarge");
+        value.body_parts.forEach((part, index) => enumValue(part, bodyParts, `${path}.body_parts[${index}]`, issues));
       }
+      break;
+    case "ClaimController":
+      objectId(value.object_id, `${path}.object_id`, issues);
+      objectId(value.target_id, `${path}.target_id`, issues);
       break;
     case "Recycle":
       objectId(value.object_id, `${path}.object_id`, issues);
