@@ -270,7 +270,7 @@ fn maybe_trigger_random_event(
     origin: Position,
 ) {
     let rule = config.rule(kind);
-    if rule.interval > 0 && tick % rule.interval != 0 {
+    if rule.interval > 0 && !tick.is_multiple_of(rule.interval) {
         return;
     }
     if !state.can_trigger(kind, tick, rule) {

@@ -40,15 +40,9 @@ pub struct OnboardingSwarmEvent {
     pub achievement: OnboardingAchievement,
 }
 
-#[derive(Resource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnboardingConfig {
     pub enabled: bool,
-}
-
-impl Default for OnboardingConfig {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 impl OnboardingConfig {

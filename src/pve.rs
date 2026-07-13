@@ -18,8 +18,9 @@ pub enum NpcType {
     Swarmling,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DifficultyZone {
+    #[default]
     Zone1,
     Zone2,
     Zone3,
@@ -93,12 +94,6 @@ pub struct PveBudgetRequest<'a> {
     pub zone_base_regeneration: u64,
     pub player_controller_level: u32,
     pub event_budget_pool: u64,
-}
-
-impl Default for DifficultyZone {
-    fn default() -> Self {
-        Self::Zone1
-    }
 }
 
 impl Default for ZoneDefinition {
@@ -318,10 +313,7 @@ pub fn zone_for_room(room: RoomId, config: &WorldPveConfig) -> DifficultyZone {
     zone_definition_for_room(room, config).zone
 }
 
-pub fn zone_definition_for_room<'a>(
-    room: RoomId,
-    config: &'a WorldPveConfig,
-) -> &'a ZoneDefinition {
+pub fn zone_definition_for_room(room: RoomId, config: &WorldPveConfig) -> &ZoneDefinition {
     let distance = room_distance_from_world_center(room, config);
     config
         .zones

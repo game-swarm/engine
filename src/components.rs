@@ -489,9 +489,7 @@ impl ResistanceRegistry {
     }
 
     pub fn add_damage_type(&mut self, damage_type: impl Into<String>) {
-        self.damage_types
-            .entry(damage_type.into())
-            .or_insert_with(ResistanceDamageTypeDef::default);
+        self.damage_types.entry(damage_type.into()).or_default();
     }
 
     pub fn set_resistance(&mut self, damage_type: &str, layer: &str, key: &str, multiplier: f64) {
@@ -957,7 +955,7 @@ impl StructureTypeRegistry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SpecialEffectDef {
     pub name: String,
@@ -966,19 +964,6 @@ pub struct SpecialEffectDef {
     pub target: String,
     pub duration: u32,
     pub resistance: Option<String>,
-}
-
-impl Default for SpecialEffectDef {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            description: String::new(),
-            handler: String::new(),
-            target: String::new(),
-            duration: 0,
-            resistance: None,
-        }
-    }
 }
 
 #[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1073,7 +1058,7 @@ impl Default for HackState {
     }
 }
 
-#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DrainState {
     /// Resource being drained
     pub resource: String,
@@ -1081,73 +1066,29 @@ pub struct DrainState {
     pub remaining_ticks: u32,
 }
 
-impl Default for DrainState {
-    fn default() -> Self {
-        Self {
-            resource: String::new(),
-            amount_per_tick: 0,
-            remaining_ticks: 0,
-        }
-    }
-}
-
-#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverloadState {
     pub fuel_drain_per_tick: u32,
     pub fuel_floor: u32,
     pub remaining_ticks: u32,
 }
 
-impl Default for OverloadState {
-    fn default() -> Self {
-        Self {
-            fuel_drain_per_tick: 0,
-            fuel_floor: 0,
-            remaining_ticks: 0,
-        }
-    }
-}
-
-#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DebilitateState {
     pub damage_type: String,
     pub remaining_ticks: u32,
 }
 
-impl Default for DebilitateState {
-    fn default() -> Self {
-        Self {
-            damage_type: String::new(),
-            remaining_ticks: 0,
-        }
-    }
-}
-
-#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisruptState {
     /// Body parts being disrupted
     pub body_parts: Vec<BodyPart>,
     pub remaining_ticks: u32,
 }
 
-impl Default for DisruptState {
-    fn default() -> Self {
-        Self {
-            body_parts: vec![],
-            remaining_ticks: 0,
-        }
-    }
-}
-
-#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FortifyState {
     pub remaining_ticks: u32,
-}
-
-impl Default for FortifyState {
-    fn default() -> Self {
-        Self { remaining_ticks: 0 }
-    }
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

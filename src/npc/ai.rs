@@ -156,11 +156,9 @@ pub fn npc_ai_system(
         }
 
         let nearest = nearest_drone(*position, &drone_positions);
-        let aggro_target = nearest
-            .filter(|(_, target_position, distance)| {
-                position.room == target_position.room && *distance <= behavior.aggro_range
-            })
-            .map(|(target, target_position, distance)| (target, target_position, distance));
+        let aggro_target = nearest.filter(|(_, target_position, distance)| {
+            position.room == target_position.room && *distance <= behavior.aggro_range
+        });
 
         let should_flee = behavior.idle_mode == NpcMode::Flee
             || (behavior.flee_below_hits > 0 && npc.hits <= behavior.flee_below_hits);
@@ -168,10 +166,10 @@ pub fn npc_ai_system(
         if should_flee {
             behavior.mode = NpcMode::Flee;
             behavior.target = aggro_target.map(|(target, _, _)| target.to_bits());
-            if let Some((_, threat_position, _)) = aggro_target {
-                if let Some(next) = flee_step(*position, threat_position, &terrains) {
-                    *position = next;
-                }
+            if let Some((_, threat_position, _)) = aggro_target
+                && let Some(next) = flee_step(*position, threat_position, &terrains)
+            {
+                *position = next;
             }
             continue;
         }
@@ -196,10 +194,10 @@ pub fn npc_ai_system(
                 }
             }
             NpcMode::Flee => {
-                if let Some((_, threat_position, _)) = nearest {
-                    if let Some(next) = flee_step(*position, threat_position, &terrains) {
-                        *position = next;
-                    }
+                if let Some((_, threat_position, _)) = nearest
+                    && let Some(next) = flee_step(*position, threat_position, &terrains)
+                {
+                    *position = next;
                 }
             }
             NpcMode::Attack => {}
@@ -243,28 +241,26 @@ pub fn npc_combat_system(
         combat.queue_typed_damage(target, npc.damage_type.clone(), damage);
 
         // G4: Queue special attack if NPC has one and cooldown permits
-        if let Some(special) = npc.special_attack {
-            if npc.special_cooldown_remaining == 0 {
-                special_attacks.intents.push(StatusActionIntent {
-                    kind: match special {
-                        NpcSpecialAttack::Hack => crate::systems::SpecialAttackKind::Hack,
-                        NpcSpecialAttack::Drain => crate::systems::SpecialAttackKind::Drain,
-                        NpcSpecialAttack::Overload => crate::systems::SpecialAttackKind::Overload,
-                        NpcSpecialAttack::Debilitate => {
-                            crate::systems::SpecialAttackKind::Debilitate
-                        }
-                        NpcSpecialAttack::Disrupt => crate::systems::SpecialAttackKind::Disrupt,
-                        NpcSpecialAttack::Fortify => crate::systems::SpecialAttackKind::Fortify,
-                    },
-                    source: npc_entity,
-                    target,
-                    owner: 0, // NPC owner = system
-                    amount: 1,
-                });
-                npc.special_cooldown_remaining = npc.special_cooldown;
-            } else {
-                npc.special_cooldown_remaining -= 1;
-            }
+        if let Some(special) = npc.special_attack
+            && npc.special_cooldown_remaining == 0
+        {
+            special_attacks.intents.push(StatusActionIntent {
+                kind: match special {
+                    NpcSpecialAttack::Hack => crate::systems::SpecialAttackKind::Hack,
+                    NpcSpecialAttack::Drain => crate::systems::SpecialAttackKind::Drain,
+                    NpcSpecialAttack::Overload => crate::systems::SpecialAttackKind::Overload,
+                    NpcSpecialAttack::Debilitate => crate::systems::SpecialAttackKind::Debilitate,
+                    NpcSpecialAttack::Disrupt => crate::systems::SpecialAttackKind::Disrupt,
+                    NpcSpecialAttack::Fortify => crate::systems::SpecialAttackKind::Fortify,
+                },
+                source: npc_entity,
+                target,
+                owner: 0, // NPC owner = system
+                amount: 1,
+            });
+            npc.special_cooldown_remaining = npc.special_cooldown;
+        } else if npc.special_attack.is_some() {
+            npc.special_cooldown_remaining -= 1;
         }
     }
 }

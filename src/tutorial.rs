@@ -172,8 +172,10 @@ pub fn tutorial_bot_system(
     config: Res<TutorialConfig>,
     mut state: ResMut<TutorialState>,
     mut queue: ResMut<PendingSpawnQueue>,
-    mut onboarding_events: MessageWriter<OnboardingEvent>,
-    mut step_events: MessageWriter<TutorialStepEvent>,
+    mut events: ParamSet<(
+        MessageWriter<OnboardingEvent>,
+        MessageWriter<TutorialStepEvent>,
+    )>,
     mut sources: Query<(Entity, &Position, &mut Source), With<TutorialSource>>,
     drones: Query<(Entity, &Position, &Owner), With<Drone>>,
 ) {
@@ -194,7 +196,7 @@ pub fn tutorial_bot_system(
                 },
             });
             state.mark_completed(TutorialStep::SpawnDrone, TutorialStep::Collect);
-            step_events.write(TutorialStepEvent {
+            events.p1().write(TutorialStepEvent {
                 step: TutorialStep::SpawnDrone,
                 tick: state.last_tick,
                 message: "教程 bot 已从预部署 WASM 模块创建第一架 drone。".to_string(),
@@ -216,8 +218,8 @@ pub fn tutorial_bot_system(
             state.drone_id = Some(drone_entity.to_bits());
             state.source_id = Some(source_entity.to_bits());
             state.mark_completed(TutorialStep::Collect, TutorialStep::BuildTower);
-            onboarding_events.write(OnboardingEvent::ResourceCollected);
-            step_events.write(TutorialStepEvent {
+            events.p0().write(OnboardingEvent::ResourceCollected);
+            events.p1().write(TutorialStepEvent {
                 step: TutorialStep::Collect,
                 tick: state.last_tick,
                 message: "教程 bot 已让 drone 采集附近 source。".to_string(),
@@ -238,8 +240,8 @@ pub fn tutorial_bot_system(
                 },
             ));
             state.mark_completed(TutorialStep::BuildTower, TutorialStep::Deploy);
-            onboarding_events.write(OnboardingEvent::StructureBuilt);
-            step_events.write(TutorialStepEvent {
+            events.p0().write(OnboardingEvent::StructureBuilt);
+            events.p1().write(TutorialStepEvent {
                 step: TutorialStep::BuildTower,
                 tick: state.last_tick,
                 message: "教程 bot 已在提示坐标建造 Tower。".to_string(),
@@ -247,7 +249,7 @@ pub fn tutorial_bot_system(
         }
         TutorialStep::Deploy => {
             state.mark_completed(TutorialStep::Deploy, TutorialStep::Deploy);
-            step_events.write(TutorialStepEvent {
+            events.p1().write(TutorialStepEvent {
                 step: TutorialStep::Deploy,
                 tick: state.last_tick,
                 message: "教程完成：预部署 WASM 模块已验证，玩家可部署到 World 或 Arena。"

@@ -29,12 +29,12 @@ impl NpcType {
         for npc_type in [Self::Creep, Self::Guardian, Self::Merchant] {
             if npc_type
                 .spawn_cycle()
-                .is_some_and(|cycle| tick > 0 && tick % cycle == 0)
+                .is_some_and(|cycle| tick > 0 && tick.is_multiple_of(cycle))
             {
                 types.push(npc_type);
             }
         }
-        if tick > 0 && tick % 1_000 == 0 {
+        if tick > 0 && tick.is_multiple_of(1_000) {
             types.push(Self::Swarmling);
         }
         types
@@ -90,8 +90,9 @@ impl NpcDamage {
     }
 }
 
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NpcBehavior {
+    #[default]
     Patrol,
     Guard,
     TradeRoute,
@@ -106,12 +107,6 @@ impl NpcBehavior {
             NpcType::Merchant => Self::TradeRoute,
             NpcType::Swarmling => Self::GroupAttack,
         }
-    }
-}
-
-impl Default for NpcBehavior {
-    fn default() -> Self {
-        Self::Patrol
     }
 }
 
