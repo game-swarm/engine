@@ -1,6 +1,7 @@
 import { MAX_BODY_PARTS, MAX_DRONES_PER_PLAYER } from "./commands.js";
 import { addCost } from "./commands.js";
-import type { BodyPart, ResourceCost, ValidationIssue, WorldConfig, WorldMode } from "./commands.js";
+import type { BodyPart, ResourceCost } from "./commands.js";
+import type { ValidationIssue, WorldConfig, WorldMode } from "./types_template.js";
 
 export function createDefaultWorldConfig(mode: WorldMode = "persistent"): WorldConfig {
   const arena = mode === "arena";

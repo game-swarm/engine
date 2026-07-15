@@ -4,14 +4,14 @@
 
 import type { Action, BodyPart, CommandIntent, Direction, ResourceAmount, ResourceCost, ResourceName, StructureType } from "./commands.js";
 
-export type UInt32 = number;
-export type UInt64 = number | bigint;
-export type PlayerId = UInt32;
-export type RoomId = UInt32;
-export type ObjectId = UInt64;
-export type Tick = UInt64;
+type UInt32 = number;
+type UInt64 = number | bigint;
+type PlayerId = UInt32;
+type RoomId = UInt32;
+type ObjectId = UInt64;
+type Tick = UInt64;
 
-export interface Position {
+interface Position {
   x: number;
   y: number;
   room: RoomId;

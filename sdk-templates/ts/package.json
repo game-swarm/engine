@@ -22,7 +22,7 @@
     "example:starter-bot:build": "npm run build -w examples/starter-bot",
     "example:starter-bot:typecheck": "npm run typecheck -w examples/starter-bot",
     "example:starter-bot:wasm": "npm run build:wasm -w examples/starter-bot",
-    "test": "vitest run",
+    "test": "npm run build && vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

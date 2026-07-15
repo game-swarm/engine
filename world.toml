@@ -121,11 +121,11 @@ required_body_parts = ["Tough"]
 
 [[special_effects]]
 name = "leech"
-description = "Corrosive life steal attack: 15 damage, heal self for 50% dealt."
+description = "Kinetic life steal attack: 15 damage, heal self for 50% dealt."
 handler = "leech"
 target = "enemy_any"
 duration = 0
-resistance = "Corrosive"
+resistance = "Kinetic"
 required_body_parts = []
 
 [[special_effects]]
@@ -161,76 +161,3 @@ target = "enemy_drone"
 duration = 0
 resistance = "Psionic"
 required_body_parts = []
-
-[[custom_actions]]
-name = "Hack"
-description = "Claim-based drone takeover: slow/root/neutralize over five ticks."
-damage_type = "Psionic"
-range = 1
-special_effect = "hack"
-cooldown = 200
-cost = { Energy = 1000 }
-
-[[custom_actions]]
-name = "Drain"
-description = "Carry+Work resource drain from enemy storage or drones."
-damage_type = "Energy"
-range = 1
-special_effect = "drain"
-cooldown = 50
-cost = { Energy = 200 }
-
-[[custom_actions]]
-name = "Overload"
-description = "RangedAttack quota overload: target fuel -500k, floor 20%."
-damage_type = "EMP"
-range = 3
-special_effect = "overload"
-cooldown = 200
-cost = { Energy = 300 }
-
-[[custom_actions]]
-name = "Debilitate"
-description = "Work corrosive debuff: selected damage type resistance x2 for 50 ticks."
-damage_type = "Corrosive"
-range = 1
-special_effect = "debilitate"
-special_param = 2.0
-cooldown = 150
-cost = { Energy = 200 }
-
-[[custom_actions]]
-name = "Disrupt"
-description = "Interrupt target current continuous action without HP damage."
-damage_type = "Sonic"
-range = 1
-special_effect = "disrupt"
-cooldown = 50
-cost = { Energy = 100 }
-
-[[custom_actions]]
-name = "Fortify"
-description = "Shield and cleanse self or an ally."
-range = 1
-special_effect = "fortify"
-special_param = 0.5
-cooldown = 300
-cost = { Energy = 400 }
-
-[[custom_actions]]
-name = "Leech"
-description = "Corrosive life steal attack: 15 damage, heal self for 50% dealt."
-damage_type = "Corrosive"
-base_damage = 15
-range = 1
-special_effect = "leech"
-special_param = 0.5
-cost = { Energy = 300 }
-
-[[custom_actions]]
-name = "Fabricate"
-description = "Convert enemy drone into an owned structure."
-range = 1
-special_effect = "fabricate"
-cooldown = 500
-cost = { Energy = 2000, Mineral = 500 }

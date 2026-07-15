@@ -218,7 +218,7 @@ fn core_commands() -> Vec<CommandDef> {
         def(
             "AlliedTransfer",
             &[
-                ("target_player", "u64"),
+                ("target_player", "PlayerId"),
                 ("resource", "ResourceName"),
                 ("amount", "ResourceAmount"),
             ],

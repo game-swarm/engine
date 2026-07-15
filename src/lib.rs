@@ -36,12 +36,12 @@ pub use components::*;
 pub use economy::*;
 pub use hot_cache::*;
 pub use mcp::{
-    DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError, McpServer,
-    StoredModule, TournamentLockedModule, TournamentPrecommitParams, TournamentPrecommitResult,
-    TournamentStatusResult, VisibleController, VisibleDrone, VisibleEntity, VisiblePosition,
-    VisibleResource, VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot,
-    WorldRuleMod, WorldRules, swarm_get_snapshot, swarm_get_world_rules,
-    visible_entities_for_player,
+    DeployParams, DeployResult, JsonRpcRequest, JsonRpcResponse, McpContext, McpError,
+    McpPrincipal, McpPrincipalKind, McpServer, StoredModule, TournamentLockedModule,
+    TournamentPrecommitParams, TournamentPrecommitResult, TournamentStatusResult,
+    VisibleController, VisibleDrone, VisibleEntity, VisiblePosition, VisibleResource,
+    VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot, WorldRuleMod, WorldRules,
+    swarm_get_snapshot, swarm_get_world_rules, visible_entities_for_player,
 };
 pub use npc::components::{NpcBehavior, NpcDamage, NpcDrop, NpcHp, NpcZone};
 pub use npc::events::*;
@@ -775,6 +775,20 @@ mod tests {
         ]);
         assert_eq!(claim_controller.fields, expected_claim_controller_fields);
 
+        let allied_transfer = idl
+            .core
+            .commands
+            .iter()
+            .find(|command| command.name == "AlliedTransfer")
+            .expect("AlliedTransfer command must be present in extracted IDL");
+        assert_eq!(
+            allied_transfer
+                .fields
+                .get("target_player")
+                .map(String::as_str),
+            Some("PlayerId")
+        );
+
         let canonical_spawn = serde_json::to_value(CommandAction::Spawn {
             object_id: 1,
             spawn_id: 2,
@@ -801,6 +815,10 @@ mod tests {
         assert!(ts.contains("spawn: (object_id: ObjectId, spawn_id: ObjectId, body_parts: BodyPart[]) => ({ type: \"Spawn\", object_id, spawn_id, body_parts }) as const"));
         assert!(ts.contains("export interface ClaimControllerAction {\n  type: \"ClaimController\";\n  object_id: ObjectId;\n  target_id: ObjectId;\n}"));
         assert!(ts.contains("claimController: (object_id: ObjectId, target_id: ObjectId) => ({ type: \"ClaimController\", object_id, target_id }) as const"));
+        assert!(ts.contains("target_player: PlayerId;"));
+        let rust = crate::sdk_gen::generate_rust(&idl);
+        assert!(rust.contains("#[serde(tag = \"type\", deny_unknown_fields)]"));
+        assert!(rust.contains("target_player: u32"));
         assert_eq!(idl.core.enums.rejection_reason.len(), 37);
         assert_eq!(
             idl.core.enums.rejection_reason,
@@ -834,7 +852,7 @@ mod tests {
             (CommandSource::Wasm, true, true),
             (CommandSource::McpDeploy, false, false),
             (CommandSource::McpQuery, false, false),
-            (CommandSource::Admin, true, true),
+            (CommandSource::Admin, false, false),
             (CommandSource::Replay, false, false),
             (CommandSource::TestHarness, true, true),
             (CommandSource::Tutorial, true, true),
@@ -1015,6 +1033,7 @@ mod tests {
     fn tutorial_onboarding_records_successful_gameplay_events() {
         let mut world = create_world_with_mode(WorldMode::Tutorial);
         let drone = world.spawn_drone(1, 24, 25, vec![BodyPart::Work, BodyPart::Carry]);
+        let builder = world.spawn_drone(1, 24, 24, vec![BodyPart::Work]);
         let source_id = first_source_id(&mut world);
 
         submit(
@@ -1033,9 +1052,9 @@ mod tests {
             1,
             2,
             CommandAction::Build {
-                object_id: object_id(drone),
+                object_id: object_id(builder),
                 x: 23,
-                y: 25,
+                y: 24,
                 structure: StructureType::Extension,
             },
         )
@@ -1060,6 +1079,13 @@ mod tests {
     #[test]
     fn tutorial_onboarding_records_insufficient_resource_rejection() {
         let mut world = create_world_with_mode(WorldMode::Tutorial);
+        let actor = world.spawn_drone(1, 9, 10, vec![BodyPart::Move]);
+        world.run_tick();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<bevy::prelude::Messages<OnboardingSwarmEvent>>()
+            .clear();
         let spawn = spawn_structure(&mut world, Some(1), 10, 10, 0, 300, 0);
 
         assert_eq!(
@@ -1068,7 +1094,7 @@ mod tests {
                 1,
                 1,
                 CommandAction::Spawn {
-                    object_id: object_id(spawn),
+                    object_id: object_id(actor),
                     spawn_id: object_id(spawn),
                     body_parts: vec![BodyPart::Move],
                 },
@@ -1157,12 +1183,7 @@ mod tests {
             player_id: 7,
             tick: 9,
             source: CommandSource::Wasm,
-            auth: CommandAuth {
-                source: CommandSource::Wasm,
-                player_id: 7,
-                tick_submitted: 9,
-                tick_target: 9,
-            },
+            auth: CommandAuth::server_injected(CommandSource::Wasm, 7, 9, 9),
             sequence: 1,
             action: CommandAction::Harvest {
                 object_id: 1,
@@ -2215,6 +2236,8 @@ mod tests {
     #[test]
     fn spawn_drone_rejects_spawn_constraints_then_queues_spawn() {
         let mut world = create_world();
+        let actor = world.spawn_drone(1, 8, 10, vec![BodyPart::Move]);
+        let other_actor = world.spawn_drone(2, 8, 11, vec![BodyPart::Move]);
         let spawn = spawn_structure(&mut world, Some(1), 10, 10, 300, 300, 1);
 
         assert_eq!(
@@ -2223,7 +2246,7 @@ mod tests {
                 1,
                 1,
                 CommandAction::Spawn {
-                    object_id: object_id(spawn),
+                    object_id: object_id(actor),
                     spawn_id: object_id(spawn),
                     body_parts: vec![BodyPart::Move]
                 }
@@ -2244,7 +2267,7 @@ mod tests {
                 2,
                 2,
                 CommandAction::Spawn {
-                    object_id: object_id(spawn),
+                    object_id: object_id(other_actor),
                     spawn_id: object_id(spawn),
                     body_parts: vec![BodyPart::Move]
                 }
@@ -2258,7 +2281,7 @@ mod tests {
                 1,
                 3,
                 CommandAction::Spawn {
-                    object_id: object_id(spawn),
+                    object_id: object_id(actor),
                     spawn_id: object_id(spawn),
                     body_parts: vec![BodyPart::Tough; 51]
                 }
@@ -2273,7 +2296,7 @@ mod tests {
                 1,
                 4,
                 CommandAction::Spawn {
-                    object_id: object_id(spawn),
+                    object_id: object_id(actor),
                     spawn_id: object_id(spawn),
                     body_parts: vec![BodyPart::Move]
                 }
@@ -2288,7 +2311,7 @@ mod tests {
                 1,
                 5,
                 CommandAction::Spawn {
-                    object_id: object_id(spawn),
+                    object_id: object_id(actor),
                     spawn_id: object_id(spawn),
                     body_parts: vec![BodyPart::Move, BodyPart::Carry]
                 }
@@ -2563,12 +2586,12 @@ mod tests {
             player_id: 1,
             tick: 2,
             source: crate::command::CommandSource::TestHarness,
-            auth: crate::command::CommandAuth {
-                source: crate::command::CommandSource::TestHarness,
-                player_id: 1,
-                tick_submitted: 2,
-                tick_target: 2,
-            },
+            auth: crate::command::CommandAuth::server_injected(
+                crate::command::CommandSource::TestHarness,
+                1,
+                2,
+                2,
+            ),
             sequence: 0,
             action: CommandAction::AlliedTransfer {
                 target_player: 2,
@@ -2612,12 +2635,12 @@ mod tests {
             player_id: 1,
             tick: 2,
             source: crate::command::CommandSource::TestHarness,
-            auth: crate::command::CommandAuth {
-                source: crate::command::CommandSource::TestHarness,
-                player_id: 1,
-                tick_submitted: 2,
-                tick_target: 2,
-            },
+            auth: crate::command::CommandAuth::server_injected(
+                crate::command::CommandSource::TestHarness,
+                1,
+                2,
+                2,
+            ),
             sequence: 0,
             action: CommandAction::AlliedTransfer {
                 target_player: 1,
@@ -2647,12 +2670,12 @@ mod tests {
             player_id: 1,
             tick: 2,
             source: crate::command::CommandSource::TestHarness,
-            auth: crate::command::CommandAuth {
-                source: crate::command::CommandSource::TestHarness,
-                player_id: 1,
-                tick_submitted: 2,
-                tick_target: 2,
-            },
+            auth: crate::command::CommandAuth::server_injected(
+                crate::command::CommandSource::TestHarness,
+                1,
+                2,
+                2,
+            ),
             sequence: 0,
             action: CommandAction::AlliedTransfer {
                 target_player: 2,
@@ -2683,12 +2706,12 @@ mod tests {
                 player_id: 1,
                 tick: 2,
                 source: crate::command::CommandSource::TestHarness,
-                auth: crate::command::CommandAuth {
-                    source: crate::command::CommandSource::TestHarness,
-                    player_id: 1,
-                    tick_submitted: 2,
-                    tick_target: 2,
-                },
+                auth: crate::command::CommandAuth::server_injected(
+                    crate::command::CommandSource::TestHarness,
+                    1,
+                    2,
+                    2,
+                ),
                 sequence: 0,
                 action: CommandAction::AlliedTransfer {
                     target_player: 2,
@@ -2740,12 +2763,12 @@ mod tests {
                     player_id: 1,
                     tick: 2,
                     source: crate::command::CommandSource::TestHarness,
-                    auth: crate::command::CommandAuth {
-                        source: crate::command::CommandSource::TestHarness,
-                        player_id: 1,
-                        tick_submitted: 2,
-                        tick_target: 2,
-                    },
+                    auth: crate::command::CommandAuth::server_injected(
+                        crate::command::CommandSource::TestHarness,
+                        1,
+                        2,
+                        2,
+                    ),
                     sequence: 0,
                     action: CommandAction::AlliedTransfer {
                         target_player: 2,
@@ -2761,12 +2784,12 @@ mod tests {
             player_id: 1,
             tick: 3,
             source: crate::command::CommandSource::TestHarness,
-            auth: crate::command::CommandAuth {
-                source: crate::command::CommandSource::TestHarness,
-                player_id: 1,
-                tick_submitted: 3,
-                tick_target: 3,
-            },
+            auth: crate::command::CommandAuth::server_injected(
+                crate::command::CommandSource::TestHarness,
+                1,
+                3,
+                3,
+            ),
             sequence: 0,
             action: CommandAction::AlliedTransfer {
                 target_player: 2,

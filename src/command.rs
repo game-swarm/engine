@@ -1,11 +1,13 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
+use serde::de::DeserializeOwned;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::components::*;
 use crate::onboarding::{OnboardingEvent, send_onboarding_event};
+use crate::resource_ledger::{ResourceLedger, ResourceOperation};
 use crate::resources::{
     ALLIED_DAILY_CAP, ALLIED_TRANSFER_COOLDOWN, ALLIED_TRANSFER_DELAY, ALLIED_TRANSFER_FEE_BP,
     AlliedTransferCooldowns, AlliedTransferDailyUsage, CurrentTick, GlobalStorageConfig,
@@ -32,6 +34,7 @@ pub const MAX_NEXT_TICK_FUEL_BUDGET: u64 = MAX_FUEL + MAX_REFUND_PER_TICK;
 pub const MAX_RANGED_ATTACK_RANGE: u32 = 3;
 const ENERGY_RESOURCE: &str = "Energy";
 const OVERLOAD_FUEL_FLOOR: u64 = MAX_FUEL / 5;
+const ADMIN_SCOPE: &str = "swarm:admin";
 
 #[derive(Resource, Debug, Clone, Default)]
 pub struct CustomActionCooldowns(pub(crate) IndexMap<(ObjectId, String), Tick>);
@@ -166,163 +169,220 @@ pub const SPECIAL_COMMAND_ACTIONS: &[&str] = &[
     "Fabricate",
 ];
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CommandActionWire {
-    #[serde(rename = "type")]
-    command_type: String,
-    #[serde(rename = "action_type", alias = "action_name")]
-    action_type: Option<String>,
-    object_id: Option<ObjectId>,
-    target_id: Option<ObjectId>,
-    controller_id: Option<ObjectId>,
-    spawn_id: Option<ObjectId>,
-    direction: Option<Direction>,
-    body_parts: Option<Vec<BodyPart>>,
-    body: Option<Vec<BodyPart>>,
-    resource: Option<String>,
-    amount: Option<u32>,
-    range: Option<u32>,
-    x: Option<i32>,
-    y: Option<i32>,
-    structure: Option<StructureType>,
-    price_resource: Option<String>,
-    price_amount: Option<u32>,
-    order_id: Option<u64>,
-    target_player: Option<PlayerId>,
-    payload: Option<serde_json::Value>,
-}
-
 impl<'de> Deserialize<'de> for CommandAction {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let wire = CommandActionWire::deserialize(deserializer)?;
-        macro_rules! required {
-            ($value:expr, $field:literal) => {
-                $value.ok_or_else(|| serde::de::Error::missing_field($field))?
-            };
-        }
-        Ok(match wire.command_type.as_str() {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let fields = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("command action must be an object"))?;
+        let command_type: String = required_action_field(fields, "type")?;
+
+        Ok(match command_type.as_str() {
             "Move" => Self::Move {
-                object_id: required!(wire.object_id, "object_id"),
-                direction: required!(wire.direction, "direction"),
+                object_id: required_exact_action_field(fields, MOVE_ACTION_FIELDS, "object_id")?,
+                direction: required_action_field(fields, "direction")?,
             },
             "Harvest" => Self::Harvest {
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: required!(wire.target_id, "target_id"),
-                resource: wire.resource,
+                object_id: required_exact_action_field(fields, HARVEST_ACTION_FIELDS, "object_id")?,
+                target_id: required_action_field(fields, "target_id")?,
+                resource: optional_action_field(fields, "resource")?,
             },
             "Transfer" => Self::Transfer {
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: required!(wire.target_id, "target_id"),
-                resource: required!(wire.resource, "resource"),
-                amount: required!(wire.amount, "amount"),
+                object_id: required_exact_action_field(
+                    fields,
+                    TRANSFER_ACTION_FIELDS,
+                    "object_id",
+                )?,
+                target_id: required_action_field(fields, "target_id")?,
+                resource: required_action_field(fields, "resource")?,
+                amount: required_action_field(fields, "amount")?,
             },
             "Withdraw" => Self::Withdraw {
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: required!(wire.target_id, "target_id"),
-                resource: required!(wire.resource, "resource"),
-                amount: required!(wire.amount, "amount"),
+                object_id: required_exact_action_field(
+                    fields,
+                    TRANSFER_ACTION_FIELDS,
+                    "object_id",
+                )?,
+                target_id: required_action_field(fields, "target_id")?,
+                resource: required_action_field(fields, "resource")?,
+                amount: required_action_field(fields, "amount")?,
             },
             "Action" => {
-                let action_type = required!(wire.action_type.clone(), "action_type");
-                if CORE_COMMAND_ACTIONS.contains(&action_type.as_str()) {
-                    return Err(serde::de::Error::custom(format!(
-                        "Action wrapper action_type must not be a core command action: {action_type}"
-                    )));
-                }
-                Self::Action {
-                    action_type,
-                    object_id: required!(wire.object_id, "object_id"),
-                    target_id: wire.target_id,
-                    payload: command_action_payload(&wire),
-                }
+                return Err(serde::de::Error::custom(
+                    "wire type Action is internal; use the concrete registered action name",
+                ));
             }
             "ClaimController" => Self::ClaimController {
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: wire
-                    .target_id
-                    .or(wire.controller_id)
-                    .ok_or_else(|| serde::de::Error::missing_field("target_id"))?,
+                object_id: required_exact_action_field(
+                    fields,
+                    CLAIM_CONTROLLER_ACTION_FIELDS,
+                    "object_id",
+                )?,
+                target_id: required_action_field(fields, "target_id")?,
             },
-            "Spawn" => Self::Spawn {
-                object_id: required!(wire.object_id, "object_id"),
-                spawn_id: required!(wire.spawn_id, "spawn_id"),
-                body_parts: wire
-                    .body_parts
-                    .or(wire.body)
-                    .ok_or_else(|| serde::de::Error::missing_field("body_parts"))?,
-            },
+            "Spawn" => {
+                let body_parts: Vec<BodyPart> = required_action_field(fields, "body_parts")?;
+                if body_parts.is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "body_parts must contain at least one body part",
+                    ));
+                }
+                Self::Spawn {
+                    object_id: required_exact_action_field(
+                        fields,
+                        SPAWN_ACTION_FIELDS,
+                        "object_id",
+                    )?,
+                    spawn_id: required_action_field(fields, "spawn_id")?,
+                    body_parts,
+                }
+            }
             "Recycle" => Self::Recycle {
-                object_id: required!(wire.object_id, "object_id"),
+                object_id: required_exact_action_field(fields, RECYCLE_ACTION_FIELDS, "object_id")?,
             },
             "Build" => Self::Build {
-                object_id: required!(wire.object_id, "object_id"),
-                x: required!(wire.x, "x"),
-                y: required!(wire.y, "y"),
-                structure: required!(wire.structure, "structure"),
+                object_id: required_exact_action_field(fields, BUILD_ACTION_FIELDS, "object_id")?,
+                x: required_action_field(fields, "x")?,
+                y: required_action_field(fields, "y")?,
+                structure: required_action_field(fields, "structure")?,
             },
             "Repair" => Self::Repair {
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: required!(wire.target_id, "target_id"),
+                object_id: required_exact_action_field(fields, TARGET_ACTION_FIELDS, "object_id")?,
+                target_id: required_action_field(fields, "target_id")?,
             },
             "UpgradeController" => Self::UpgradeController {
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: wire
-                    .target_id
-                    .or(wire.controller_id)
-                    .ok_or_else(|| serde::de::Error::missing_field("target_id"))?,
+                object_id: required_exact_action_field(fields, TARGET_ACTION_FIELDS, "object_id")?,
+                target_id: required_action_field(fields, "target_id")?,
             },
             "TransferToGlobal" => Self::TransferToGlobal {
-                resource: required!(wire.resource, "resource"),
-                amount: required!(wire.amount, "amount"),
+                resource: required_exact_action_field(
+                    fields,
+                    GLOBAL_TRANSFER_ACTION_FIELDS,
+                    "resource",
+                )?,
+                amount: required_action_field(fields, "amount")?,
             },
             "TransferFromGlobal" => Self::TransferFromGlobal {
-                resource: required!(wire.resource, "resource"),
-                amount: required!(wire.amount, "amount"),
+                resource: required_exact_action_field(
+                    fields,
+                    GLOBAL_TRANSFER_ACTION_FIELDS,
+                    "resource",
+                )?,
+                amount: required_action_field(fields, "amount")?,
             },
             "AlliedTransfer" => Self::AlliedTransfer {
-                target_player: required!(wire.target_player, "target_player"),
-                resource: required!(wire.resource, "resource"),
-                amount: required!(wire.amount, "amount"),
+                target_player: required_exact_action_field(
+                    fields,
+                    ALLIED_TRANSFER_ACTION_FIELDS,
+                    "target_player",
+                )?,
+                resource: required_action_field(fields, "resource")?,
+                amount: required_action_field(fields, "amount")?,
             },
             action if SPECIAL_COMMAND_ACTIONS.contains(&action) => Self::Action {
                 action_type: action.to_string(),
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: Some(required!(wire.target_id, "target_id")),
-                payload: command_action_payload(&wire),
+                object_id: required_action_field(fields, "object_id")?,
+                target_id: Some(required_action_field(fields, "target_id")?),
+                payload: command_action_payload(fields)?,
             },
             custom => Self::Action {
                 action_type: custom.to_string(),
-                object_id: required!(wire.object_id, "object_id"),
-                target_id: wire.target_id,
-                payload: command_action_payload(&wire),
+                object_id: required_action_field(fields, "object_id")?,
+                target_id: optional_action_field(fields, "target_id")?,
+                payload: command_action_payload(fields)?,
             },
         })
     }
 }
 
-fn command_action_payload(wire: &CommandActionWire) -> serde_json::Value {
-    if let Some(payload) = &wire.payload {
-        return payload.clone();
+const MOVE_ACTION_FIELDS: &[&str] = &["type", "object_id", "direction"];
+const HARVEST_ACTION_FIELDS: &[&str] = &["type", "object_id", "target_id", "resource"];
+const TRANSFER_ACTION_FIELDS: &[&str] = &["type", "object_id", "target_id", "resource", "amount"];
+const CLAIM_CONTROLLER_ACTION_FIELDS: &[&str] = &["type", "object_id", "target_id"];
+const SPAWN_ACTION_FIELDS: &[&str] = &["type", "object_id", "spawn_id", "body_parts"];
+const RECYCLE_ACTION_FIELDS: &[&str] = &["type", "object_id"];
+const BUILD_ACTION_FIELDS: &[&str] = &["type", "object_id", "x", "y", "structure"];
+const TARGET_ACTION_FIELDS: &[&str] = &["type", "object_id", "target_id"];
+const GLOBAL_TRANSFER_ACTION_FIELDS: &[&str] = &["type", "resource", "amount"];
+const ALLIED_TRANSFER_ACTION_FIELDS: &[&str] = &["type", "target_player", "resource", "amount"];
+const CONCRETE_ACTION_RESERVED_FIELDS: &[&str] = &["type", "object_id", "target_id"];
+
+fn required_exact_action_field<T, E>(
+    fields: &serde_json::Map<String, serde_json::Value>,
+    allowed_fields: &'static [&'static str],
+    field: &'static str,
+) -> Result<T, E>
+where
+    T: DeserializeOwned,
+    E: serde::de::Error,
+{
+    ensure_exact_action_fields(fields, allowed_fields)?;
+    required_action_field(fields, field)
+}
+
+fn ensure_exact_action_fields<E>(
+    fields: &serde_json::Map<String, serde_json::Value>,
+    allowed_fields: &'static [&'static str],
+) -> Result<(), E>
+where
+    E: serde::de::Error,
+{
+    for key in fields.keys() {
+        if !allowed_fields.contains(&key.as_str()) {
+            return Err(E::unknown_field(key, allowed_fields));
+        }
     }
+    Ok(())
+}
+
+fn required_action_field<T, E>(
+    fields: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<T, E>
+where
+    T: DeserializeOwned,
+    E: serde::de::Error,
+{
+    let value = fields.get(field).ok_or_else(|| E::missing_field(field))?;
+    serde_json::from_value(value.clone()).map_err(E::custom)
+}
+
+fn optional_action_field<T, E>(
+    fields: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<Option<T>, E>
+where
+    T: DeserializeOwned,
+    E: serde::de::Error,
+{
+    fields
+        .get(field)
+        .map(|value| serde_json::from_value(value.clone()).map_err(E::custom))
+        .transpose()
+}
+
+fn command_action_payload<E>(
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, E>
+where
+    E: serde::de::Error,
+{
     let mut payload = serde_json::Map::new();
-    if let Some(resource) = &wire.resource {
-        payload.insert("resource".to_string(), serde_json::json!(resource));
+    for (key, value) in fields {
+        if CONCRETE_ACTION_RESERVED_FIELDS.contains(&key.as_str()) {
+            continue;
+        }
+        if matches!(key.as_str(), "payload" | "action_type" | "action_name") {
+            return Err(E::custom(format!(
+                "action payload must use flattened non-reserved fields; nested or reserved field {key} is not allowed"
+            )));
+        }
+        payload.insert(key.clone(), value.clone());
     }
-    if let Some(amount) = wire.amount {
-        payload.insert("amount".to_string(), serde_json::json!(amount));
-    }
-    if let Some(range) = wire.range {
-        payload.insert("range".to_string(), serde_json::json!(range));
-    }
-    if let Some(structure) = wire.structure {
-        payload.insert("structure".to_string(), serde_json::json!(structure));
-    }
-    serde_json::Value::Object(payload)
+    Ok(serde_json::Value::Object(payload))
 }
 
 impl Serialize for CommandAction {
@@ -461,10 +521,20 @@ where
 {
     if let Some(payload) = payload.as_object() {
         for (key, value) in payload {
+            if matches!(
+                key.as_str(),
+                "type" | "object_id" | "target_id" | "payload" | "action_type" | "action_name"
+            ) {
+                return Err(serde::ser::Error::custom(format!(
+                    "action payload must not redefine reserved wire field {key}"
+                )));
+            }
             map.serialize_entry(key, value)?;
         }
     } else if !payload.is_null() {
-        map.serialize_entry("payload", payload)?;
+        return Err(serde::ser::Error::custom(
+            "action payload must be an object with flattened wire fields",
+        ));
     }
     Ok(())
 }
@@ -510,11 +580,177 @@ pub struct CommandIntent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AdminCredentialProvenance {
+    credential_id: String,
+    credential_fingerprint: String,
+    auth_mode: String,
+    admin_identity: String,
+    canonical_scopes: Vec<String>,
+}
+
+impl AdminCredentialProvenance {
+    pub fn new<I, S>(
+        credential_id: impl Into<String>,
+        credential_fingerprint: impl Into<String>,
+        auth_mode: impl Into<String>,
+        admin_identity: impl Into<String>,
+        scopes: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self {
+            credential_id: credential_id.into(),
+            credential_fingerprint: credential_fingerprint.into(),
+            auth_mode: auth_mode.into(),
+            admin_identity: admin_identity.into(),
+            canonical_scopes: canonical_scope_list(scopes),
+        }
+    }
+
+    pub fn credential_id(&self) -> &str {
+        &self.credential_id
+    }
+
+    pub fn credential_fingerprint(&self) -> &str {
+        &self.credential_fingerprint
+    }
+
+    pub fn auth_mode(&self) -> &str {
+        &self.auth_mode
+    }
+
+    pub fn admin_identity(&self) -> &str {
+        &self.admin_identity
+    }
+
+    pub fn canonical_scopes(&self) -> &[String] {
+        &self.canonical_scopes
+    }
+
+    pub fn has_admin_scope(&self) -> bool {
+        self.canonical_scopes
+            .iter()
+            .any(|scope| scope == ADMIN_SCOPE)
+    }
+
+    fn is_valid_for_admin(&self) -> bool {
+        !self.credential_id.trim().is_empty()
+            && !self.credential_fingerprint.trim().is_empty()
+            && self.auth_mode == "admin_cert"
+            && !self.admin_identity.trim().is_empty()
+            && self.has_admin_scope()
+    }
+}
+
+fn canonical_scope_list<I, S>(scopes: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    scopes
+        .into_iter()
+        .flat_map(|scope| {
+            scope
+                .as_ref()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|scope| !scope.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandAuth {
     pub source: CommandSource,
     pub player_id: PlayerId,
     pub tick_submitted: Tick,
     pub tick_target: Tick,
+    admin_credential_provenance: Option<AdminCredentialProvenance>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandAuthWire {
+    source: CommandSource,
+    player_id: PlayerId,
+    tick_submitted: Tick,
+    tick_target: Tick,
+    #[serde(default)]
+    admin_credential_provenance: Option<AdminCredentialProvenance>,
+}
+
+impl Serialize for CommandAuth {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let provenance = if self.source == CommandSource::Admin {
+            let provenance = self.admin_credential_provenance.as_ref().ok_or_else(|| {
+                serde::ser::Error::custom(
+                    "Admin CommandAuth credentials require persisted provenance",
+                )
+            })?;
+            if !provenance.is_valid_for_admin() {
+                return Err(serde::ser::Error::custom(
+                    "Admin CommandAuth provenance must include valid admin credential metadata",
+                ));
+            }
+            Some(provenance)
+        } else {
+            None
+        };
+
+        let mut map = serializer.serialize_map(Some(if provenance.is_some() { 5 } else { 4 }))?;
+        map.serialize_entry("source", &self.source)?;
+        map.serialize_entry("player_id", &self.player_id)?;
+        map.serialize_entry("tick_submitted", &self.tick_submitted)?;
+        map.serialize_entry("tick_target", &self.tick_target)?;
+        if let Some(provenance) = provenance {
+            map.serialize_entry("admin_credential_provenance", &provenance)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CommandAuth {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = CommandAuthWire::deserialize(deserializer)?;
+        let auth = Self {
+            source: wire.source,
+            player_id: wire.player_id,
+            tick_submitted: wire.tick_submitted,
+            tick_target: wire.tick_target,
+            admin_credential_provenance: wire.admin_credential_provenance,
+        };
+        match (auth.source, auth.admin_credential_provenance.as_ref()) {
+            (CommandSource::Admin, Some(provenance)) if provenance.is_valid_for_admin() => {}
+            (CommandSource::Admin, Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "Admin CommandAuth provenance must include admin_cert metadata and swarm:admin scope",
+                ));
+            }
+            (CommandSource::Admin, None) => {
+                return Err(serde::de::Error::custom(
+                    "Admin CommandAuth credentials require persisted provenance",
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "admin_credential_provenance is only valid for Admin CommandAuth",
+                ));
+            }
+            (_, None) => {}
+        }
+        Ok(auth)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -529,8 +765,25 @@ pub struct RawCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedCommand {
-    pub raw: RawCommand,
+pub(crate) struct ValidatedCommand {
+    raw: RawCommand,
+    effective_player_id: PlayerId,
+}
+
+mod world_mutate_sealed {
+    pub trait Sealed {}
+    impl Sealed for super::RawCommand {}
+}
+
+pub(crate) trait WorldMutate: world_mutate_sealed::Sealed {
+    fn validate_and_apply(self, world: &mut World) -> CommandResult;
+}
+
+impl WorldMutate for RawCommand {
+    fn validate_and_apply(self, world: &mut World) -> CommandResult {
+        let validated = validate_command(world, self)?;
+        apply_command(world, validated)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -717,12 +970,15 @@ pub struct RefundAccumulator {
     seen: HashSet<(PlayerId, CommandSource, RejectionReason)>,
 }
 
-pub fn source_gate(
+pub(crate) fn source_gate(
     player_id: PlayerId,
     tick: Tick,
     source: CommandSource,
     intent: CommandIntent,
 ) -> Result<RawCommand, RejectionReason> {
+    if source == CommandSource::Admin {
+        return Err(RejectionReason::AuthContextInvalid);
+    }
     if !source_allows_action(source, &intent.action) {
         return Err(RejectionReason::SourceNotAllowed);
     }
@@ -731,18 +987,33 @@ pub fn source_gate(
         player_id,
         tick,
         source,
-        auth: CommandAuth {
-            source,
-            player_id,
-            tick_submitted: tick,
-            tick_target: tick,
-        },
+        auth: CommandAuth::server_injected(source, player_id, tick, tick),
         sequence: intent.sequence,
         action: intent.action,
     })
 }
 
-pub fn collect_command_intents(
+#[allow(dead_code)]
+pub(crate) fn admin_source_gate(
+    player_id: PlayerId,
+    tick: Tick,
+    intent: CommandIntent,
+    provenance: AdminCredentialProvenance,
+) -> Result<RawCommand, RejectionReason> {
+    if !source_allows_action(CommandSource::Admin, &intent.action) {
+        return Err(RejectionReason::SourceNotAllowed);
+    }
+    Ok(RawCommand {
+        player_id,
+        tick,
+        source: CommandSource::Admin,
+        auth: CommandAuth::server_injected_admin(player_id, tick, tick, provenance)?,
+        sequence: intent.sequence,
+        action: intent.action,
+    })
+}
+
+pub(crate) fn collect_command_intents(
     player_id: PlayerId,
     tick: Tick,
     source: CommandSource,
@@ -762,15 +1033,121 @@ pub fn collect_command_intents(
 }
 
 pub fn sort_raw_commands(commands: &mut [RawCommand]) {
+    sort_raw_commands_with_seed(commands, 0);
+}
+
+pub fn sort_raw_commands_with_seed(commands: &mut [RawCommand], world_seed: u64) {
+    let active_players = players_from_commands(commands);
+    sort_raw_commands_for_active_players(commands, world_seed, &active_players);
+}
+
+pub fn sort_raw_commands_for_active_players(
+    commands: &mut [RawCommand],
+    world_seed: u64,
+    active_players: &[PlayerId],
+) {
+    let shuffle_indices = seeded_shuffle_indices(commands, world_seed, active_players);
     commands.sort_by_key(|command| {
+        let priority_class = command_priority_class(command.source);
         (
-            command_priority_class(command.source),
-            command.player_id,
+            priority_class,
+            shuffle_indices
+                .get(&(priority_class, command.tick, command.player_id))
+                .copied()
+                .unwrap_or(usize::MAX),
             command_source_rank(command.source),
             command.sequence,
             command_hash(command),
         )
     });
+}
+
+fn players_from_commands(commands: &[RawCommand]) -> Vec<PlayerId> {
+    let mut players = commands
+        .iter()
+        .map(|command| command.player_id)
+        .collect::<Vec<_>>();
+    players.sort_unstable();
+    players.dedup();
+    players
+}
+
+fn seeded_shuffle_indices(
+    commands: &[RawCommand],
+    world_seed: u64,
+    active_players: &[PlayerId],
+) -> IndexMap<(u8, Tick, PlayerId), usize> {
+    let mut buckets = Vec::<(u8, Tick)>::new();
+    for command in commands {
+        let bucket = (command_priority_class(command.source), command.tick);
+        if !buckets.contains(&bucket) {
+            buckets.push(bucket);
+        }
+    }
+
+    let sorted_active_players = sorted_unique_players(active_players);
+    let mut indices = IndexMap::new();
+    for (priority_class, tick) in buckets {
+        let mut players = sorted_active_players.clone();
+        if players.is_empty() {
+            players = players_from_bucket(commands, priority_class, tick);
+        }
+        seeded_shuffle_players(&mut players, world_seed, tick);
+        for (index, player_id) in players.into_iter().enumerate() {
+            indices.insert((priority_class, tick, player_id), index);
+        }
+    }
+
+    indices
+}
+
+fn sorted_unique_players(players: &[PlayerId]) -> Vec<PlayerId> {
+    let mut players = players.to_vec();
+    players.sort_unstable();
+    players.dedup();
+    players
+}
+
+fn players_from_bucket(commands: &[RawCommand], priority_class: u8, tick: Tick) -> Vec<PlayerId> {
+    let mut players = commands
+        .iter()
+        .filter(|command| {
+            command_priority_class(command.source) == priority_class && command.tick == tick
+        })
+        .map(|command| command.player_id)
+        .collect::<Vec<_>>();
+    players.sort_unstable();
+    players.dedup();
+    players
+}
+
+fn seeded_shuffle_players(players: &mut [PlayerId], world_seed: u64, tick: Tick) {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"shuffle");
+    hasher.update(&world_seed.to_le_bytes());
+    hasher.update(&tick.to_le_bytes());
+    let mut reader = hasher.finalize_xof();
+
+    for i in 0..players.len() {
+        let remaining = players.len() - i;
+        let offset = loop {
+            let mut bytes = [0_u8; 8];
+            reader.fill(&mut bytes);
+            if let Some(offset) = unbiased_shuffle_offset(u64::from_le_bytes(bytes), remaining) {
+                break offset;
+            }
+        };
+        players.swap(i, i + offset);
+    }
+}
+
+fn unbiased_shuffle_offset(sample: u64, remaining: usize) -> Option<usize> {
+    let bound = u64::try_from(remaining).ok()?;
+    if bound == 0 {
+        return None;
+    }
+    let unbiased_limit = u64::MAX - (u64::MAX % bound);
+    (sample < unbiased_limit).then_some((sample % bound) as usize)
 }
 
 fn command_priority_class(source: CommandSource) -> u8 {
@@ -845,7 +1222,48 @@ pub fn object_id(entity: Entity) -> ObjectId {
     entity.to_bits()
 }
 
-pub fn validate_command(
+fn effective_command_player_id(world: &World, raw: &RawCommand) -> PlayerId {
+    if raw.source != CommandSource::Admin {
+        return raw.player_id;
+    }
+    let actor_id = match &raw.action {
+        CommandAction::Move { object_id, .. }
+        | CommandAction::Harvest { object_id, .. }
+        | CommandAction::Transfer { object_id, .. }
+        | CommandAction::Withdraw { object_id, .. }
+        | CommandAction::Action { object_id, .. }
+        | CommandAction::ClaimController { object_id, .. }
+        | CommandAction::Recycle { object_id }
+        | CommandAction::Build { object_id, .. }
+        | CommandAction::Repair { object_id, .. }
+        | CommandAction::UpgradeController { object_id, .. } => Some(*object_id),
+        CommandAction::Spawn { object_id, .. } => Some(*object_id),
+        CommandAction::TransferToGlobal { .. }
+        | CommandAction::TransferFromGlobal { .. }
+        | CommandAction::AlliedTransfer { .. } => None,
+    };
+    actor_id
+        .and_then(|object_id| entity(object_id).ok())
+        .and_then(|entity| world.get_entity(entity).ok())
+        .and_then(|entity| {
+            entity
+                .get::<Drone>()
+                .map(|drone| drone.owner)
+                .or_else(|| {
+                    entity
+                        .get::<Structure>()
+                        .and_then(|structure| structure.owner)
+                })
+                .or_else(|| {
+                    entity
+                        .get::<Controller>()
+                        .and_then(|controller| controller.owner)
+                })
+        })
+        .unwrap_or(raw.player_id)
+}
+
+pub(crate) fn validate_command(
     world: &mut World,
     raw: RawCommand,
 ) -> Result<ValidatedCommand, RejectionReason> {
@@ -860,17 +1278,18 @@ pub fn validate_command(
     {
         return Err(RejectionReason::SourceNotAllowed);
     }
+    let effective_player_id = effective_command_player_id(world, &raw);
 
     let result = match &raw.action {
         CommandAction::Move {
             object_id,
             direction,
-        } => validate_move(world, raw.player_id, raw.tick, *object_id, *direction),
+        } => validate_move(world, effective_player_id, raw.tick, *object_id, *direction),
         CommandAction::Harvest {
             object_id,
             target_id,
             resource: _,
-        } => validate_harvest(world, raw.player_id, raw.tick, *object_id, *target_id),
+        } => validate_harvest(world, effective_player_id, raw.tick, *object_id, *target_id),
         CommandAction::Transfer {
             object_id,
             target_id,
@@ -878,7 +1297,7 @@ pub fn validate_command(
             amount,
         } => validate_transfer(
             world,
-            raw.player_id,
+            effective_player_id,
             *object_id,
             *target_id,
             resource,
@@ -892,7 +1311,7 @@ pub fn validate_command(
             amount,
         } => validate_withdraw(
             world,
-            raw.player_id,
+            effective_player_id,
             *object_id,
             *target_id,
             resource,
@@ -906,7 +1325,7 @@ pub fn validate_command(
             payload,
         } => validate_action(
             world,
-            raw.player_id,
+            effective_player_id,
             raw.tick,
             action_type,
             *object_id,
@@ -916,13 +1335,23 @@ pub fn validate_command(
         CommandAction::ClaimController {
             object_id,
             target_id,
-        } => validate_claim_controller(world, raw.player_id, raw.tick, *object_id, *target_id),
+        } => {
+            validate_claim_controller(world, effective_player_id, raw.tick, *object_id, *target_id)
+        }
         CommandAction::Spawn {
-            object_id: _,
+            object_id,
             spawn_id,
             body_parts,
-        } => validate_spawn_drone(world, raw.player_id, *spawn_id, body_parts),
-        CommandAction::Recycle { object_id } => validate_recycle(world, raw.player_id, *object_id),
+        } => validate_spawn_drone(
+            world,
+            effective_player_id,
+            *object_id,
+            *spawn_id,
+            body_parts,
+        ),
+        CommandAction::Recycle { object_id } => {
+            validate_recycle(world, effective_player_id, raw.tick, *object_id)
+        }
         CommandAction::Build {
             object_id,
             x,
@@ -930,7 +1359,7 @@ pub fn validate_command(
             structure,
         } => validate_build(
             world,
-            raw.player_id,
+            effective_player_id,
             raw.tick,
             *object_id,
             *x,
@@ -940,22 +1369,34 @@ pub fn validate_command(
         CommandAction::Repair {
             object_id,
             target_id,
-        } => validate_repair(world, raw.player_id, raw.tick, *object_id, *target_id),
+        } => validate_repair(world, effective_player_id, raw.tick, *object_id, *target_id),
         CommandAction::UpgradeController {
             object_id,
             target_id,
-        } => validate_upgrade_controller(world, raw.player_id, raw.tick, *object_id, *target_id),
+        } => validate_upgrade_controller(
+            world,
+            effective_player_id,
+            raw.tick,
+            *object_id,
+            *target_id,
+        ),
         CommandAction::TransferToGlobal { resource, amount } => {
-            validate_transfer_to_global(world, raw.player_id, resource, *amount)
+            validate_transfer_to_global(world, effective_player_id, resource, *amount)
         }
         CommandAction::TransferFromGlobal { resource, amount } => {
-            validate_transfer_from_global(world, raw.player_id, resource, *amount)
+            validate_transfer_from_global(world, effective_player_id, resource, *amount)
         }
         CommandAction::AlliedTransfer {
             target_player,
             resource,
             amount,
-        } => validate_allied_transfer(world, raw.player_id, *target_player, resource, *amount),
+        } => validate_allied_transfer(
+            world,
+            effective_player_id,
+            *target_player,
+            resource,
+            *amount,
+        ),
     };
 
     if matches!(result, Err(RejectionReason::InsufficientResource { .. })) {
@@ -966,7 +1407,10 @@ pub fn validate_command(
     }
     result?;
 
-    Ok(ValidatedCommand { raw })
+    Ok(ValidatedCommand {
+        raw,
+        effective_player_id,
+    })
 }
 
 pub fn source_allows_gameplay(source: CommandSource) -> bool {
@@ -1088,11 +1532,67 @@ fn action_uses_global_storage(action: &CommandAction) -> bool {
 }
 
 impl CommandAuth {
+    pub(crate) fn server_injected(
+        source: CommandSource,
+        player_id: PlayerId,
+        tick_submitted: Tick,
+        tick_target: Tick,
+    ) -> Self {
+        assert_ne!(
+            source,
+            CommandSource::Admin,
+            "Admin CommandAuth requires credential provenance"
+        );
+        Self {
+            source,
+            player_id,
+            tick_submitted,
+            tick_target,
+            admin_credential_provenance: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn server_injected_admin(
+        player_id: PlayerId,
+        tick_submitted: Tick,
+        tick_target: Tick,
+        provenance: AdminCredentialProvenance,
+    ) -> Result<Self, RejectionReason> {
+        if !provenance.is_valid_for_admin() {
+            return Err(RejectionReason::AuthContextInvalid);
+        }
+        Ok(Self {
+            source: CommandSource::Admin,
+            player_id,
+            tick_submitted,
+            tick_target,
+            admin_credential_provenance: Some(provenance),
+        })
+    }
+
+    pub fn admin_credential_provenance(&self) -> Option<&AdminCredentialProvenance> {
+        self.admin_credential_provenance.as_ref()
+    }
+
+    pub fn has_valid_admin_credential_provenance(&self) -> bool {
+        self.admin_credential_provenance()
+            .is_some_and(|provenance| provenance.is_valid_for_admin())
+    }
+
     fn matches_raw_envelope(&self, raw: &RawCommand) -> bool {
-        self.source == raw.source
+        let envelope_matches = self.source == raw.source
             && self.player_id == raw.player_id
             && self.tick_target == raw.tick
-            && self.tick_submitted <= self.tick_target
+            && self.tick_submitted <= self.tick_target;
+        if !envelope_matches {
+            return false;
+        }
+        if raw.source == CommandSource::Admin {
+            self.has_valid_admin_credential_provenance()
+        } else {
+            true
+        }
     }
 }
 
@@ -1558,9 +2058,9 @@ fn json_depth(value: &serde_json::Value) -> usize {
     }
 }
 
-pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandResult {
+pub(crate) fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandResult {
     let action_tick = command.raw.tick;
-    let player_id = command.raw.player_id;
+    let player_id = command.effective_player_id;
     let mut actor_id = None;
     let result = match command.raw.action {
         CommandAction::Move {
@@ -1583,19 +2083,13 @@ pub fn apply_command(world: &mut World, command: ValidatedCommand) -> CommandRes
             target_id,
             resource,
             amount,
-        } => {
-            actor_id = Some(object_id);
-            apply_transfer(world, object_id, target_id, &resource, amount)
-        }
+        } => apply_transfer(world, object_id, target_id, &resource, amount),
         CommandAction::Withdraw {
             object_id,
             target_id,
             resource,
             amount,
-        } => {
-            actor_id = Some(object_id);
-            apply_withdraw(world, object_id, target_id, &resource, amount)
-        }
+        } => apply_withdraw(world, object_id, target_id, &resource, amount),
         CommandAction::Action {
             action_type,
             object_id,
@@ -1687,13 +2181,13 @@ fn mark_drone_action(world: &mut World, object_id: ObjectId, tick: Tick) {
 fn validate_move(
     world: &mut World,
     player_id: PlayerId,
-    _tick: Tick,
+    tick: Tick,
     object_id: ObjectId,
     direction: Direction,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::Move, true)?;
+    ensure_drone_can_take_main_action(&drone, tick, BodyPart::Move, true)?;
     let target = step(world.resource::<RoomTerrains>(), position, direction)
         .ok_or(RejectionReason::InvalidDirection)?;
 
@@ -1709,13 +2203,13 @@ fn validate_move(
 fn validate_harvest(
     world: &mut World,
     player_id: PlayerId,
-    _tick: Tick,
+    tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::Work, true)?;
+    ensure_drone_can_take_main_action(&drone, tick, BodyPart::Work, true)?;
     require_body(&drone, BodyPart::Carry)?;
     if carry_used(&drone.carry) >= drone.carry_capacity {
         return Err(RejectionReason::CarryFull);
@@ -1797,13 +2291,13 @@ fn validate_withdraw(
 fn validate_attack(
     world: &mut World,
     player_id: PlayerId,
-    _tick: Tick,
+    tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::Attack, true)?;
+    ensure_drone_can_take_main_action(&drone, tick, BodyPart::Attack, true)?;
     let (target_position, target_owner) = attackable_snapshot(world, target_id)?;
     if target_owner == Some(player_id) {
         return Err(RejectionReason::FriendlyTarget);
@@ -1814,7 +2308,7 @@ fn validate_attack(
 fn validate_ranged_attack(
     world: &mut World,
     player_id: PlayerId,
-    _tick: Tick,
+    tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
     range: u32,
@@ -1827,7 +2321,7 @@ fn validate_ranged_attack(
     }
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::RangedAttack, true)?;
+    ensure_drone_can_take_main_action(&drone, tick, BodyPart::RangedAttack, true)?;
     let (target_position, target_owner) = attackable_snapshot(world, target_id)?;
     if target_owner == Some(player_id) {
         return Err(RejectionReason::FriendlyTarget);
@@ -1838,13 +2332,13 @@ fn validate_ranged_attack(
 fn validate_heal(
     world: &mut World,
     player_id: PlayerId,
-    _tick: Tick,
+    tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::Heal, false)?;
+    ensure_drone_can_take_main_action(&drone, tick, BodyPart::Heal, false)?;
     let (target_position, target) = drone_snapshot(world, target_id)?;
     if target.owner != player_id {
         return Err(RejectionReason::NotFriendly);
@@ -1905,13 +2399,13 @@ fn payload_u32(payload: &serde_json::Value, field: &str) -> Option<u32> {
 fn validate_claim_controller(
     world: &mut World,
     player_id: PlayerId,
-    _tick: Tick,
+    tick: Tick,
     object_id: ObjectId,
     controller_id: ObjectId,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::Claim, true)?;
+    ensure_drone_can_take_main_action(&drone, tick, BodyPart::Claim, true)?;
     let (target_position, controller) = controller_snapshot(world, controller_id)?;
     if controller.owner.is_some() && controller.owner != Some(player_id) {
         return Err(RejectionReason::NotOwner);
@@ -1922,15 +2416,21 @@ fn validate_claim_controller(
 fn validate_spawn_drone(
     world: &mut World,
     player_id: PlayerId,
+    object_id: ObjectId,
     spawn_id: ObjectId,
     body: &[BodyPart],
 ) -> CommandResult {
+    let (_, drone) = drone_snapshot(world, object_id)?;
+    ensure_owner(&drone, player_id)?;
     let (position, structure) = structure_snapshot(world, spawn_id)?;
     if structure.structure_type != StructureType::SPAWN || structure.owner != Some(player_id) {
         return Err(RejectionReason::NotYourSpawn);
     }
     if structure.cooldown > 0 {
         return Err(RejectionReason::SpawnOnCooldown);
+    }
+    if body.is_empty() {
+        return Err(RejectionReason::InvalidBodyPart);
     }
     if body.len() > MAX_BODY_PARTS {
         return Err(RejectionReason::BodyTooLarge);
@@ -1969,15 +2469,21 @@ fn validate_spawn_drone(
     Ok(())
 }
 
-fn validate_recycle(world: &mut World, player_id: PlayerId, object_id: ObjectId) -> CommandResult {
+fn validate_recycle(
+    world: &mut World,
+    player_id: PlayerId,
+    tick: Tick,
+    object_id: ObjectId,
+) -> CommandResult {
     let (_, drone) = drone_snapshot(world, object_id)?;
-    ensure_owner(&drone, player_id)
+    ensure_owner(&drone, player_id)?;
+    ensure_drone_main_action_available(&drone, tick)
 }
 
 fn validate_build(
     world: &mut World,
     player_id: PlayerId,
-    _tick: Tick,
+    tick: Tick,
     object_id: ObjectId,
     x: i32,
     y: i32,
@@ -1985,7 +2491,7 @@ fn validate_build(
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::Work, true)?;
+    ensure_drone_can_take_main_action(&drone, tick, BodyPart::Work, true)?;
     let structure_def = world
         .resource::<StructureTypeRegistry>()
         .get(structure)
@@ -2014,13 +2520,13 @@ fn validate_build(
 fn validate_repair(
     world: &mut World,
     player_id: PlayerId,
-    _tick: Tick,
+    tick: Tick,
     object_id: ObjectId,
     target_id: ObjectId,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::Work, false)?;
+    ensure_drone_can_take_main_action(&drone, tick, BodyPart::Work, false)?;
     let (target_position, structure) = structure_snapshot(world, target_id)?;
     if structure.owner.is_some() && structure.owner != Some(player_id) {
         return Err(RejectionReason::NotOwner);
@@ -2034,13 +2540,13 @@ fn validate_repair(
 fn validate_upgrade_controller(
     world: &mut World,
     player_id: PlayerId,
-    _tick: Tick,
+    tick: Tick,
     object_id: ObjectId,
     controller_id: ObjectId,
 ) -> CommandResult {
     let (position, drone) = drone_snapshot(world, object_id)?;
     ensure_owner(&drone, player_id)?;
-    ensure_drone_can_act(&drone, BodyPart::Work, false)?;
+    ensure_drone_can_take_main_action(&drone, tick, BodyPart::Work, false)?;
     let (target_position, controller) = controller_snapshot(world, controller_id)?;
     if controller.owner != Some(player_id) {
         return Err(RejectionReason::NotOwner);
@@ -2109,9 +2615,10 @@ fn validate_custom_action(
     if drone.fatigue > 0 {
         return Err(RejectionReason::Fatigued);
     }
+    ensure_drone_main_action_available(&drone, tick)?;
     validate_special_action_requirements(world, &drone, &action)?;
     if custom_action_on_cooldown(world, object_id, action_type, tick) {
-        return Err(RejectionReason::Fatigued);
+        return Err(RejectionReason::CooldownActive);
     }
     let cost = custom_action_cost(&action);
     ensure_player_resource_cost(world, player_id, &cost, false)?;
@@ -2302,10 +2809,22 @@ fn apply_transfer(
     resource: &str,
     amount: u32,
 ) -> CommandResult {
+    let (_, source_drone) = drone_snapshot(world, object_id)?;
+    let target_player = resource_target_player(world, target_id);
     let object = entity(object_id)?;
     let target = entity(target_id)?;
     take_from_drone(world, object, resource, amount);
     add_to_target(world, target, resource, amount)?;
+    record_resource_flow(
+        world,
+        Some(source_drone.owner),
+        target_player,
+        resource,
+        amount,
+        ResourceOperation::LocalTransfer,
+        0,
+        0,
+    );
     send_onboarding_event(world, OnboardingEvent::ResourceCollected);
     Ok(())
 }
@@ -2317,6 +2836,8 @@ fn apply_withdraw(
     resource: &str,
     amount: u32,
 ) -> CommandResult {
+    let (_, drone) = drone_snapshot(world, object_id)?;
+    let source_player = resource_target_player(world, target_id);
     let object = entity(object_id)?;
     let target = entity(target_id)?;
     take_from_target(world, target, resource, amount)?;
@@ -2327,6 +2848,16 @@ fn apply_withdraw(
         .carry
         .entry(resource.to_string())
         .or_default() += amount;
+    record_resource_flow(
+        world,
+        source_player,
+        Some(drone.owner),
+        resource,
+        amount,
+        ResourceOperation::LocalTransfer,
+        0,
+        0,
+    );
     Ok(())
 }
 
@@ -2510,6 +3041,7 @@ fn apply_spawn_drone(
         structure.cooldown = 1;
     }
     deduct_player_resource_cost(world, player_id, &cost, true);
+    record_resource_cost(world, player_id, &cost, true, ResourceOperation::SpawnCost);
     world
         .resource_mut::<PendingSpawnQueue>()
         .0
@@ -2532,6 +3064,7 @@ fn apply_recycle(
     let refund = recycle_refund_cost(world, tick, &drone.body);
 
     refund_recycle_cost(world, player_id, &refund);
+    record_resource_award(world, player_id, &refund, ResourceOperation::RecycleRefund);
     world.entity_mut(object).despawn();
     if let Some(count) = world
         .resource_mut::<RoomDroneCounts>()
@@ -2554,6 +3087,7 @@ fn apply_build(
     let (position, _) = drone_snapshot(world, object_id)?;
     let cost = build_cost(world, structure_type);
     deduct_player_resource_cost(world, player_id, &cost, false);
+    record_resource_cost(world, player_id, &cost, false, ResourceOperation::BuildCost);
     let position = Position {
         x,
         y,
@@ -2670,6 +3204,7 @@ fn apply_custom_action(
         })?;
     let cost = custom_action_cost(&action);
     deduct_player_resource_cost(world, player_id, &cost, false);
+    record_resource_cost(world, player_id, &cost, false, ResourceOperation::BuildCost);
     remember_custom_action_cooldown(world, object_id, action_type, tick, &action);
 
     match special_effect_handler(world, &action)?.as_deref() {
@@ -3042,6 +3577,16 @@ fn apply_allied_transfer(
         resource,
         amount,
     );
+    record_resource_flow(
+        world,
+        Some(from_player),
+        Some(to_player),
+        resource,
+        deliver_amount,
+        ResourceOperation::AlliedTransfer,
+        fee,
+        ALLIED_TRANSFER_FEE_BP,
+    );
 
     // Apply cooldown
     let current_tick = world.resource::<CurrentTick>().0;
@@ -3106,6 +3651,19 @@ fn apply_transfer_to_global(
             start: player_storage_position(player_id),
             end: global_storage_position(player_id),
         });
+    record_resource_flow(
+        world,
+        Some(player_id),
+        Some(player_id),
+        resource,
+        amount.saturating_sub(transfer_fee(
+            amount,
+            config.transfer_to_global_fee_per_10_000,
+        )),
+        ResourceOperation::GlobalDeposit,
+        transfer_fee(amount, config.transfer_to_global_fee_per_10_000),
+        config.transfer_to_global_fee_per_10_000,
+    );
     Ok(())
 }
 
@@ -3141,6 +3699,19 @@ fn apply_transfer_from_global(
             start: global_storage_position(player_id),
             end: player_storage_position(player_id),
         });
+    record_resource_flow(
+        world,
+        Some(player_id),
+        Some(player_id),
+        resource,
+        amount.saturating_sub(transfer_fee(
+            amount,
+            config.transfer_from_global_fee_per_10_000,
+        )),
+        ResourceOperation::GlobalWithdraw,
+        transfer_fee(amount, config.transfer_from_global_fee_per_10_000),
+        config.transfer_from_global_fee_per_10_000,
+    );
     Ok(())
 }
 
@@ -3339,6 +3910,23 @@ fn ensure_drone_can_act(drone: &Drone, part: BodyPart, check_fatigue: bool) -> C
         return Err(RejectionReason::Fatigued);
     }
     require_body(drone, part)
+}
+
+fn ensure_drone_can_take_main_action(
+    drone: &Drone,
+    tick: Tick,
+    part: BodyPart,
+    check_fatigue: bool,
+) -> CommandResult {
+    ensure_drone_can_act(drone, part, check_fatigue)?;
+    ensure_drone_main_action_available(drone, tick)
+}
+
+fn ensure_drone_main_action_available(drone: &Drone, tick: Tick) -> CommandResult {
+    if drone.last_action_tick == tick {
+        return Err(RejectionReason::CooldownActive);
+    }
+    Ok(())
 }
 
 fn require_body(drone: &Drone, part: BodyPart) -> CommandResult {
@@ -3626,6 +4214,98 @@ fn add_player_local_resource(world: &mut World, player_id: PlayerId, resource: &
         .or_default() += amount;
 }
 
+fn resource_target_player(world: &mut World, object_id: ObjectId) -> Option<PlayerId> {
+    let entity = entity(object_id).ok()?;
+    let entity_ref = world.get_entity(entity).ok()?;
+    if let Some(drone) = entity_ref.get::<Drone>() {
+        return Some(drone.owner);
+    }
+    if let Some(owner) = entity_ref.get::<Owner>() {
+        return Some(owner.0);
+    }
+    if let Some(structure) = entity_ref.get::<Structure>() {
+        return structure.owner;
+    }
+    if let Some(controller) = entity_ref.get::<Controller>() {
+        return controller.owner;
+    }
+    None
+}
+
+fn record_resource_cost(
+    world: &mut World,
+    player_id: PlayerId,
+    cost: &ResourceCost,
+    skip_energy: bool,
+    operation: ResourceOperation,
+) {
+    for (resource, amount) in cost {
+        if skip_energy && resource == ENERGY_RESOURCE || *amount == 0 {
+            continue;
+        }
+        record_resource_flow(
+            world,
+            Some(player_id),
+            None,
+            resource,
+            *amount,
+            operation,
+            0,
+            0,
+        );
+    }
+}
+
+fn record_resource_award(
+    world: &mut World,
+    player_id: PlayerId,
+    award: &ResourceCost,
+    operation: ResourceOperation,
+) {
+    for (resource, amount) in award {
+        if *amount == 0 {
+            continue;
+        }
+        record_resource_flow(
+            world,
+            None,
+            Some(player_id),
+            resource,
+            *amount,
+            operation,
+            0,
+            0,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_resource_flow(
+    world: &mut World,
+    source: Option<PlayerId>,
+    target: Option<PlayerId>,
+    resource: &str,
+    amount: u32,
+    operation: ResourceOperation,
+    fee_paid: u32,
+    basis_points_used: u32,
+) {
+    if amount == 0 && fee_paid == 0 {
+        return;
+    }
+    let tick = world.resource::<CurrentTick>().0;
+    world.resource_mut::<ResourceLedger>().record_attributed(
+        tick,
+        source,
+        target,
+        resource,
+        i64::from(amount),
+        operation,
+        fee_paid,
+        basis_points_used,
+    );
+}
+
 fn transfer_fee(amount: u32, fee_per_10_000: u32) -> u32 {
     amount.saturating_mul(fee_per_10_000) / 10_000
 }
@@ -3780,6 +4460,23 @@ mod tests {
     use super::*;
     use crate::world::create_world;
 
+    fn admin_provenance() -> AdminCredentialProvenance {
+        admin_provenance_with("admin-cert-1", "fingerprint-1")
+    }
+
+    fn admin_provenance_with(
+        credential_id: &str,
+        credential_fingerprint: &str,
+    ) -> AdminCredentialProvenance {
+        AdminCredentialProvenance::new(
+            credential_id,
+            credential_fingerprint,
+            "admin_cert",
+            "admin:root",
+            ["swarm:read", ADMIN_SCOPE, "swarm:read"],
+        )
+    }
+
     fn raw_custom(
         player_id: PlayerId,
         action_type: &str,
@@ -3790,12 +4487,7 @@ mod tests {
             player_id,
             tick: 1,
             source: CommandSource::TestHarness,
-            auth: CommandAuth {
-                source: CommandSource::TestHarness,
-                player_id,
-                tick_submitted: 1,
-                tick_target: 1,
-            },
+            auth: CommandAuth::server_injected(CommandSource::TestHarness, player_id, 1, 1),
             sequence: 1,
             action: CommandAction::Action {
                 action_type: action_type.to_string(),
@@ -3806,6 +4498,313 @@ mod tests {
         }
     }
 
+    #[test]
+    fn concrete_action_wire_flattens_optional_payload_fields() {
+        let action: CommandAction = serde_json::from_value(serde_json::json!({
+            "type": "Debilitate",
+            "object_id": 7,
+            "target_id": 9,
+            "damage_type": "Kinetic",
+            "cooldown": 5
+        }))
+        .unwrap();
+
+        let CommandAction::Action {
+            action_type,
+            object_id,
+            target_id,
+            payload,
+        } = action
+        else {
+            panic!("concrete action must deserialize to the internal Action variant");
+        };
+        assert_eq!(action_type, "Debilitate");
+        assert_eq!(object_id, 7);
+        assert_eq!(target_id, Some(9));
+        assert_eq!(payload["damage_type"], "Kinetic");
+        assert_eq!(payload["cooldown"], 5);
+    }
+
+    #[test]
+    fn concrete_custom_wire_preserves_arbitrary_flattened_payload() {
+        let action: CommandAction = serde_json::from_value(serde_json::json!({
+            "type": "Blink",
+            "object_id": 7,
+            "target_id": 9,
+            "range": 3,
+            "mode": "phase",
+            "metadata": {"shard": 2}
+        }))
+        .unwrap();
+
+        let CommandAction::Action {
+            action_type,
+            object_id,
+            target_id,
+            payload,
+        } = action
+        else {
+            panic!("custom concrete action must deserialize to the internal Action variant");
+        };
+        assert_eq!(action_type, "Blink");
+        assert_eq!(object_id, 7);
+        assert_eq!(target_id, Some(9));
+        assert_eq!(payload["range"], 3);
+        assert_eq!(payload["mode"], "phase");
+        assert_eq!(payload["metadata"]["shard"], 2);
+    }
+
+    #[test]
+    fn exact_core_wire_rejects_cross_variant_fields_and_empty_spawn_body() {
+        let move_with_target = serde_json::from_value::<CommandAction>(serde_json::json!({
+            "type": "Move",
+            "object_id": 7,
+            "direction": "Top",
+            "target_id": 9
+        }))
+        .unwrap_err();
+        assert!(move_with_target.to_string().contains("target_id"));
+
+        assert!(
+            serde_json::from_value::<CommandAction>(serde_json::json!({
+                "type": "ClaimController",
+                "object_id": 7,
+                "controller_id": 9
+            }))
+            .is_err()
+        );
+
+        assert!(
+            serde_json::from_value::<CommandAction>(serde_json::json!({
+                "type": "Spawn",
+                "object_id": 7,
+                "spawn_id": 9,
+                "body_parts": []
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn admin_command_auth_requires_valid_persisted_provenance() {
+        let missing = serde_json::from_value::<CommandAuth>(serde_json::json!({
+            "source": "Admin",
+            "player_id": 7,
+            "tick_submitted": 1,
+            "tick_target": 1
+        }))
+        .unwrap_err();
+
+        assert!(missing.to_string().contains("provenance"));
+
+        let invalid_scope = serde_json::from_value::<CommandAuth>(serde_json::json!({
+            "source": "Admin",
+            "player_id": 7,
+            "tick_submitted": 1,
+            "tick_target": 1,
+            "admin_credential_provenance": {
+                "credential_id": "admin-cert-1",
+                "credential_fingerprint": "fingerprint-1",
+                "auth_mode": "admin_cert",
+                "admin_identity": "admin:root",
+                "canonical_scopes": ["swarm:read"]
+            }
+        }))
+        .unwrap_err();
+        assert!(invalid_scope.to_string().contains(ADMIN_SCOPE));
+
+        let auth = CommandAuth::server_injected_admin(7, 1, 1, admin_provenance()).unwrap();
+        let value = serde_json::to_value(&auth).unwrap();
+        assert_eq!(
+            value["admin_credential_provenance"]["canonical_scopes"][0],
+            "swarm:admin"
+        );
+        assert_eq!(
+            value["admin_credential_provenance"]["canonical_scopes"][1],
+            "swarm:read"
+        );
+        let decoded: CommandAuth = serde_json::from_value(value).unwrap();
+        assert!(decoded.has_valid_admin_credential_provenance());
+
+        assert_eq!(
+            admin_source_gate(
+                7,
+                1,
+                CommandIntent {
+                    sequence: 1,
+                    action: CommandAction::Recycle { object_id: 9 },
+                },
+                admin_provenance(),
+            )
+            .unwrap()
+            .auth,
+            CommandAuth::server_injected_admin(7, 1, 1, admin_provenance()).unwrap()
+        );
+
+        assert_eq!(
+            source_gate(
+                7,
+                1,
+                CommandSource::Admin,
+                CommandIntent {
+                    sequence: 1,
+                    action: CommandAction::Recycle { object_id: 9 },
+                },
+            ),
+            Err(RejectionReason::AuthContextInvalid)
+        );
+    }
+
+    #[test]
+    fn admin_command_auth_round_trip_persists_provenance_across_restart() {
+        let auth = CommandAuth::server_injected_admin(7, 1, 1, admin_provenance()).unwrap();
+        let bytes = serde_json::to_vec(&auth).unwrap();
+        let decoded: CommandAuth = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(decoded, auth);
+        let provenance = decoded.admin_credential_provenance().unwrap();
+        assert_eq!(provenance.credential_id(), "admin-cert-1");
+        assert_eq!(provenance.credential_fingerprint(), "fingerprint-1");
+        assert!(decoded.has_valid_admin_credential_provenance());
+    }
+
+    #[test]
+    fn admin_command_auth_same_envelope_different_credentials_do_not_collide() {
+        let first = CommandAuth::server_injected_admin(
+            7,
+            1,
+            1,
+            admin_provenance_with("admin-cert-1", "fingerprint-1"),
+        )
+        .unwrap();
+        let second = CommandAuth::server_injected_admin(
+            7,
+            1,
+            1,
+            admin_provenance_with("admin-cert-2", "fingerprint-2"),
+        )
+        .unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(first.source, second.source);
+        assert_eq!(first.player_id, second.player_id);
+        assert_eq!(first.tick_submitted, second.tick_submitted);
+        assert_eq!(first.tick_target, second.tick_target);
+
+        let first_decoded: CommandAuth =
+            serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
+        let second_decoded: CommandAuth =
+            serde_json::from_value(serde_json::to_value(&second).unwrap()).unwrap();
+        assert_eq!(
+            first_decoded
+                .admin_credential_provenance()
+                .unwrap()
+                .credential_id(),
+            "admin-cert-1"
+        );
+        assert_eq!(
+            second_decoded
+                .admin_credential_provenance()
+                .unwrap()
+                .credential_id(),
+            "admin-cert-2"
+        );
+    }
+
+    #[test]
+    fn legacy_action_wrapper_and_reserved_payload_keys_are_rejected() {
+        let legacy = serde_json::from_value::<CommandAction>(serde_json::json!({
+            "type": "Action",
+            "action_type": "Attack",
+            "object_id": 7,
+            "target_id": 9
+        }))
+        .unwrap_err();
+        assert!(legacy.to_string().contains("wire type Action is internal"));
+
+        assert!(
+            serde_json::from_value::<CommandAction>(serde_json::json!({
+                "type": "Attack",
+                "object_id": 7,
+                "target_id": 9,
+                "payload": {"cooldown": 1}
+            }))
+            .is_err()
+        );
+
+        let action = CommandAction::Action {
+            action_type: "Attack".to_string(),
+            object_id: 7,
+            target_id: Some(9),
+            payload: serde_json::json!({"type": "Move"}),
+        };
+        assert!(serde_json::to_value(action).is_err());
+
+        let action = CommandAction::Action {
+            action_type: "Attack".to_string(),
+            object_id: 7,
+            target_id: Some(9),
+            payload: serde_json::json!({"payload": {"cooldown": 1}}),
+        };
+        assert!(serde_json::to_value(action).is_err());
+    }
+
+    fn raw_move(player_id: PlayerId, tick: Tick, sequence: u32, object_id: ObjectId) -> RawCommand {
+        source_gate(
+            player_id,
+            tick,
+            CommandSource::Wasm,
+            CommandIntent {
+                sequence,
+                action: CommandAction::Move {
+                    object_id,
+                    direction: Direction::Top,
+                },
+            },
+        )
+        .unwrap()
+    }
+
+    fn expected_seeded_player_order(
+        mut players: Vec<PlayerId>,
+        world_seed: u64,
+        tick: Tick,
+    ) -> Vec<PlayerId> {
+        players.sort_unstable();
+        players.dedup();
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"shuffle");
+        hasher.update(&world_seed.to_le_bytes());
+        hasher.update(&tick.to_le_bytes());
+        let mut reader = hasher.finalize_xof();
+
+        for i in 0..players.len() {
+            let remaining = players.len() - i;
+            let offset = loop {
+                let mut bytes = [0_u8; 8];
+                reader.fill(&mut bytes);
+                if let Some(offset) = unbiased_shuffle_offset(u64::from_le_bytes(bytes), remaining)
+                {
+                    break offset;
+                }
+            };
+            players.swap(i, i + offset);
+        }
+
+        players
+    }
+
+    #[test]
+    fn seeded_shuffle_rejects_biased_tail_samples() {
+        let bound = 3;
+        let unbiased_limit = u64::MAX - (u64::MAX % bound as u64);
+
+        assert_eq!(unbiased_shuffle_offset(unbiased_limit - 1, bound), Some(2));
+        assert_eq!(unbiased_shuffle_offset(unbiased_limit, bound), None);
+        assert_eq!(unbiased_shuffle_offset(u64::MAX, bound), None);
+    }
+
     fn give_local_energy(world: &mut World, player_id: PlayerId, amount: u32) {
         world
             .resource_mut::<PlayerLocalStorage>()
@@ -3813,6 +4812,211 @@ mod tests {
             .entry(player_id)
             .or_default()
             .insert(ENERGY_RESOURCE.to_string(), amount);
+    }
+
+    #[test]
+    fn sort_raw_commands_uses_seeded_shuffle_before_player_id() {
+        let tick = 37;
+        let world_seed = 99;
+        let mut commands = vec![
+            raw_move(1, tick, 0, 101),
+            raw_move(2, tick, 0, 201),
+            raw_move(3, tick, 0, 301),
+            raw_move(4, tick, 0, 401),
+            raw_move(5, tick, 0, 501),
+        ];
+        let expected = expected_seeded_player_order(vec![1, 2, 3, 4, 5], world_seed, tick);
+        assert_ne!(
+            expected,
+            vec![1, 2, 3, 4, 5],
+            "fixture must expose player-id sort bias"
+        );
+
+        sort_raw_commands_with_seed(&mut commands, world_seed);
+
+        let actual = commands
+            .iter()
+            .map(|command| command.player_id)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn active_player_with_zero_commands_changes_shuffle_slots() {
+        let tick = 42;
+        let active_players = vec![1, 2, 3, 4];
+        let command_players = vec![1, 2, 4];
+        let (world_seed, expected, command_derived) = (0_u64..1_000)
+            .find_map(|seed| {
+                let active_order = expected_seeded_player_order(active_players.clone(), seed, tick);
+                let expected = active_order
+                    .into_iter()
+                    .filter(|player_id| command_players.contains(player_id))
+                    .collect::<Vec<_>>();
+                let command_derived =
+                    expected_seeded_player_order(command_players.clone(), seed, tick);
+                (expected != command_derived).then_some((seed, expected, command_derived))
+            })
+            .expect("fixture must expose zero-command active player slot influence");
+
+        let mut commands = command_players
+            .iter()
+            .map(|player_id| raw_move(*player_id, tick, 0, u64::from(*player_id) * 100))
+            .collect::<Vec<_>>();
+
+        sort_raw_commands_for_active_players(&mut commands, world_seed, &active_players);
+
+        let actual = commands
+            .iter()
+            .map(|command| command.player_id)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_ne!(actual, command_derived);
+    }
+
+    #[test]
+    fn admin_uses_standard_pipeline_with_actor_ownership_relaxed() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let drone_id = object_id(drone);
+        let intent = CommandIntent {
+            sequence: 1,
+            action: CommandAction::Move {
+                object_id: drone_id,
+                direction: Direction::Top,
+            },
+        };
+
+        assert_eq!(
+            world.submit_intent(99, 1, CommandSource::Wasm, intent.clone()),
+            Err(RejectionReason::NotOwner)
+        );
+        let raw = admin_source_gate(99, 1, intent, admin_provenance()).unwrap();
+        world
+            .submit_raw_command(raw)
+            .expect("admin should follow normal validation/apply with actor ownership relaxed");
+
+        let position = world.app.world().entity(drone).get::<Position>().unwrap();
+        assert_eq!((position.x, position.y), (10, 9));
+    }
+
+    #[test]
+    fn drone_can_only_take_one_main_action_per_tick() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let object_id = object_id(drone);
+
+        world
+            .submit_intent(
+                1,
+                9,
+                CommandSource::Wasm,
+                CommandIntent {
+                    sequence: 1,
+                    action: CommandAction::Move {
+                        object_id,
+                        direction: Direction::Top,
+                    },
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            world.submit_intent(
+                1,
+                9,
+                CommandSource::Wasm,
+                CommandIntent {
+                    sequence: 2,
+                    action: CommandAction::Move {
+                        object_id,
+                        direction: Direction::Bottom,
+                    },
+                },
+            ),
+            Err(RejectionReason::CooldownActive)
+        );
+    }
+
+    #[test]
+    fn custom_action_active_cooldown_returns_cooldown_active() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let object_id = object_id(drone);
+        world
+            .app
+            .world_mut()
+            .insert_resource(CustomActionRegistry::from_defs(vec![CustomActionDef {
+                name: "Blink".to_string(),
+                cooldown: Some(5),
+                ..Default::default()
+            }]));
+        world
+            .app
+            .world_mut()
+            .insert_resource(CustomActionCooldowns::default());
+        world
+            .app
+            .world_mut()
+            .resource_mut::<CustomActionCooldowns>()
+            .0
+            .insert((object_id, "Blink".to_string()), 10);
+
+        assert_eq!(
+            world.submit_raw_command(raw_custom(1, "Blink", object_id, None)),
+            Err(RejectionReason::CooldownActive)
+        );
+    }
+
+    #[test]
+    fn transfer_does_not_consume_drone_main_action_quota() {
+        let mut world = create_world();
+        let source = world.spawn_drone(1, 10, 10, vec![BodyPart::Move, BodyPart::Carry]);
+        let target = world.spawn_drone(1, 10, 11, vec![BodyPart::Carry]);
+        let source_id = object_id(source);
+        let target_id = object_id(target);
+
+        world
+            .app
+            .world_mut()
+            .entity_mut(source)
+            .get_mut::<Drone>()
+            .unwrap()
+            .carry
+            .insert(ENERGY_RESOURCE.to_string(), 5);
+
+        world
+            .submit_intent(
+                1,
+                11,
+                CommandSource::Wasm,
+                CommandIntent {
+                    sequence: 1,
+                    action: CommandAction::Transfer {
+                        object_id: source_id,
+                        target_id,
+                        resource: ENERGY_RESOURCE.to_string(),
+                        amount: 1,
+                    },
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            world.submit_intent(
+                1,
+                11,
+                CommandSource::Wasm,
+                CommandIntent {
+                    sequence: 2,
+                    action: CommandAction::Move {
+                        object_id: source_id,
+                        direction: Direction::Top,
+                    },
+                },
+            ),
+            Ok(())
+        );
     }
 
     #[test]

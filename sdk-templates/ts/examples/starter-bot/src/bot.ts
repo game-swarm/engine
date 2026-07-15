@@ -2,8 +2,8 @@ import {
   actions,
   bodyCost,
   command,
-  hasResources,
   type CommandIntent,
+  type Direction,
   type DroneEntity,
   type HarvestAction,
   type SourceEntity,
@@ -23,13 +23,14 @@ export function tick(snapshot: WorldSnapshot): CommandIntent[] {
 
   const commands: CommandIntent[] = [];
   let sequence = 0;
+  const workers = findMyWorkers(snapshot);
 
   const spawnEnergy = spawn.store?.[ENERGY] ?? snapshot.resources[ENERGY] ?? 0;
-  if (spawnEnergy >= (WORKER_COST[ENERGY] ?? 100) && !spawn.cooldown) {
-    commands.push(command(sequence++, actions.spawn(spawn.id, [...WORKER_BODY])));
+  if (spawnEnergy >= (WORKER_COST[ENERGY] ?? 100) && !spawn.cooldown && workers[0]) {
+    commands.push(command(sequence++, actions.spawn(workers[0].id, spawn.id, [...WORKER_BODY])));
   }
 
-  for (const drone of findMyWorkers(snapshot)) {
+  for (const drone of workers) {
     if (drone.spawning || drone.fatigue > 0) continue;
 
     const carriedEnergy = drone.carry?.[ENERGY] ?? 0;
@@ -37,7 +38,7 @@ export function tick(snapshot: WorldSnapshot): CommandIntent[] {
       commands.push(
         isNear(drone, spawn)
           ? command(sequence++, actions.transfer(drone.id, spawn.id, ENERGY, carriedEnergy))
-          : command(sequence++, actions.moveTo(drone.id, spawn.position.x, spawn.position.y))
+          : command(sequence++, actions.move(drone.id, directionToward(drone, spawn)))
       );
       continue;
     }
@@ -45,7 +46,7 @@ export function tick(snapshot: WorldSnapshot): CommandIntent[] {
     commands.push(
       isNear(drone, source)
         ? command(sequence++, { type: "Harvest", object_id: drone.id, target_id: source.id, resource: ENERGY } satisfies HarvestAction)
-        : command(sequence++, actions.moveTo(drone.id, source.position.x, source.position.y))
+        : command(sequence++, actions.move(drone.id, directionToward(drone, source)))
     );
   }
 
@@ -56,6 +57,10 @@ export function hasEnoughEnergyForWorker(snapshot: WorldSnapshot): boolean {
   const spawn = findMySpawn(snapshot);
   const available = spawn?.store ?? snapshot.resources;
   return hasResources(available, WORKER_COST);
+}
+
+function hasResources(available: Record<string, number | undefined>, cost: Record<string, number>): boolean {
+  return Object.entries(cost).every(([resource, amount]) => (available[resource] ?? 0) >= amount);
 }
 
 function findMySpawn(snapshot: WorldSnapshot): StructureEntity | undefined {
@@ -77,4 +82,15 @@ function findEnergySource(entities: WorldEntity[]): SourceEntity | undefined {
 
 function isNear(a: WorldEntity, b: WorldEntity): boolean {
   return a.position.room === b.position.room && Math.max(Math.abs(a.position.x - b.position.x), Math.abs(a.position.y - b.position.y)) <= 1;
+}
+
+function directionToward(a: WorldEntity, b: WorldEntity): Direction {
+  const dx = Math.sign(b.position.x - a.position.x);
+  const dy = Math.sign(b.position.y - a.position.y);
+  if (dx > 0 && dy <= 0) return "TopRight";
+  if (dx > 0) return "BottomRight";
+  if (dx < 0 && dy >= 0) return "BottomLeft";
+  if (dx < 0) return "TopLeft";
+  if (dy > 0) return "Bottom";
+  return "Top";
 }

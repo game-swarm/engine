@@ -26,6 +26,7 @@ export function tick(snapshot_ptr: i32, snapshot_len: i32): i32 {
 function buildCommands(snapshot: string): string {
   const playerId = numberField(snapshot, "player_id");
   const spawn = findOwnedEntity(snapshot, playerId, "structure", "Spawn");
+  const spawnActor = findOwnedDrone(snapshot, playerId);
   const source = findEntity(snapshot, "source");
   if (spawn.length == 0 || source.length == 0) return "[]";
 
@@ -33,8 +34,8 @@ function buildCommands(snapshot: string): string {
   let sequence = 0;
   const spawnEnergy = storeEnergy(spawn);
   const spawnCooldown = numberField(spawn, "cooldown");
-  if (spawnEnergy >= 100 && spawnCooldown == 0) {
-    commands.push('{"sequence":' + sequence.toString() + ',"action":{"type":"Spawn","spawn_id":' + idField(spawn).toString() + ',"body":["Work"]}}');
+  if (spawnEnergy >= 100 && spawnCooldown == 0 && spawnActor.length > 0) {
+    commands.push('{"sequence":' + sequence.toString() + ',"action":{"type":"Spawn","object_id":' + idField(spawnActor).toString() + ',"spawn_id":' + idField(spawn).toString() + ',"body_parts":["Work"]}}');
     sequence += 1;
   }
 
@@ -62,10 +63,8 @@ function buildCommands(snapshot: string): string {
 function actionForTarget(sequence: i32, actor: string, target: string, transfer: bool, amount: i32): string {
   const actorId = idField(actor);
   const targetId = idField(target);
-  const tx = numberField(target, "x");
-  const ty = numberField(target, "y");
   if (!isNear(actor, target)) {
-    return '{"sequence":' + sequence.toString() + ',"action":{"type":"MoveTo","object_id":' + actorId.toString() + ',"x":' + tx.toString() + ',"y":' + ty.toString() + "}}";
+    return '{"sequence":' + sequence.toString() + ',"action":{"type":"Move","object_id":' + actorId.toString() + ',"direction":"' + directionToward(actor, target) + '"}}';
   }
   if (transfer) {
     return '{"sequence":' + sequence.toString() + ',"action":{"type":"Transfer","object_id":' + actorId.toString() + ',"target_id":' + targetId.toString() + ',"resource":"' + ENERGY + '","amount":' + amount.toString() + "}}";
@@ -94,6 +93,19 @@ function findEntity(snapshot: string, typeName: string): string {
     const entity = objectAt(snapshot, start);
     cursor = start + entity.length;
     if (entity.indexOf('"type":"' + typeName + '"') >= 0) return entity;
+  }
+}
+
+function findOwnedDrone(snapshot: string, owner: i32): string {
+  let cursor = 0;
+  while (true) {
+    const start = snapshot.indexOf('{"id":', cursor);
+    if (start < 0) return "";
+    const entity = objectAt(snapshot, start);
+    cursor = start + entity.length;
+    if (entity.indexOf('"type":"drone"') >= 0 && numberField(entity, "owner") == owner) {
+      return entity;
+    }
   }
 }
 
@@ -150,4 +162,15 @@ function isNear(a: string, b: string): bool {
   const dx = ax > bx ? ax - bx : bx - ax;
   const dy = ay > by ? ay - by : by - ay;
   return dx <= 1 && dy <= 1;
+}
+
+function directionToward(a: string, b: string): string {
+  const dx = numberField(b, "x") - numberField(a, "x");
+  const dy = numberField(b, "y") - numberField(a, "y");
+  if (dx > 0 && dy <= 0) return "TopRight";
+  if (dx > 0) return "BottomRight";
+  if (dx < 0 && dy >= 0) return "BottomLeft";
+  if (dx < 0) return "TopLeft";
+  if (dy > 0) return "Bottom";
+  return "Top";
 }

@@ -29,9 +29,25 @@ const baseSnapshot: WorldSnapshot = {
 
 describe("starter bot", () => {
   it("spawns a worker once the spawn has 100 Energy", () => {
-    const commands = tick(baseSnapshot);
+    const snapshot: WorldSnapshot = {
+      ...baseSnapshot,
+      entities: [
+        ...baseSnapshot.entities,
+        {
+          id: 150,
+          type: "drone",
+          owner: 42,
+          position: { x: 0, y: 1, room: 1 },
+          body: ["Work"],
+          fatigue: 0,
+          carry: { Energy: 0 },
+          carry_capacity: 100
+        }
+      ]
+    };
+    const commands = tick(snapshot);
     expect(hasEnoughEnergyForWorker(baseSnapshot)).toBe(true);
-    expect(commands[0]).toEqual({ sequence: 0, action: { type: "Spawn", spawn_id: 100, body: ["Work"] } });
+    expect(commands[0]).toEqual({ sequence: 0, action: { type: "Spawn", object_id: 150, spawn_id: 100, body_parts: ["Work"] } });
   });
 
   it("harvests, returns, and serializes valid SDK command output", () => {

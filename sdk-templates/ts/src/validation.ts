@@ -2,11 +2,11 @@ import type {
   Action,
   BodyPart,
   CommandIntent,
+  DamageType,
   Direction,
   StructureType,
-  ValidationIssue,
-  ValidationResult,
 } from "./commands.js";
+import type { ValidationIssue, ValidationResult } from "./types_template.js";
 import {
   MAX_BODY_PARTS,
   MAX_COMMANDS_PER_PLAYER,
@@ -17,10 +17,10 @@ import {
 const MIN_ROOM_COORD = -127;
 const MAX_ROOM_COORD = 127;
 const MAX_STRING_LENGTH = 1024;
+const MAX_UINT64 = (1n << 64n) - 1n;
 
 const actionFields: Record<string, readonly string[]> = {
   Move: ["type", "object_id", "direction"],
-  MoveTo: ["type", "object_id", "x", "y"],
   Harvest: ["type", "object_id", "target_id", "resource"],
   Transfer: ["type", "object_id", "target_id", "resource", "amount"],
   Withdraw: ["type", "object_id", "target_id", "resource", "amount"],
@@ -31,15 +31,18 @@ const actionFields: Record<string, readonly string[]> = {
   Heal: ["type", "object_id", "target_id"],
   ClaimController: ["type", "object_id", "target_id"],
   Spawn: ["type", "object_id", "spawn_id", "body_parts"],
-  Recycle: ["type", "object_id", "spawn_id"],
-  Hack: ["type", "object_id", "target_id"],
-  Drain: ["type", "object_id", "target_id", "resource"],
-  Overload: ["type", "object_id", "target_id"],
-  Debilitate: ["type", "object_id", "target_id", "damage_type"],
-  Disrupt: ["type", "object_id", "target_id"],
-  Fortify: ["type", "object_id", "target_id"],
+  Recycle: ["type", "object_id"],
+  Hack: ["type", "object_id", "target_id", "damage_type", "cooldown"],
+  Drain: ["type", "object_id", "target_id", "damage_type", "cooldown"],
+  Overload: ["type", "object_id", "target_id", "damage_type", "cooldown"],
+  Debilitate: ["type", "object_id", "target_id", "damage_type", "cooldown"],
+  Disrupt: ["type", "object_id", "target_id", "damage_type", "cooldown"],
+  Fortify: ["type", "object_id", "target_id", "cooldown"],
+  Leech: ["type", "object_id", "target_id", "damage_type", "cooldown"],
+  Fabricate: ["type", "object_id", "target_id", "cooldown"],
   TransferToGlobal: ["type", "resource", "amount"],
-  TransferFromGlobal: ["type", "resource", "amount"]
+  TransferFromGlobal: ["type", "resource", "amount"],
+  AlliedTransfer: ["type", "target_player", "resource", "amount"]
 };
 
 const directions = new Set<Direction>(["Top", "TopRight", "BottomRight", "Bottom", "BottomLeft", "TopLeft"]);
@@ -57,7 +60,8 @@ const structureTypes = new Set<StructureType>([
   "Nuker",
   "Observer",
   "PowerSpawn",
-  "Factory"
+  "Factory",
+  "Depot"
 ]);
 
 export function parseTickOutput(input: string | Uint8Array): ValidationResult<CommandIntent[]> {
@@ -67,7 +71,14 @@ export function parseTickOutput(input: string | Uint8Array): ValidationResult<Co
 
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    value = JSON.parse(text, (_key, parsedValue, context?: { source?: string }) => {
+      const source = context?.source;
+      if (typeof parsedValue === "number" && source && /^\d+$/.test(source)) {
+        const exact = BigInt(source);
+        if (exact > BigInt(Number.MAX_SAFE_INTEGER) && exact <= MAX_UINT64) return exact;
+      }
+      return parsedValue;
+    });
   } catch {
     return fail("$", "tick output is not valid JSON", "InvalidJson");
   }
@@ -79,9 +90,41 @@ export function serializeTickOutput(commands: CommandIntent[]): string {
   if (!validation.ok) {
     throw new Error(`Invalid tick output: ${validation.issues.map((issue) => `${issue.path} ${issue.message}`).join("; ")}`);
   }
-  const text = JSON.stringify(validation.value);
+  const text = stringifyJson(validation.value);
   if (new TextEncoder().encode(text).byteLength > MAX_TICK_OUTPUT_BYTES) throw new Error("Invalid tick output: exceeds 256KB");
   return text;
+}
+
+export function stringifyJson(value: unknown): string {
+  const serialized = stringifyJsonValue(value);
+  if (serialized === undefined) throw new TypeError("value is not JSON serializable");
+  return serialized;
+}
+
+function stringifyJsonValue(value: unknown): string | undefined {
+  if (value === null) return "null";
+
+  switch (typeof value) {
+    case "bigint":
+      if (value < 0n || value > MAX_UINT64) throw new RangeError("bigint value is outside the u64 range");
+      return value.toString();
+    case "boolean":
+    case "number":
+    case "string":
+      return JSON.stringify(value);
+    case "object":
+      if (Array.isArray(value)) {
+        return `[${Array.from(value, (item) => stringifyJsonValue(item) ?? "null").join(",")}]`;
+      }
+      return `{${Object.entries(value)
+        .flatMap(([key, item]) => {
+          const serialized = stringifyJsonValue(item);
+          return serialized === undefined ? [] : [`${JSON.stringify(key)}:${serialized}`];
+        })
+        .join(",")}}`;
+    default:
+      return undefined;
+  }
 }
 
 export function validateCommandIntents(value: unknown): ValidationResult<CommandIntent[]> {
@@ -115,18 +158,12 @@ export function validateAction(value: unknown, path = "$", issues: ValidationIss
     return issues;
   }
   exactKeys(value, actionFields[value.type] ?? [], path, issues);
-  switch (value.type as Action["type"]) {
+  switch (value.type as string) {
     case "Move":
       objectId(value.object_id, `${path}.object_id`, issues);
       enumValue(value.direction, directions, `${path}.direction`, issues);
       break;
-    case "MoveTo":
-      objectId(value.object_id, `${path}.object_id`, issues);
-      coord(value.x, `${path}.x`, issues);
-      coord(value.y, `${path}.y`, issues);
-      break;
     case "Harvest":
-    case "Drain":
       objectId(value.object_id, `${path}.object_id`, issues);
       objectId(value.target_id, `${path}.target_id`, issues);
       if (value.resource !== undefined) boundedString(value.resource, `${path}.resource`, issues);
@@ -148,8 +185,6 @@ export function validateAction(value: unknown, path = "$", issues: ValidationIss
     case "Attack":
     case "RangedAttack":
     case "Heal":
-    case "Hack":
-    case "Disrupt":
       objectId(value.object_id, `${path}.object_id`, issues);
       objectId(value.target_id, `${path}.target_id`, issues);
       break;
@@ -158,6 +193,7 @@ export function validateAction(value: unknown, path = "$", issues: ValidationIss
       objectId(value.spawn_id, `${path}.spawn_id`, issues);
       if (!Array.isArray(value.body_parts)) issue(issues, `${path}.body_parts`, "body_parts must be an array", "ArrayRequired");
       else {
+        if (value.body_parts.length === 0) issue(issues, `${path}.body_parts`, "body_parts must not be empty", "BodyEmpty");
         if (value.body_parts.length > MAX_BODY_PARTS) issue(issues, `${path}.body_parts`, `body_parts exceeds ${MAX_BODY_PARTS} parts`, "BodyTooLarge");
         value.body_parts.forEach((part, index) => enumValue(part, bodyParts, `${path}.body_parts[${index}]`, issues));
       }
@@ -168,23 +204,31 @@ export function validateAction(value: unknown, path = "$", issues: ValidationIss
       break;
     case "Recycle":
       objectId(value.object_id, `${path}.object_id`, issues);
-      objectId(value.spawn_id, `${path}.spawn_id`, issues);
       break;
+    case "Hack":
+    case "Drain":
     case "Overload":
-      objectId(value.object_id, `${path}.object_id`, issues);
-      u32(value.target_id, `${path}.target_id`, issues);
-      break;
     case "Debilitate":
+    case "Disrupt":
+    case "Leech":
       objectId(value.object_id, `${path}.object_id`, issues);
       objectId(value.target_id, `${path}.target_id`, issues);
-      enumValue(value.damage_type, damageTypes, `${path}.damage_type`, issues);
+      if (value.damage_type !== undefined) enumValue(value.damage_type, damageTypes, `${path}.damage_type`, issues);
+      if (value.cooldown !== undefined) u32(value.cooldown, `${path}.cooldown`, issues);
       break;
     case "Fortify":
+    case "Fabricate":
       objectId(value.object_id, `${path}.object_id`, issues);
-      if (value.target_id !== undefined) objectId(value.target_id, `${path}.target_id`, issues);
+      objectId(value.target_id, `${path}.target_id`, issues);
+      if (value.cooldown !== undefined) u32(value.cooldown, `${path}.cooldown`, issues);
       break;
     case "TransferToGlobal":
     case "TransferFromGlobal":
+      boundedString(value.resource, `${path}.resource`, issues);
+      u32(value.amount, `${path}.amount`, issues);
+      break;
+    case "AlliedTransfer":
+      u32(value.target_player, `${path}.target_player`, issues);
       boundedString(value.resource, `${path}.resource`, issues);
       u32(value.amount, `${path}.amount`, issues);
       break;
@@ -203,7 +247,7 @@ function exactKeys(value: Record<string, unknown>, allowed: readonly string[], p
     if (!allowed.includes(key)) issue(issues, `${path}.${key}`, "field is not allowed", "AdditionalProperty");
   }
   for (const key of allowed) {
-    if (key !== "resource" && key !== "target_id" && !(key in value)) issue(issues, `${path}.${key}`, "field is required", "Required");
+    if (key !== "resource" && key !== "target_id" && key !== "damage_type" && key !== "cooldown" && !(key in value)) issue(issues, `${path}.${key}`, "field is required", "Required");
   }
 }
 
@@ -217,8 +261,8 @@ function u32(value: unknown, path: string, issues: ValidationIssue[]): void {
 
 function objectId(value: unknown, path: string, issues: ValidationIssue[]): void {
   const validNumber = Number.isSafeInteger(value) && (value as number) >= 0;
-  const validBigint = typeof value === "bigint" && value >= 0n;
-  if (!validNumber && !validBigint) issue(issues, path, "must be a non-negative safe integer ObjectId", "InvalidObjectId");
+  const validBigint = typeof value === "bigint" && value >= 0n && value <= MAX_UINT64;
+  if (!validNumber && !validBigint) issue(issues, path, "must be a u64 ObjectId", "InvalidObjectId");
 }
 
 function coord(value: unknown, path: string, issues: ValidationIssue[]): void {

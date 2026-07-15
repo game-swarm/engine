@@ -8,6 +8,20 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub const DEFAULT_DRONE_LIFESPAN: u32 = 1500;
 pub const MIN_LIFESPAN: u32 = 100;
 
+pub const VANILLA_ACTION_NAMES: &[&str] = &[
+    "Attack",
+    "RangedAttack",
+    "Heal",
+    "Hack",
+    "Drain",
+    "Overload",
+    "Debilitate",
+    "Disrupt",
+    "Fortify",
+    "Leech",
+    "Fabricate",
+];
+
 pub type PlayerId = u32;
 
 pub const DEFAULT_TICK_INTERVAL_MS: u64 = 3_000;
@@ -1025,8 +1039,14 @@ pub struct CustomActionRegistry {
 
 impl CustomActionRegistry {
     pub fn from_defs(defs: Vec<CustomActionDef>) -> Self {
-        let mut actions = IndexMap::new();
+        let mut actions = vanilla_action_defs()
+            .into_iter()
+            .map(|def| (def.name.clone(), def))
+            .collect::<IndexMap<_, _>>();
         for def in defs {
+            if is_vanilla_action_name(&def.name) {
+                continue;
+            }
             actions.insert(def.name.clone(), def);
         }
         Self { actions }
@@ -1035,6 +1055,136 @@ impl CustomActionRegistry {
     pub fn get(&self, name: &str) -> Option<&CustomActionDef> {
         self.actions.get(name)
     }
+}
+
+pub fn is_vanilla_action_name(name: &str) -> bool {
+    VANILLA_ACTION_NAMES.contains(&name)
+}
+
+fn custom_action_def(
+    name: &str,
+    description: &str,
+    range: u32,
+    special_effect: Option<&str>,
+    cooldown: Option<u32>,
+    cost: &[(&str, u32)],
+) -> CustomActionDef {
+    CustomActionDef {
+        name: name.to_string(),
+        description: description.to_string(),
+        range,
+        special_effect: special_effect.map(str::to_string),
+        cooldown,
+        cost: cost
+            .iter()
+            .map(|(resource, amount)| ((*resource).to_string(), *amount))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+pub fn vanilla_action_defs() -> Vec<CustomActionDef> {
+    let attack = custom_action_def("Attack", "Melee attack target", 1, None, None, &[]);
+    let ranged_attack =
+        custom_action_def("RangedAttack", "Ranged attack target", 3, None, None, &[]);
+    let heal = custom_action_def("Heal", "Repair or heal target", 1, None, None, &[]);
+
+    let mut hack = custom_action_def(
+        "Hack",
+        "5-stage intrusion attack",
+        1,
+        Some("hack"),
+        Some(200),
+        &[("Energy", 1000)],
+    );
+    hack.damage_type = Some("Psionic".to_string());
+
+    let mut drain = custom_action_def(
+        "Drain",
+        "Continuously drain resources from target",
+        1,
+        Some("drain"),
+        Some(50),
+        &[("Energy", 200)],
+    );
+    drain.damage_type = Some("EMP".to_string());
+
+    let mut overload = custom_action_def(
+        "Overload",
+        "Reduce target player fuel budget",
+        5,
+        Some("overload"),
+        Some(200),
+        &[("Energy", 300)],
+    );
+    overload.damage_type = Some("EMP".to_string());
+    overload.special_param = Some(500_000.0);
+
+    let mut debilitate = custom_action_def(
+        "Debilitate",
+        "Apply vulnerability to a target damage type for 50 ticks",
+        3,
+        Some("debilitate"),
+        Some(150),
+        &[("Energy", 200)],
+    );
+    debilitate.damage_type = Some("Corrosive".to_string());
+    debilitate.special_param = Some(2.0);
+
+    let mut disrupt = custom_action_def(
+        "Disrupt",
+        "Interrupt target current continuous action",
+        1,
+        Some("disrupt"),
+        Some(50),
+        &[("Energy", 100)],
+    );
+    disrupt.damage_type = Some("Sonic".to_string());
+
+    let mut fortify = custom_action_def(
+        "Fortify",
+        "Shield and cleanse self or an ally",
+        1,
+        Some("fortify"),
+        Some(300),
+        &[("Energy", 400)],
+    );
+    fortify.special_param = Some(0.5);
+
+    let mut leech = custom_action_def(
+        "Leech",
+        "Kinetic attack that heals the attacker for 50% of dealt damage",
+        1,
+        Some("leech"),
+        Some(100),
+        &[("Energy", 300)],
+    );
+    leech.damage_type = Some("Kinetic".to_string());
+    leech.base_damage = Some(15);
+    leech.special_param = Some(0.5);
+
+    let fabricate = custom_action_def(
+        "Fabricate",
+        "Convert enemy drone into an owned structure",
+        1,
+        Some("fabricate"),
+        Some(500),
+        &[("Energy", 5000)],
+    );
+
+    vec![
+        attack,
+        ranged_attack,
+        heal,
+        hack,
+        drain,
+        overload,
+        debilitate,
+        disrupt,
+        fortify,
+        leech,
+        fabricate,
+    ]
 }
 
 /// Phase 2b StatusState components — each special attack gets its own
@@ -1467,6 +1617,39 @@ pub struct RepairTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_action_registry_keeps_vanilla_actions_immutable() {
+        let registry = CustomActionRegistry::from_defs(vec![CustomActionDef {
+            name: "Overload".to_string(),
+            description: "Attempted override".to_string(),
+            range: 1,
+            cost: [("Energy".to_string(), 1)].into_iter().collect(),
+            ..Default::default()
+        }]);
+
+        let overload = registry.get("Overload").unwrap();
+        assert_eq!(overload.range, 5);
+        assert_eq!(overload.cost.get("Energy"), Some(&300));
+        assert_eq!(overload.special_effect.as_deref(), Some("overload"));
+    }
+
+    #[test]
+    fn custom_action_registry_merges_non_reserved_actions() {
+        let registry = CustomActionRegistry::from_defs(vec![CustomActionDef {
+            name: "ShieldPulse".to_string(),
+            description: "Custom shield pulse".to_string(),
+            range: 2,
+            special_effect: Some("fortify".to_string()),
+            cost: [("Energy".to_string(), 33)].into_iter().collect(),
+            ..Default::default()
+        }]);
+
+        assert_eq!(registry.actions.len(), 12);
+        assert!(registry.get("Attack").is_some());
+        assert_eq!(registry.get("Overload").unwrap().range, 5);
+        assert_eq!(registry.get("ShieldPulse").unwrap().range, 2);
+    }
 
     #[test]
     fn drone_lifespan_includes_age_modifiers() {

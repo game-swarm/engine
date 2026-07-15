@@ -1,4 +1,5 @@
-import type { PlayerId, Position, WorldConfig, WorldEntity } from "./commands.js";
+import type { PlayerId, Position } from "./commands.js";
+import type { WorldConfig, WorldEntity } from "./types_template.js";
 
 export interface VisibilityContext {
   player_id: PlayerId;

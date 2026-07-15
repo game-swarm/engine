@@ -19,12 +19,16 @@ pub fn tick(snapshot: Snapshot) -> TickResult {
     let mut commands = Vec::new();
     let mut sequence = 0;
 
-    if spawn_energy(spawn, &snapshot) >= WORKER_COST && structure_cooldown(spawn) == 0 {
+    if spawn_energy(spawn, &snapshot) >= WORKER_COST
+        && structure_cooldown(spawn) == 0
+        && let Some(actor) = find_my_workers(&snapshot).next()
+    {
         commands.push(command(
             sequence,
             CommandAction::Spawn {
+                object_id: actor.id,
                 spawn_id: spawn.id,
-                body: WORKER_BODY.to_vec(),
+                body_parts: WORKER_BODY.to_vec(),
             },
         ));
         sequence += 1;
@@ -229,8 +233,8 @@ fn hex_distance(from: &Position, to: &Position) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types_template::PlayerSnapshot;
     use crate::commands::StructureType;
+    use crate::types_template::PlayerSnapshot;
     use std::collections::BTreeMap;
 
     #[test]
@@ -252,7 +256,11 @@ mod tests {
         assert_eq!(result.commands.len(), 2);
         assert!(matches!(
             result.commands[0].action,
-            CommandAction::Spawn { spawn_id: 10, .. }
+            CommandAction::Spawn {
+                object_id: 30,
+                spawn_id: 10,
+                ..
+            }
         ));
         assert_eq!(
             result.commands[1].action,
@@ -320,6 +328,7 @@ mod tests {
         assert_eq!(direction_toward(&from, &to), Some(Direction::BottomRight));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn drone<const N: usize>(
         id: u64,
         x: i32,

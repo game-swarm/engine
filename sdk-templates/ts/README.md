@@ -19,11 +19,14 @@ const tick: TickHandler = (snapshot) => {
   const spawn = snapshot.entities.find(
     (entity) => entity.type === "structure" && entity.owner === snapshot.player_id
   );
+  const actor = snapshot.entities.find(
+    (entity) => entity.type === "drone" && entity.owner === snapshot.player_id
+  );
 
-  if (!spawn) return [];
+  if (!spawn || !actor) return [];
 
   return [
-    command(0, actions.spawn(spawn.id, ["Move", "Work", "Carry"]))
+    command(0, actions.spawn(actor.id, spawn.id, ["Move", "Work", "Carry"]))
   ];
 };
 

@@ -3,7 +3,7 @@
 // and command types come from commands.rs which is produced by
 // swarm-engine's IDL codegen.
 
-use crate::commands::{BodyPart, Command, Direction, StructureType};
+use crate::commands::{BodyPart, Command, StructureType};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
