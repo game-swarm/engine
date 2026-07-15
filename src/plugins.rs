@@ -37,6 +37,20 @@ impl Default for PluginEntry {
     }
 }
 
+impl PluginEntry {
+    pub fn config_bool(&self, key: &str) -> Option<bool> {
+        self.config.get(key).and_then(Value::as_bool)
+    }
+
+    pub fn config_u64(&self, key: &str) -> Option<u64> {
+        self.config.get(key).and_then(Value::as_u64)
+    }
+
+    pub fn config_u32(&self, key: &str) -> Option<u32> {
+        self.config_u64(key).and_then(|value| value.try_into().ok())
+    }
+}
+
 impl PluginLock {
     pub fn load_or_default(path: impl AsRef<Path>) -> Self {
         Self::load(path).unwrap_or_else(|_| Self::vanilla())
@@ -89,4 +103,28 @@ pub fn register_mods(app: &mut App, lock: &PluginLock) {
 
 pub fn load_default_plugin_lock() -> PluginLock {
     PluginLock::load_or_default("mods.lock")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn plugin_entry_reads_typed_config_values() {
+        let entry = PluginEntry {
+            version: "0.1.0".to_string(),
+            enabled: true,
+            config: HashMap::from([
+                ("enabled".to_string(), json!(false)),
+                ("damage_multiplier".to_string(), json!(12500)),
+                ("boss_spawn_interval".to_string(), json!(9000)),
+            ]),
+        };
+
+        assert_eq!(entry.config_bool("enabled"), Some(false));
+        assert_eq!(entry.config_u32("damage_multiplier"), Some(12_500));
+        assert_eq!(entry.config_u64("boss_spawn_interval"), Some(9_000));
+        assert_eq!(entry.config_u32("missing"), None);
+    }
 }

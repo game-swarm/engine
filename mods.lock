@@ -1,7 +1,7 @@
 [plugins.combat-core]
 version = "0.1.0"
 enabled = true
-config = { damage_multiplier = 100, body_part_types = "core,movement,attack" }
+config = { damage_multiplier = 10000, body_part_types = "core,movement,attack" }
 
 [plugins.depot-storage]
 version = "0.1.0"
