@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use bevy::prelude::Resource as BevyResource;
 use serde::{Deserialize, Serialize};
 
-use crate::command::{CommandIntent, CommandResult, CommandSource, RawCommand, Tick, source_gate};
+use crate::command::{CommandIntent, CommandSource, RawCommand, Tick, source_gate};
 use crate::components::PlayerId;
 use crate::realtime::{NatsPublisher, RealtimeError};
 use crate::world::{SwarmWorld, create_world_with_shard_config};
@@ -168,8 +168,18 @@ pub enum ShardRouteError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutedCommand {
-    Local(RawCommand),
+    Local(Box<RawCommand>),
     Published { subject: String },
+}
+
+#[derive(Debug)]
+pub struct ShardRoutingCapability {
+    _private: (),
+}
+
+#[cfg(test)]
+pub(crate) const fn shard_routing_capability() -> ShardRoutingCapability {
+    ShardRoutingCapability { _private: () }
 }
 
 pub struct ShardRouter<P> {
@@ -196,10 +206,14 @@ where
         self.publisher
     }
 
-    pub fn route_raw_command(&mut self, raw: RawCommand) -> Result<RoutedCommand, ShardRouteError> {
+    pub fn route_raw_command(
+        &mut self,
+        _capability: &ShardRoutingCapability,
+        raw: RawCommand,
+    ) -> Result<RoutedCommand, ShardRouteError> {
         let target_shard = self.registry.local.shard_for_player(raw.player_id);
         if target_shard == self.registry.local.shard_id {
-            return Ok(RoutedCommand::Local(raw));
+            return Ok(RoutedCommand::Local(Box::new(raw)));
         }
 
         let subject = self
@@ -223,6 +237,7 @@ where
 
     pub fn route_intent(
         &mut self,
+        capability: &ShardRoutingCapability,
         player_id: PlayerId,
         tick: Tick,
         source: CommandSource,
@@ -231,7 +246,7 @@ where
         let raw = source_gate(player_id, tick, source, intent).map_err(|error| {
             ShardRouteError::Serialize(format!("source gate rejected: {error:?}"))
         })?;
-        self.route_raw_command(raw)
+        self.route_raw_command(capability, raw)
     }
 }
 
@@ -285,25 +300,6 @@ impl MultiShardWorld {
         for world in self.shards.values_mut() {
             world.run_tick();
         }
-    }
-
-    pub fn submit_intent(
-        &mut self,
-        player_id: PlayerId,
-        tick: Tick,
-        source: CommandSource,
-        intent: CommandIntent,
-    ) -> CommandResult {
-        let raw = source_gate(player_id, tick, source, intent)?;
-        self.submit_raw_command(raw)
-    }
-
-    pub fn submit_raw_command(&mut self, raw: RawCommand) -> CommandResult {
-        let shard_id = self.shard_for_player(raw.player_id);
-        self.shards
-            .get_mut(&shard_id)
-            .expect("computed shard must exist")
-            .submit_raw_command(raw)
     }
 
     pub fn state_checksum(&mut self) -> u64 {

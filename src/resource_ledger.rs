@@ -10,6 +10,7 @@ use crate::resources::{
     GlobalStorageConfig, PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, ResourceAmount, ResourceName,
 };
+use crate::tick::{TickTraceEvent, TickTraceEventLog};
 
 // ═══════════════════════════════════════════════════════════════════
 // Resource Operations
@@ -382,8 +383,24 @@ pub struct ResourceLedgerEntry {
     pub source_player: Option<PlayerId>,
     pub target_player: Option<PlayerId>,
     pub resource: String,
+    /// Compatibility amount: gross requested amount for fee-bearing flows.
     pub amount: i64,
+    #[serde(default)]
+    pub amount_requested: ResourceAmount,
+    #[serde(default)]
+    pub amount_delivered: ResourceAmount,
     pub operation: ResourceOperation,
+    #[serde(default)]
+    pub fee_paid: ResourceAmount,
+    #[serde(default)]
+    pub basis_points_used: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceLedgerTraceSnapshot {
+    pub operations: Vec<ResourceLedgerEntry>,
+    pub balance_delta: IndexMap<PlayerId, IndexMap<String, i64>>,
+    pub ledger_checksum: u64,
 }
 
 impl ResourceLedger {
@@ -396,13 +413,61 @@ impl ResourceLedger {
         amount: i64,
         operation: ResourceOperation,
     ) {
+        self.record_attributed(tick, source, target, resource, amount, operation, 0, 0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_attributed(
+        &mut self,
+        tick: Tick,
+        source: Option<PlayerId>,
+        target: Option<PlayerId>,
+        resource: &str,
+        amount: i64,
+        operation: ResourceOperation,
+        fee_paid: ResourceAmount,
+        basis_points_used: u32,
+    ) {
+        let gross = amount.unsigned_abs().min(ResourceAmount::MAX as u64) as ResourceAmount;
+        let delivered = gross.saturating_sub(fee_paid);
+        self.record_transfer_amounts(
+            tick,
+            source,
+            target,
+            resource,
+            gross,
+            delivered,
+            operation,
+            fee_paid,
+            basis_points_used,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_transfer_amounts(
+        &mut self,
+        tick: Tick,
+        source: Option<PlayerId>,
+        target: Option<PlayerId>,
+        resource: &str,
+        amount_requested: ResourceAmount,
+        amount_delivered: ResourceAmount,
+        operation: ResourceOperation,
+        fee_paid: ResourceAmount,
+        basis_points_used: u32,
+    ) {
+        let amount = i64::from(amount_requested);
         self.ops.push(ResourceLedgerEntry {
             tick,
             source_player: source,
             target_player: target,
             resource: resource.to_string(),
             amount,
+            amount_requested,
+            amount_delivered,
             operation,
+            fee_paid,
+            basis_points_used,
         });
 
         // Track balance delta
@@ -412,7 +477,7 @@ impl ResourceLedger {
                 .entry(s)
                 .or_default()
                 .entry(resource.to_string())
-                .or_default() -= amount;
+                .or_default() -= i64::from(amount_requested);
         }
         if let Some(t) = target {
             *self
@@ -420,19 +485,85 @@ impl ResourceLedger {
                 .entry(t)
                 .or_default()
                 .entry(resource.to_string())
-                .or_default() += amount;
+                .or_default() += i64::from(amount_delivered);
         }
 
         // Simple rolling checksum
         self.ledger_checksum = self
             .ledger_checksum
-            .wrapping_add(amount.unsigned_abs())
+            .wrapping_add(u64::from(amount_requested))
+            .wrapping_add(u64::from(amount_delivered))
+            .wrapping_add(fee_paid as u64)
+            .wrapping_add(basis_points_used as u64)
             .wrapping_add(tick);
+    }
+
+    pub fn record_transfer_result(&mut self, tick: Tick, result: &TransferResult) {
+        if !result.success {
+            return;
+        }
+        self.record_transfer_amounts(
+            tick,
+            result.source_player,
+            result.target_player,
+            &result.resource,
+            result.amount_requested,
+            result.amount_delivered,
+            result.operation,
+            result.fee_paid,
+            result.basis_points_used,
+        );
+    }
+
+    pub fn trace_snapshot(&self) -> ResourceLedgerTraceSnapshot {
+        ResourceLedgerTraceSnapshot {
+            operations: self.ops.clone(),
+            balance_delta: self.balance_delta.clone(),
+            ledger_checksum: self.ledger_checksum,
+        }
+    }
+}
+
+impl ResourceLedgerEntry {
+    pub fn tick_trace_event(&self) -> TickTraceEvent {
+        let event = if self.fee_paid > 0
+            || self.basis_points_used > 0
+            || self.amount_requested != self.amount_delivered
+        {
+            format!(
+                "{:?}:requested={}:delivered={}:fee_paid={}:basis_points_used={}",
+                self.operation,
+                self.amount_requested,
+                self.amount_delivered,
+                self.fee_paid,
+                self.basis_points_used
+            )
+        } else {
+            format!("{:?}", self.operation)
+        };
+        TickTraceEvent {
+            system: "resource_ledger".to_string(),
+            entity: u64::from(
+                self.target_player
+                    .or(self.source_player)
+                    .unwrap_or_default(),
+            ),
+            event,
+            amount: self.amount.min(i64::from(u32::MAX)) as u32,
+            resource: if self.resource.is_empty() {
+                None
+            } else {
+                Some(self.resource.clone())
+            },
+        }
     }
 }
 
 /// S29 resource_ledger system — runs last to audit resource consistency
-pub fn resource_ledger_system(mut ledger: ResMut<ResourceLedger>) {
+pub fn resource_ledger_system(
+    mut ledger: ResMut<ResourceLedger>,
+    mut trace_events: ResMut<TickTraceEventLog>,
+) {
     // Per §08: produce balance summary, verify Σ inflows - Σ outflows = Δ storage
     let total_inflow: i64 = ledger
         .balance_delta
@@ -451,6 +582,10 @@ pub fn resource_ledger_system(mut ledger: ResMut<ResourceLedger>) {
     // The net should be zero (balanced ledger invariant)
     // Imbalance is noted for diagnostics; logged via EventLog in production paths
     let _imbalance = total_inflow - total_outflow;
+
+    trace_events
+        .events
+        .extend(ledger.ops.iter().map(ResourceLedgerEntry::tick_trace_event));
 
     // Clear ops for next tick (but preserve checksum continuity)
     ledger.ops.clear();
@@ -532,7 +667,60 @@ mod tests {
             *ledger.balance_delta.get(&2).unwrap().get("energy").unwrap(),
             100
         );
-        assert_eq!(ledger.ledger_checksum, 100);
+        assert_eq!(ledger.ledger_checksum, 200);
+    }
+
+    #[test]
+    fn fee_transfer_records_gross_net_fee_and_reconstructs_balance() {
+        let mut ledger = ResourceLedger::default();
+        let result = TransferResult {
+            operation: ResourceOperation::GlobalDeposit,
+            source_player: Some(1),
+            target_player: Some(2),
+            resource: "Energy".to_string(),
+            amount_requested: 100,
+            amount_delivered: 95,
+            fee_paid: 5,
+            basis_points_used: 500,
+            delayed_until: None,
+            success: true,
+            rejection_reason: None,
+        };
+
+        ledger.record_transfer_result(77, &result);
+
+        assert_eq!(ledger.ops.len(), 1);
+        let entry = &ledger.ops[0];
+        assert_eq!(entry.amount, 100);
+        assert_eq!(entry.amount_requested, 100);
+        assert_eq!(entry.amount_delivered, 95);
+        assert_eq!(entry.fee_paid, 5);
+        assert_eq!(entry.basis_points_used, 500);
+        assert_eq!(
+            *ledger.balance_delta.get(&1).unwrap().get("Energy").unwrap(),
+            -100
+        );
+        assert_eq!(
+            *ledger.balance_delta.get(&2).unwrap().get("Energy").unwrap(),
+            95
+        );
+
+        let event = entry.tick_trace_event();
+        assert_eq!(event.amount, 100);
+        assert!(event.event.contains("requested=100"));
+        assert!(event.event.contains("delivered=95"));
+        assert!(event.event.contains("fee_paid=5"));
+        assert!(event.event.contains("basis_points_used=500"));
+
+        let snapshot = ledger.trace_snapshot();
+        assert_eq!(snapshot.operations, ledger.ops);
+        assert_eq!(snapshot.balance_delta, ledger.balance_delta);
+        assert_eq!(snapshot.ledger_checksum, ledger.ledger_checksum);
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(encoded["operations"][0]["amount_requested"], 100);
+        assert_eq!(encoded["operations"][0]["amount_delivered"], 95);
+        assert_eq!(encoded["operations"][0]["fee_paid"], 5);
+        assert_eq!(encoded["operations"][0]["basis_points_used"], 500);
     }
 
     #[test]
@@ -551,8 +739,35 @@ mod tests {
         ledger.ops.clear();
         assert!(ledger.ops.is_empty(), "system should clear ops each tick");
         assert_eq!(
-            ledger.ledger_checksum, 50,
+            ledger.ledger_checksum, 100,
             "checksum should persist across ticks"
         );
+    }
+
+    #[test]
+    fn ledger_system_exports_ops_to_tick_trace_events_before_clearing() {
+        let mut app = App::new();
+        app.insert_resource(ResourceLedger::default());
+        app.insert_resource(crate::tick::TickTraceEventLog::default());
+        app.add_systems(Update, resource_ledger_system);
+
+        app.world_mut().resource_mut::<ResourceLedger>().record(
+            12,
+            Some(1),
+            Some(2),
+            "Energy",
+            25,
+            ResourceOperation::LocalTransfer,
+        );
+
+        app.update();
+
+        assert!(app.world().resource::<ResourceLedger>().ops.is_empty());
+        let trace_events = app.world().resource::<crate::tick::TickTraceEventLog>();
+        assert_eq!(trace_events.events.len(), 1);
+        assert_eq!(trace_events.events[0].system, "resource_ledger");
+        assert_eq!(trace_events.events[0].event, "LocalTransfer");
+        assert_eq!(trace_events.events[0].amount, 25);
+        assert_eq!(trace_events.events[0].resource.as_deref(), Some("Energy"));
     }
 }

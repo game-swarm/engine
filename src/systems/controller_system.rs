@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::components::{Controller, StructureType};
+use crate::resource_ledger::{ResourceLedger, ResourceOperation};
 use crate::resources::PlayerGlobalStorage;
 use crate::world::WorldConfig;
 
@@ -150,7 +151,9 @@ pub fn controller_system(
     mut pending: ResMut<PendingControllerUpgrade>,
     mut controllers: Query<&mut Controller>,
     config: Res<WorldConfig>,
+    current_tick: Res<crate::resources::CurrentTick>,
     mut global_storage: ResMut<PlayerGlobalStorage>,
+    mut ledger: ResMut<ResourceLedger>,
 ) {
     for (entity_bits, amount) in pending.0.drain(..) {
         if let Ok(mut controller) = controllers.get_mut(Entity::from_bits(entity_bits))
@@ -191,6 +194,14 @@ pub fn controller_system(
                 .or_default()
                 .entry(config.empire_upkeep.resource.clone())
                 .or_default() += config.empire_upkeep.controller_passive_income;
+            ledger.record(
+                current_tick.0,
+                None,
+                Some(owner),
+                &config.empire_upkeep.resource,
+                i64::from(config.empire_upkeep.controller_passive_income),
+                ResourceOperation::ControllerPassiveIncome,
+            );
         }
     }
 }

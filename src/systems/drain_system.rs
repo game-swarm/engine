@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 
 use crate::components::{DrainState, Owner};
+use crate::resource_ledger::{ResourceLedger, ResourceOperation};
+use crate::resources::CurrentTick;
 use crate::resources::PlayerLocalStorage;
 
 /// S17 drain_system — per-tick resource drain from DrainState targets.
@@ -9,8 +11,14 @@ use crate::resources::PlayerLocalStorage;
 /// resources from the target's local storage each tick.
 pub fn drain_system(
     mut storage: ResMut<PlayerLocalStorage>,
+    current_tick: Option<Res<CurrentTick>>,
+    mut ledger: Option<ResMut<ResourceLedger>>,
     targets: Query<(&DrainState, &Owner)>,
 ) {
+    let tick = current_tick
+        .as_deref()
+        .map(|tick| tick.0)
+        .unwrap_or_default();
     for (state, owner) in targets.iter() {
         if state.remaining_ticks == 0 || state.amount_per_tick == 0 {
             continue;
@@ -18,7 +26,20 @@ pub fn drain_system(
         let player_storage = storage.0.entry(owner.0).or_default();
         let amount = state.amount_per_tick;
         if let Some(current) = player_storage.get_mut(&state.resource) {
+            let drained = amount.min(*current);
             *current = current.saturating_sub(amount);
+            if drained > 0
+                && let Some(ledger) = ledger.as_mut()
+            {
+                ledger.record(
+                    tick,
+                    Some(owner.0),
+                    None,
+                    &state.resource,
+                    i64::from(drained),
+                    ResourceOperation::UpkeepDeduction,
+                );
+            }
         }
     }
 }

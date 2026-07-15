@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use indexmap::{IndexMap, IndexSet};
 
 use crate::components::{Drone, PlayerId, Position};
+use crate::resource_ledger::{ResourceLedger, ResourceOperation};
 use crate::resources::PlayerGlobalStorage;
 use crate::systems::starting_resources_system::PlayerFirstSpawnTick;
 use crate::world::WorldConfig;
@@ -16,6 +17,7 @@ pub fn memory_upkeep_system(
     first_spawn: Res<PlayerFirstSpawnTick>,
     mut drones: Query<(&mut Drone, &Position)>,
     mut global_storage: ResMut<PlayerGlobalStorage>,
+    mut ledger: ResMut<ResourceLedger>,
     mut deficits: Local<EmpireUpkeepDeficits>,
 ) {
     if !config.empire_upkeep.enabled {
@@ -59,11 +61,30 @@ pub fn memory_upkeep_system(
             .or_default();
         if *available >= cost {
             *available -= cost;
+            ledger.record(
+                tick,
+                Some(player_id),
+                None,
+                &config.empire_upkeep.resource,
+                i64::from(cost),
+                ResourceOperation::UpkeepDeduction,
+            );
             deficits.0.shift_remove(&player_id);
             continue;
         }
 
+        let deducted = *available;
         *available = 0;
+        if deducted > 0 {
+            ledger.record(
+                tick,
+                Some(player_id),
+                None,
+                &config.empire_upkeep.resource,
+                i64::from(deducted),
+                ResourceOperation::UpkeepDeduction,
+            );
+        }
         let deficit_ticks = deficits
             .0
             .entry(player_id)

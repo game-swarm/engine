@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::Tick;
 use crate::components::{Controller, Drone, Owner, PlayerId};
+use crate::resource_ledger::{ResourceLedger, ResourceOperation};
 use crate::resources::PlayerGlobalStorage;
 use crate::world::WorldConfig;
 
@@ -17,6 +18,7 @@ pub struct PlayerFirstSpawnTick(pub IndexMap<PlayerId, Tick>);
 
 /// Grants starting resources to players on their first entity spawn,
 /// and seeds the first-spawn tick for free upkeep tracking.
+#[allow(clippy::too_many_arguments)]
 pub fn starting_resources_system(
     config: Res<WorldConfig>,
     current_tick: Res<crate::resources::CurrentTick>,
@@ -25,6 +27,7 @@ pub fn starting_resources_system(
     mut granted: ResMut<StartingResourcesGranted>,
     mut first_spawn: ResMut<PlayerFirstSpawnTick>,
     mut global_storage: ResMut<PlayerGlobalStorage>,
+    mut ledger: ResMut<ResourceLedger>,
 ) {
     let tick = current_tick.0;
 
@@ -39,6 +42,14 @@ pub fn starting_resources_system(
                 for (resource, amount) in &config.starting_resources.starting_resources {
                     let entry = storage.entry(resource.clone()).or_default();
                     *entry = entry.saturating_add(*amount);
+                    ledger.record(
+                        tick,
+                        None,
+                        Some(owner),
+                        resource,
+                        i64::from(*amount),
+                        ResourceOperation::PvEAward,
+                    );
                 }
                 granted.0.insert(owner);
             }
@@ -57,6 +68,14 @@ pub fn starting_resources_system(
             for (resource, amount) in &config.starting_resources.starting_resources {
                 let entry = storage.entry(resource.clone()).or_default();
                 *entry = entry.saturating_add(*amount);
+                ledger.record(
+                    tick,
+                    None,
+                    Some(owner),
+                    resource,
+                    i64::from(*amount),
+                    ResourceOperation::PvEAward,
+                );
             }
             granted.0.insert(owner);
         }

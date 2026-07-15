@@ -3,9 +3,9 @@ use std::time::Instant;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::command::Tick;
+use crate::command::{Tick, object_id};
 use crate::components::{BodyPart, Controller, Drone, PlayerId, Source, Structure};
-use crate::visibility::is_visible_to;
+use crate::visibility::{VisibilitySet, is_visible_to, visible_positions};
 use crate::world::{SwarmWorld, create_world};
 
 // ═══════════════════════════════════════════════════════════════════
@@ -54,6 +54,7 @@ impl DistanceBucket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OmittedBucket {
+    #[serde(rename = "0")]
     Zero,
     Few,
     Some,
@@ -92,7 +93,7 @@ impl OmittedCategories {
 }
 
 /// Lightweight entity representation for snapshots
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotEntity {
     #[serde(rename = "e")]
     pub entity_id: String,
@@ -128,7 +129,7 @@ impl Default for SnapshotConfig {
 type SortKey = (DistanceBucket, String);
 
 /// Per-drone perception snapshot (§1)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerDroneSnapshot {
     pub tick: Tick,
     #[serde(rename = "drone_id")]
@@ -136,6 +137,29 @@ pub struct PerDroneSnapshot {
     pub truncated: bool,
     #[serde(default)]
     pub degraded: bool,
+    pub omitted_categories: OmittedCategories,
+    pub entities: Vec<SnapshotEntity>,
+    pub resources: Vec<SnapshotEntity>,
+    #[serde(default)]
+    pub events: Vec<SnapshotEntity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotActorContext {
+    pub active_drones: Vec<String>,
+    pub primary_drone: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerPlayerSnapshot {
+    pub tick: Tick,
+    pub player_id: PlayerId,
+    pub actor_context: SnapshotActorContext,
+    pub truncated: bool,
+    #[serde(default)]
+    pub degraded: bool,
+    #[serde(default)]
+    pub over_budget: bool,
     pub omitted_categories: OmittedCategories,
     pub entities: Vec<SnapshotEntity>,
     pub resources: Vec<SnapshotEntity>,
@@ -179,7 +203,7 @@ fn hex_distance(a: &crate::components::Position, b: &crate::components::Position
 
 /// Classify an entity into a SnapshotEntity
 fn classify_entity(world: &World, entity: Entity) -> Option<SnapshotEntity> {
-    let entity_id = format!("{:?}", entity);
+    let entity_id = object_id(entity).to_string();
     let position = world
         .get::<crate::components::Position>(entity)
         .map(|p| (p.room.0, p.x, p.y));
@@ -278,7 +302,7 @@ pub fn build_snapshot(
     sortable_entities.sort_by(|a, b| a.0.0.cmp(&b.0.0).then_with(|| a.0.1.cmp(&b.0.1)));
 
     // Separate critical entities (never truncated) from non-critical (§1.4)
-    let drone_eid = format!("{:?}", drone_entity);
+    let drone_eid = object_id(drone_entity).to_string();
     let (critical, truncatable): (Vec<_>, Vec<_>) =
         sortable_entities.into_iter().partition(|(_, e)| {
             e.entity_id == drone_eid // own drone
@@ -288,7 +312,7 @@ pub fn build_snapshot(
         });
 
     // Serialize and truncate if needed
-    let drone_eid = format!("{:?}", drone_entity);
+    let drone_eid = object_id(drone_entity).to_string();
     let serialize_to_size = |entities: &[SnapshotEntity]| -> usize {
         serde_json::to_string(entities).unwrap_or_default().len()
     };
@@ -356,6 +380,195 @@ pub fn collect_snapshots(
     }
 
     snapshots
+}
+
+pub fn build_player_snapshot(
+    world: &mut World,
+    player_id: PlayerId,
+    tick: Tick,
+    config: &SnapshotConfig,
+) -> Option<PerPlayerSnapshot> {
+    let all_entities: Vec<Entity> = world.query::<Entity>().iter(world).collect();
+    let mut owned_drones = all_entities
+        .iter()
+        .copied()
+        .filter(|entity| {
+            world
+                .get::<Drone>(*entity)
+                .is_some_and(|drone| drone.owner == player_id)
+        })
+        .collect::<Vec<_>>();
+    owned_drones.sort_by_key(|entity| object_id(*entity));
+
+    if owned_drones.is_empty() {
+        return None;
+    }
+
+    let active_drones = owned_drones
+        .iter()
+        .map(|entity| object_id(*entity).to_string())
+        .collect::<Vec<_>>();
+    let actor_context = SnapshotActorContext {
+        primary_drone: active_drones[0].clone(),
+        active_drones,
+    };
+    let drone_positions = owned_drones
+        .iter()
+        .filter_map(|entity| {
+            world
+                .get::<crate::components::Position>(*entity)
+                .copied()
+                .map(|position| (*entity, position))
+        })
+        .collect::<Vec<_>>();
+    let visible = config
+        .fog_of_war
+        .then(|| visible_positions(world, player_id));
+
+    let mut sortable_entities: Vec<(SortKey, SnapshotEntity)> = Vec::new();
+    for &entity in &all_entities {
+        if visible.as_ref().is_some_and(|visible| {
+            !is_visible_with_precomputed_positions(world, entity, player_id, visible)
+        }) {
+            continue;
+        }
+
+        if let Some(snapshot_entity) = classify_entity(world, entity) {
+            let bucket = if owned_drones.contains(&entity) {
+                DistanceBucket::Self_
+            } else if let Some(entity_position) = world.get::<crate::components::Position>(entity) {
+                drone_positions
+                    .iter()
+                    .map(|(_, drone_position)| {
+                        DistanceBucket::from_distance(hex_distance(drone_position, entity_position))
+                    })
+                    .min()
+                    .unwrap_or(DistanceBucket::OutOfSight)
+            } else {
+                DistanceBucket::OutOfSight
+            };
+
+            sortable_entities.push(((bucket, snapshot_entity.entity_id.clone()), snapshot_entity));
+        }
+    }
+
+    sortable_entities.sort_by(|a, b| a.0.0.cmp(&b.0.0).then_with(|| a.0.1.cmp(&b.0.1)));
+
+    let (critical, truncatable): (Vec<_>, Vec<_>) =
+        sortable_entities.into_iter().partition(|(_, entity)| {
+            (entity.entity_type == "drone" && entity.owner == Some(player_id))
+                || entity.entity_type == "controller"
+                || entity.entity_type.starts_with("structure")
+        });
+
+    let size_of = |entities: &[SnapshotEntity], omitted_count: usize, over_budget: bool| -> usize {
+        serde_json::to_vec(&PerPlayerSnapshot {
+            tick,
+            player_id,
+            actor_context: actor_context.clone(),
+            truncated: omitted_count > 0 || over_budget,
+            degraded: false,
+            over_budget,
+            omitted_categories: OmittedCategories {
+                entities: OmittedBucket::from_count(omitted_count),
+                resources: OmittedBucket::Zero,
+                events: OmittedBucket::Zero,
+            },
+            entities: entities.to_vec(),
+            resources: Vec::new(),
+            events: Vec::new(),
+        })
+        .unwrap_or_default()
+        .len()
+    };
+
+    let mut kept_entities = critical
+        .iter()
+        .map(|(_, entity)| entity.clone())
+        .collect::<Vec<_>>();
+    let mut omitted_count = 0usize;
+    let mut degraded = false;
+    let critical_over_budget = size_of(&kept_entities, 0, false) > config.max_size_bytes;
+    let critical_count = kept_entities.len();
+    let all_entities_fit = if critical_over_budget {
+        false
+    } else {
+        kept_entities.extend(truncatable.iter().map(|(_, entity)| entity.clone()));
+        if size_of(&kept_entities, 0, false) <= config.max_size_bytes {
+            true
+        } else {
+            kept_entities.truncate(critical_count);
+            false
+        }
+    };
+
+    if !all_entities_fit {
+        for ((bucket, _), entity) in &truncatable {
+            kept_entities.push(entity.clone());
+            if size_of(&kept_entities, omitted_count, critical_over_budget) > config.max_size_bytes
+            {
+                kept_entities.pop();
+                omitted_count += 1;
+                degraded |= *bucket <= DistanceBucket::Medium;
+            }
+        }
+    }
+
+    Some(PerPlayerSnapshot {
+        tick,
+        player_id,
+        actor_context,
+        truncated: omitted_count > 0 || critical_over_budget,
+        degraded,
+        over_budget: critical_over_budget,
+        omitted_categories: OmittedCategories {
+            entities: OmittedBucket::from_count(omitted_count),
+            resources: OmittedBucket::Zero,
+            events: OmittedBucket::Zero,
+        },
+        entities: kept_entities,
+        resources: Vec::new(),
+        events: Vec::new(),
+    })
+}
+
+fn is_visible_with_precomputed_positions(
+    world: &World,
+    entity: Entity,
+    player_id: PlayerId,
+    visible: &VisibilitySet,
+) -> bool {
+    if world
+        .get::<crate::components::Owner>(entity)
+        .is_some_and(|owner| owner.0 == player_id)
+        || world.get::<Controller>(entity).is_some()
+    {
+        return true;
+    }
+
+    world
+        .get::<crate::components::Position>(entity)
+        .is_some_and(|position| visible.contains(&(position.room, position.x, position.y)))
+}
+
+pub fn collect_player_snapshots(
+    world: &mut World,
+    player_ids: &[PlayerId],
+    tick: Tick,
+    config: &SnapshotConfig,
+) -> Vec<PerPlayerSnapshot> {
+    let mut player_ids = player_ids.to_vec();
+    player_ids.sort_unstable();
+    player_ids.dedup();
+    player_ids
+        .into_iter()
+        .filter_map(|player_id| build_player_snapshot(world, player_id, tick, config))
+        .collect()
+}
+
+pub fn snapshot_hash(snapshot: &PerPlayerSnapshot) -> [u8; 32] {
+    let bytes = serde_json::to_vec(snapshot).unwrap_or_default();
+    *blake3::hash(&bytes).as_bytes()
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -571,7 +784,7 @@ mod tests {
         let w = world.app.world_mut();
         let entities: Vec<(Entity, &Drone)> = w.query::<(Entity, &Drone)>().iter(w).collect();
         let drone1 = entities.iter().find(|(_, d)| d.owner == 1).unwrap().0;
-        let drone1_eid = format!("{:?}", drone1);
+        let drone1_eid = object_id(drone1).to_string();
 
         // Tiny max_size to force truncation
         let config = SnapshotConfig {
@@ -708,5 +921,84 @@ mod tests {
             .filter(|s| s.entities.iter().any(|e| e.owner == Some(1)))
             .count();
         assert!(p1_count >= 1, "player 1's drone should have a snapshot");
+    }
+
+    #[test]
+    fn player_collect_snapshot_has_actor_context_and_collective_visibility() {
+        let mut world = create_test_world();
+        let second = world.spawn_drone(1, 8, 5, vec![BodyPart::Move]);
+        let w = world.app.world_mut();
+        let config = SnapshotConfig::default();
+
+        let snapshot = build_player_snapshot(w, 1, 7, &config).expect("player 1 snapshot");
+
+        assert_eq!(snapshot.tick, 7);
+        assert_eq!(snapshot.player_id, 1);
+        assert_eq!(snapshot.actor_context.active_drones.len(), 2);
+        assert!(
+            snapshot
+                .actor_context
+                .active_drones
+                .contains(&object_id(second).to_string())
+        );
+        assert!(!snapshot.actor_context.primary_drone.is_empty());
+        assert_eq!(snapshot.omitted_categories.resources, OmittedBucket::Zero);
+        assert_eq!(snapshot.omitted_categories.events, OmittedBucket::Zero);
+        assert_eq!(snapshot_hash(&snapshot), snapshot_hash(&snapshot.clone()));
+
+        let own_drone_count = snapshot
+            .entities
+            .iter()
+            .filter(|entity| entity.entity_type == "drone" && entity.owner == Some(1))
+            .count();
+        assert_eq!(own_drone_count, 2, "all own drones remain visible");
+    }
+
+    #[test]
+    fn omitted_zero_serializes_as_numeric_zero_bucket() {
+        assert_eq!(serde_json::to_value(OmittedBucket::Zero).unwrap(), "0");
+    }
+
+    #[test]
+    fn collect_player_snapshots_returns_one_snapshot_per_player() {
+        let mut world = create_test_world();
+        world.spawn_drone(1, 6, 5, vec![BodyPart::Move]);
+        let w = world.app.world_mut();
+        let config = SnapshotConfig::default();
+
+        let snapshots = collect_player_snapshots(w, &[1, 2, 99], 11, &config);
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].player_id, 1);
+        assert_eq!(snapshots[1].player_id, 2);
+        assert_eq!(snapshots[0].actor_context.active_drones.len(), 2);
+        assert_eq!(snapshots[1].actor_context.active_drones.len(), 1);
+    }
+
+    #[test]
+    fn player_snapshot_truncation_is_deterministic_and_marks_omissions() {
+        let mut world = create_test_world();
+        for index in 0..24 {
+            world.spawn_drone(2, 6 + index, 5, vec![BodyPart::Move]);
+        }
+        let w = world.app.world_mut();
+        let config = SnapshotConfig {
+            max_size_bytes: 512,
+            fog_of_war: false,
+        };
+
+        let first = build_player_snapshot(w, 1, 13, &config).expect("first snapshot");
+        let second = build_player_snapshot(w, 1, 13, &config).expect("second snapshot");
+
+        assert_eq!(first, second);
+        assert!(first.truncated);
+        assert_ne!(first.omitted_categories.entities, OmittedBucket::Zero);
+        assert!(
+            first
+                .entities
+                .iter()
+                .any(|entity| entity.entity_type == "drone" && entity.owner == Some(1)),
+            "own drone is part of the critical retention set"
+        );
     }
 }

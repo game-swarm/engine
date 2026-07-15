@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 
 use crate::components::{OverloadState, Owner};
+use crate::resource_ledger::{ResourceLedger, ResourceOperation};
+use crate::resources::CurrentTick;
 use crate::resources::PlayerLocalStorage;
 
 /// S18 overload_system — per-tick fuel drain from OverloadState targets.
@@ -9,8 +11,14 @@ use crate::resources::PlayerLocalStorage;
 /// fuel from the target player's local storage each tick, down to a floor.
 pub fn overload_system(
     mut storage: ResMut<PlayerLocalStorage>,
+    current_tick: Option<Res<CurrentTick>>,
+    mut ledger: Option<ResMut<ResourceLedger>>,
     targets: Query<(&OverloadState, &Owner)>,
 ) {
+    let tick = current_tick
+        .as_deref()
+        .map(|tick| tick.0)
+        .unwrap_or_default();
     for (state, owner) in targets.iter() {
         if state.remaining_ticks == 0 {
             continue;
@@ -28,10 +36,22 @@ pub fn overload_system(
         let drain = state
             .fuel_drain_per_tick
             .min(current.saturating_sub(state.fuel_floor));
+        let mut resource = "energy";
         if let Some(energy) = player_storage.get_mut("energy") {
             *energy = energy.saturating_sub(drain);
         } else if let Some(fuel) = player_storage.get_mut("fuel") {
+            resource = "fuel";
             *fuel = fuel.saturating_sub(drain);
+        }
+        if let Some(ledger) = ledger.as_mut() {
+            ledger.record(
+                tick,
+                Some(owner.0),
+                None,
+                resource,
+                i64::from(drain),
+                ResourceOperation::UpkeepDeduction,
+            );
         }
     }
 }

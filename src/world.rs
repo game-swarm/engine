@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arena_admin::ArenaRoomAdmin;
+use crate::command::Tick;
+#[cfg(test)]
 use crate::command::{
-    CommandIntent, CommandResult, CommandSource, RawCommand, Tick, apply_command, source_gate,
-    validate_command,
+    CommandIntent, CommandResult, CommandSource, RawCommand, WorldMutate, source_gate,
 };
 use crate::components::*;
 use crate::hot_cache::InMemorySnapshotCache;
@@ -29,7 +30,8 @@ use crate::ranking::{LeaderboardEntry, MatchOutcome, RankingState};
 use crate::redb_store::RedbStore;
 use crate::resource_ledger::{ResourceLedger, resource_ledger_system};
 use crate::resources::{
-    CurrentTick, GlobalStorageConfig, PendingGlobalTransfers, PlayerGlobalStorage,
+    AlliedTransferCooldowns, AlliedTransferDailyTick, AlliedTransferDailyUsage, CurrentTick,
+    GlobalStorageConfig, PendingAlliedTransfers, PendingGlobalTransfers, PlayerGlobalStorage,
     PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
 };
 use crate::scheduler::SystemSchedulerManifest;
@@ -79,7 +81,7 @@ pub struct WorldConfig {
     pub source_types: Vec<SourceDef>,
     #[serde(default = "default_special_effects")]
     pub special_effects: Vec<crate::components::SpecialEffectDef>,
-    #[serde(default = "default_custom_actions")]
+    #[serde(default)]
     pub custom_actions: Vec<crate::components::CustomActionDef>,
 }
 
@@ -546,111 +548,8 @@ fn default_special_effects() -> Vec<crate::components::SpecialEffectDef> {
     ]
 }
 
-fn custom_action_def(
-    name: &str,
-    description: &str,
-    special_effect: &str,
-    cooldown: Option<u32>,
-    cost: &[(&str, u32)],
-) -> crate::components::CustomActionDef {
-    let mut action = crate::components::CustomActionDef {
-        name: name.to_string(),
-        description: description.to_string(),
-        special_effect: Some(special_effect.to_string()),
-        cooldown,
-        ..Default::default()
-    };
-    for (resource, amount) in cost {
-        action.cost.insert((*resource).to_string(), *amount);
-    }
-    action
-}
-
 fn default_custom_actions() -> Vec<crate::components::CustomActionDef> {
-    let mut debilitate = custom_action_def(
-        "Debilitate",
-        "Apply vulnerability to a target damage type for 50 ticks",
-        "debilitate",
-        Some(150),
-        &[("Energy", 200)],
-    );
-    debilitate.damage_type = Some("Corrosive".to_string());
-    debilitate.special_param = Some(2.0);
-
-    let mut fortify = custom_action_def(
-        "Fortify",
-        "Shield and cleanse self or an ally",
-        "fortify",
-        Some(300),
-        &[("Energy", 400)],
-    );
-    fortify.special_param = Some(0.5);
-
-    let mut hack = custom_action_def(
-        "Hack",
-        "Take control of a drone after a control lock",
-        "hack",
-        Some(200),
-        &[("Energy", 1000)],
-    );
-    hack.damage_type = Some("Psionic".to_string());
-    hack.range = 1;
-
-    let mut drain = custom_action_def(
-        "Drain",
-        "Steal resources from a target structure",
-        "drain",
-        Some(50),
-        &[("Energy", 200)],
-    );
-    drain.damage_type = Some("EMP".to_string());
-    drain.range = 1;
-
-    let mut overload = custom_action_def(
-        "Overload",
-        "Reduce the target player's fuel budget",
-        "overload",
-        Some(200),
-        &[("Energy", 300)],
-    );
-    overload.damage_type = Some("EMP".to_string());
-    overload.range = 1;
-    overload.special_param = Some(500_000.0);
-
-    let mut disrupt = custom_action_def(
-        "Disrupt",
-        "Interrupt a target's ongoing special action",
-        "disrupt",
-        Some(50),
-        &[("Energy", 100)],
-    );
-    disrupt.damage_type = Some("Sonic".to_string());
-    disrupt.range = 1;
-
-    let mut leech = custom_action_def(
-        "Leech",
-        "Corrosive attack that heals the attacker for 50% of dealt damage",
-        "leech",
-        Some(100),
-        &[("Energy", 300)],
-    );
-    leech.damage_type = Some("Corrosive".to_string());
-    leech.base_damage = Some(15);
-    leech.range = 1;
-    leech.special_param = Some(0.5);
-
-    let mut fabricate = custom_action_def(
-        "Fabricate",
-        "Convert an enemy drone into an owned structure",
-        "fabricate",
-        Some(500),
-        &[("Energy", 2500)],
-    );
-    fabricate.range = 1;
-
-    vec![
-        hack, drain, overload, debilitate, disrupt, fortify, leech, fabricate,
-    ]
+    crate::components::vanilla_action_defs()
 }
 
 impl Default for WorldSectionConfig {
@@ -773,7 +672,22 @@ impl Default for ReplayRetentionConfig {
 }
 impl WorldConfig {
     pub fn from_toml_str(contents: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(contents)
+        use serde::de::Error as _;
+
+        let mut config: Self = toml::from_str(contents)?;
+        for action in &config.custom_actions {
+            if crate::components::is_vanilla_action_name(&action.name) {
+                return Err(toml::de::Error::custom(format!(
+                    "custom action '{}' uses a reserved vanilla action name",
+                    action.name
+                )));
+            }
+        }
+        config.custom_actions = crate::components::vanilla_action_defs()
+            .into_iter()
+            .chain(config.custom_actions)
+            .collect();
+        Ok(config)
     }
     pub fn from_world_toml(
         path: impl AsRef<std::path::Path>,
@@ -1168,7 +1082,8 @@ impl SwarmWorld {
         self.app.world_mut().resource_mut::<CurrentTick>().0 = tick + 1;
     }
 
-    pub fn submit_intent(
+    #[cfg(test)]
+    pub(crate) fn submit_intent(
         &mut self,
         player_id: PlayerId,
         tick: Tick,
@@ -1179,10 +1094,10 @@ impl SwarmWorld {
         self.submit_raw_command(raw)
     }
 
-    pub fn submit_raw_command(&mut self, raw: RawCommand) -> CommandResult {
+    #[cfg(test)]
+    pub(crate) fn submit_raw_command(&mut self, raw: RawCommand) -> CommandResult {
         self.app.world_mut().resource_mut::<CurrentTick>().0 = raw.tick;
-        let validated = validate_command(self.app.world_mut(), raw)?;
-        apply_command(self.app.world_mut(), validated)
+        raw.validate_and_apply(self.app.world_mut())
     }
 
     pub fn spawn_drone(&mut self, owner: PlayerId, x: i32, y: i32, body: Vec<BodyPart>) -> Entity {
@@ -1403,6 +1318,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<crate::resources::PendingAlliedTransfers>();
     app.init_resource::<crate::resources::AlliedTransferCooldowns>();
     app.init_resource::<crate::resources::AlliedTransferDailyUsage>();
+    app.init_resource::<crate::resources::AlliedTransferDailyTick>();
     app.init_resource::<SeedRotationState>();
     app.init_resource::<RoomStates>();
     app.init_resource::<EventState>();
@@ -1801,6 +1717,57 @@ pub fn state_checksum(world: &mut World) -> u64 {
         hash_position(&mut hasher, transfer.end);
     }
 
+    tag(&mut hasher, "pending_allied_transfers");
+    let mut allied_transfers = world.resource::<PendingAlliedTransfers>().0.clone();
+    allied_transfers.sort_by_key(|transfer| {
+        (
+            transfer.from_player,
+            transfer.to_player,
+            transfer.resource.clone(),
+            transfer.amount,
+            transfer.deliver_amount,
+            transfer.remaining_ticks,
+        )
+    });
+    for transfer in allied_transfers {
+        hasher.update(&transfer.from_player.to_le_bytes());
+        hasher.update(&transfer.to_player.to_le_bytes());
+        hash_bytes(&mut hasher, transfer.resource.as_bytes());
+        hasher.update(&transfer.amount.to_le_bytes());
+        hasher.update(&transfer.deliver_amount.to_le_bytes());
+        hasher.update(&transfer.remaining_ticks.to_le_bytes());
+    }
+
+    tag(&mut hasher, "allied_transfer_cooldowns");
+    let mut allied_cooldowns = world
+        .resource::<AlliedTransferCooldowns>()
+        .0
+        .iter()
+        .map(|((from, to), tick)| (*from, *to, *tick))
+        .collect::<Vec<_>>();
+    allied_cooldowns.sort_unstable();
+    for (from, to, tick) in allied_cooldowns {
+        hasher.update(&from.to_le_bytes());
+        hasher.update(&to.to_le_bytes());
+        hasher.update(&tick.to_le_bytes());
+    }
+
+    tag(&mut hasher, "allied_transfer_daily_usage");
+    let mut allied_daily_usage = world
+        .resource::<AlliedTransferDailyUsage>()
+        .0
+        .iter()
+        .map(|(player, amount)| (*player, *amount))
+        .collect::<Vec<_>>();
+    allied_daily_usage.sort_unstable();
+    for (player, amount) in allied_daily_usage {
+        hasher.update(&player.to_le_bytes());
+        hasher.update(&amount.to_le_bytes());
+    }
+
+    tag(&mut hasher, "allied_transfer_daily_tick");
+    hasher.update(&world.resource::<AlliedTransferDailyTick>().0.to_le_bytes());
+
     let digest = hasher.finalize();
     u64::from_le_bytes(
         digest.as_bytes()[..8]
@@ -1896,7 +1863,7 @@ mod shard_tests {
             Some(1.3)
         );
         assert_eq!(config.special_effects.len(), 11);
-        assert_eq!(config.custom_actions.len(), 8);
+        assert_eq!(config.custom_actions.len(), 11);
         assert_eq!(
             config
                 .special_effects
@@ -1934,6 +1901,14 @@ mod shard_tests {
                 .unwrap()
         };
 
+        assert_eq!(config.custom_actions.len(), 11);
+
+        assert_eq!(action("Attack").range, 1);
+        assert_eq!(action("Attack").cooldown, None);
+        assert!(action("Attack").cost.is_empty());
+        assert_eq!(action("RangedAttack").range, 3);
+        assert_eq!(action("Heal").range, 1);
+
         assert_eq!(action("Hack").special_effect.as_deref(), Some("hack"));
         assert_eq!(action("Hack").damage_type.as_deref(), Some("Psionic"));
         assert_eq!(action("Hack").range, 1);
@@ -1951,10 +1926,14 @@ mod shard_tests {
             Some("overload")
         );
         assert_eq!(action("Overload").damage_type.as_deref(), Some("EMP"));
-        assert_eq!(action("Overload").range, 1);
+        assert_eq!(action("Overload").range, 5);
         assert_eq!(action("Overload").cooldown, Some(200));
         assert_eq!(action("Overload").cost.get("Energy"), Some(&300));
         assert_eq!(action("Overload").special_param, Some(500_000.0));
+
+        assert_eq!(action("Debilitate").range, 3);
+        assert_eq!(action("Debilitate").cooldown, Some(150));
+        assert_eq!(action("Debilitate").cost.get("Energy"), Some(&200));
 
         assert_eq!(action("Disrupt").special_effect.as_deref(), Some("disrupt"));
         assert_eq!(action("Disrupt").damage_type.as_deref(), Some("Sonic"));
@@ -1963,8 +1942,56 @@ mod shard_tests {
         assert_eq!(action("Disrupt").cost.get("Energy"), Some(&100));
 
         assert_eq!(action("Leech").cooldown, Some(100));
-        assert_eq!(action("Fabricate").cost.get("Energy"), Some(&2500));
+        assert_eq!(action("Leech").damage_type.as_deref(), Some("Kinetic"));
+        assert_eq!(action("Fabricate").cost.get("Energy"), Some(&5000));
         assert!(!action("Fabricate").cost.contains_key("Mineral"));
+    }
+
+    #[test]
+    fn world_config_rejects_toml_vanilla_action_overrides() {
+        let error = WorldConfig::from_toml_str(
+            r#"
+[[custom_actions]]
+name = "Overload"
+description = "Attempted override"
+range = 1
+special_effect = "overload"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("reserved vanilla action name"));
+        assert!(error.contains("Overload"));
+    }
+
+    #[test]
+    fn world_config_merges_non_reserved_toml_actions_with_vanilla_defaults() {
+        let config = WorldConfig::from_toml_str(
+            r#"
+[[custom_actions]]
+name = "ShieldPulse"
+description = "Custom action referencing a configured effect"
+range = 2
+special_effect = "fortify"
+cooldown = 12
+cost = { Energy = 33 }
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.custom_actions.len(), 12);
+        assert_eq!(config.custom_actions[0].name, "Attack");
+        assert!(config.custom_actions.iter().any(|action| {
+            action.name == "Overload"
+                && action.range == 5
+                && action.cost.get("Energy") == Some(&300)
+        }));
+        assert!(config.custom_actions.iter().any(|action| {
+            action.name == "ShieldPulse"
+                && action.range == 2
+                && action.cost.get("Energy") == Some(&33)
+        }));
     }
 
     #[test]
@@ -2186,9 +2213,14 @@ cost = { Energy = 33 }
         assert_eq!(config.special_effects.len(), 1);
         assert_eq!(config.special_effects[0].handler, "fortify");
         assert_eq!(config.special_effects[0].resistance.as_deref(), Some("EMP"));
-        assert_eq!(config.custom_actions.len(), 1);
+        assert_eq!(config.custom_actions.len(), 12);
+        let shield_pulse = config
+            .custom_actions
+            .iter()
+            .find(|action| action.name == "ShieldPulse")
+            .unwrap();
         assert_eq!(
-            config.custom_actions[0].special_effect.as_deref(),
+            shield_pulse.special_effect.as_deref(),
             Some("disable_shields")
         );
     }
@@ -2248,12 +2280,7 @@ cost = { Energy = 33 }
             player_id,
             tick: 7,
             source: CommandSource::TestHarness,
-            auth: CommandAuth {
-                source: CommandSource::TestHarness,
-                player_id,
-                tick_submitted: 7,
-                tick_target: 7,
-            },
+            auth: CommandAuth::server_injected(CommandSource::TestHarness, player_id, 7, 7),
             sequence: 1,
             action: CommandAction::TransferToGlobal {
                 resource: "Energy".to_string(),
@@ -2287,7 +2314,7 @@ cost = { Energy = 33 }
         let mut router = ShardRouter::new(registry, InMemoryNats::default());
 
         let routed = router
-            .route_raw_command(test_command(remote_player))
+            .route_raw_command(&shard_routing_capability(), test_command(remote_player))
             .unwrap();
         assert_eq!(
             routed,
@@ -2346,5 +2373,52 @@ cost = { Energy = 33 }
         }
         first.run_tick();
         assert_ne!(before, first.state_checksum());
+    }
+
+    #[test]
+    fn checksum_covers_allied_transfer_recovery_state() {
+        let mut world = create_world();
+        let mut checksum = world.state_checksum();
+
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PendingAlliedTransfers>()
+            .0
+            .push(crate::resources::PendingAlliedTransfer {
+                from_player: 1,
+                to_player: 2,
+                resource: "Energy".to_string(),
+                amount: 100,
+                deliver_amount: 95,
+                remaining_ticks: 3,
+            });
+        assert_ne!(checksum, world.state_checksum());
+        checksum = world.state_checksum();
+
+        world
+            .app
+            .world_mut()
+            .resource_mut::<AlliedTransferCooldowns>()
+            .0
+            .insert((1, 2), 44);
+        assert_ne!(checksum, world.state_checksum());
+        checksum = world.state_checksum();
+
+        world
+            .app
+            .world_mut()
+            .resource_mut::<AlliedTransferDailyUsage>()
+            .0
+            .insert(1, 100);
+        assert_ne!(checksum, world.state_checksum());
+        checksum = world.state_checksum();
+
+        world
+            .app
+            .world_mut()
+            .resource_mut::<AlliedTransferDailyTick>()
+            .0 = 1_440;
+        assert_ne!(checksum, world.state_checksum());
     }
 }

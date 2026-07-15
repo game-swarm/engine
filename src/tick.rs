@@ -5,20 +5,26 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::command::{
-    CommandAction, CommandIntent, CommandRejection, CommandSource, MAX_FUEL, ObjectId, RawCommand,
-    RefundAccumulator, Tick, apply_command, collect_command_intents, sort_raw_commands,
-    validate_command,
+    CommandAction, CommandIntent, CommandRejection, CommandSource, ObjectId, RawCommand,
+    RefundAccumulator, Tick, WorldMutate, collect_command_intents,
+    sort_raw_commands_for_active_players,
 };
 use crate::components::*;
 use crate::mcp::{VisibleEntity, visible_entities_for_player};
 use crate::realtime::{RealtimeDelta, RealtimeEnvelope, compute_realtime_delta};
-use crate::resource_ledger::ResourceLedger;
+use crate::resource_ledger::{ResourceLedger, ResourceLedgerTraceSnapshot};
 use crate::resources::{
-    CurrentTick, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
+    AlliedTransferCooldowns, AlliedTransferDailyTick, AlliedTransferDailyUsage, CurrentTick,
+    PendingAlliedTransfers, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
+    ResourceCost,
 };
+use crate::sandbox_transport::{ActiveDeployment, ActiveDeployments};
 use crate::scheduler::{SYSTEM_MANIFEST, manifest_hash};
 use crate::security::{SecurityAlert, SecurityAuditor};
-use crate::sim::{SnapshotConfig, collect_snapshots};
+use crate::sim::{
+    PerPlayerSnapshot, SnapshotActorContext, SnapshotConfig, collect_player_snapshots,
+    snapshot_hash,
+};
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
 use crate::world::{SwarmWorld, WorldConfig};
 
@@ -69,6 +75,9 @@ pub struct TickSnapshot {
     pub tick: Tick,
     pub player_id: PlayerId,
     pub state_checksum: u64,
+    pub perception: PerPlayerSnapshot,
+    pub snapshot_hash: [u8; 32],
+    pub rng_context: RngContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,8 +86,31 @@ pub enum ExecutorError {
     Timeout,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerCollectMetrics {
+    pub fuel_consumed: u64,
+    pub refund_events: u64,
+    pub refunded: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerCollectOutput {
+    pub intents: Vec<CommandIntent>,
+    pub metrics: PlayerCollectMetrics,
+}
+
 pub trait PlayerExecutor: Send {
     fn collect(&mut self, snapshot: TickSnapshot) -> Result<Vec<CommandIntent>, ExecutorError>;
+
+    fn collect_with_metrics(
+        &mut self,
+        snapshot: TickSnapshot,
+    ) -> Result<PlayerCollectOutput, ExecutorError> {
+        self.collect(snapshot).map(|intents| PlayerCollectOutput {
+            intents,
+            metrics: PlayerCollectMetrics::default(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +194,11 @@ pub struct WorldConfigSnapshot {
 pub struct ReplayEnvironment {
     pub mods_lock: ModsLock,
     pub world_config: WorldConfigSnapshot,
+    pub collect_snapshot_hash: [u8; 32],
+    pub rng_context: RngContext,
+    pub active_players: Vec<PlayerId>,
+    pub player_fuel_metrics: Vec<PlayerFuelMetric>,
+    pub deploy_activation_decisions: Vec<DeployActivationDecision>,
 }
 
 impl ReplayEnvironment {
@@ -186,7 +223,34 @@ impl ReplayEnvironment {
         Self {
             mods_lock: ModsLock { modules },
             world_config: WorldConfigSnapshot { config },
+            collect_snapshot_hash: [0; 32],
+            rng_context: RngContext::default(),
+            active_players: Vec::new(),
+            player_fuel_metrics: Vec::new(),
+            deploy_activation_decisions: Vec::new(),
         }
+    }
+
+    fn with_collect_context(
+        mut self,
+        collect_snapshot_hash: [u8; 32],
+        rng_context: RngContext,
+        active_players: Vec<PlayerId>,
+        player_fuel_metrics: Vec<PlayerFuelMetric>,
+    ) -> Self {
+        self.collect_snapshot_hash = collect_snapshot_hash;
+        self.rng_context = rng_context;
+        self.active_players = canonical_active_players(active_players);
+        self.player_fuel_metrics = player_fuel_metrics;
+        self
+    }
+
+    fn with_deploy_activation_decisions(
+        mut self,
+        deploy_activation_decisions: Vec<DeployActivationDecision>,
+    ) -> Self {
+        self.deploy_activation_decisions = deploy_activation_decisions;
+        self
     }
 }
 
@@ -230,6 +294,8 @@ pub struct TickTrace {
     pub security_alerts: Vec<SecurityAlert>,
     #[serde(default)]
     pub trace_events: Vec<TickTraceEvent>,
+    #[serde(default)]
+    pub resource_ledger: ResourceLedgerTraceSnapshot,
 }
 
 impl TickTrace {
@@ -242,15 +308,307 @@ fn system_manifest_hash() -> [u8; 32] {
     *manifest_hash(SYSTEM_MANIFEST).as_bytes()
 }
 
-fn action_manifest_hash() -> [u8; 32] {
+fn action_manifest_hash(world: &World) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    for action in crate::command::CORE_COMMAND_ACTIONS {
-        hasher.update(action.as_bytes());
+    hasher.update(b"swarm.action-manifest.v1");
+    hasher.update(&serde_json::to_vec(crate::command::CORE_COMMAND_ACTIONS).unwrap_or_default());
+    hasher.update(&serde_json::to_vec(crate::command::SPECIAL_COMMAND_ACTIONS).unwrap_or_default());
+    if let Some(registry) = world.get_resource::<ActionRegistry>() {
+        hasher.update(&serde_json::to_vec(&registry.handlers).unwrap_or_default());
+    }
+    if let Some(registry) = world.get_resource::<CustomActionRegistry>() {
+        let actions = registry
+            .actions
+            .iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        hasher.update(&serde_json::to_vec(&actions).unwrap_or_default());
     }
     *hasher.finalize().as_bytes()
 }
 
-pub type TickCommitRecord = TickTrace;
+pub const CANONICAL_CODEC_VERSION: u32 = 1;
+const HOST_FUEL_SCHEDULE_VERSION: &str = "swarm.host-fuel.v1";
+const HOST_FUEL_SCHEDULE: &[(&str, u64, &str)] = &[
+    ("host_get_terrain", 500, "none"),
+    ("host_get_objects_in_range", 2_000, "+100/entity"),
+    ("host_path_find", 0, "500*nodes+200*edges"),
+    ("host_get_world_config", 1_000, "none"),
+    ("host_get_world_rules", 1_000, "none"),
+    ("host_get_random", 200, "+10/32-bytes"),
+    ("host_get_fuel_remaining", 20, "none"),
+];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickFuelEntry {
+    pub player_id: PlayerId,
+    pub consumed: u64,
+    pub refund_events: u64,
+    pub refunded: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickFuelLedger {
+    pub entries: Vec<TickFuelEntry>,
+}
+
+impl TickFuelLedger {
+    fn from_environment(environment: &ReplayEnvironment) -> Self {
+        let mut entries = environment
+            .active_players
+            .iter()
+            .copied()
+            .map(|player_id| {
+                (
+                    player_id,
+                    TickFuelEntry {
+                        player_id,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        for metric in &environment.player_fuel_metrics {
+            let entry = entries
+                .entry(metric.player_id)
+                .or_insert_with(|| TickFuelEntry {
+                    player_id: metric.player_id,
+                    ..Default::default()
+                });
+            entry.consumed = metric.consumed;
+            entry.refund_events = metric.refund_events;
+            entry.refunded = metric.refunded;
+        }
+
+        Self {
+            entries: entries.into_values().collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerFuelMetric {
+    pub player_id: PlayerId,
+    pub consumed: u64,
+    pub refund_events: u64,
+    pub refunded: u64,
+}
+
+fn collect_player_fuel_metrics(
+    active_players: &[PlayerId],
+    collect_metrics: &indexmap::IndexMap<PlayerId, PlayerCollectMetrics>,
+) -> Vec<PlayerFuelMetric> {
+    let mut entries = active_players
+        .iter()
+        .copied()
+        .map(|player_id| {
+            (
+                player_id,
+                PlayerFuelMetric {
+                    player_id,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for (player_id, metrics) in collect_metrics {
+        let entry = entries
+            .entry(*player_id)
+            .or_insert_with(|| PlayerFuelMetric {
+                player_id: *player_id,
+                ..Default::default()
+            });
+        entry.consumed = metrics.fuel_consumed;
+        entry.refund_events = metrics.refund_events;
+        entry.refunded = metrics.refunded;
+    }
+    entries.into_values().collect()
+}
+
+fn single_player_fuel_metrics(
+    player_id: PlayerId,
+    metrics: &PlayerCollectMetrics,
+) -> Vec<PlayerFuelMetric> {
+    vec![PlayerFuelMetric {
+        player_id,
+        consumed: metrics.fuel_consumed,
+        refund_events: metrics.refund_events,
+        refunded: metrics.refunded,
+    }]
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployActivationDecision {
+    pub schema_version: u32,
+    pub deploy_id: String,
+    pub player_id: PlayerId,
+    pub world_id: String,
+    pub module_slot: String,
+    pub drone_id: ObjectId,
+    pub wasm_module_hash: [u8; 32],
+    pub metadata_hash: String,
+    pub signed_payload_hash: String,
+    pub compiled_artifact_hash: [u8; 32],
+    pub client_version_counter: u64,
+    pub redb_version_counter: u64,
+    pub certificate_id: String,
+    pub certificate_fingerprint: String,
+    pub transport: String,
+    pub signed_at: String,
+    pub accepted_at_tick: Tick,
+    pub activation_tick: Tick,
+    pub status: String,
+    pub archive: bool,
+    pub failure: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickCommitRecord {
+    pub commands: Vec<RawCommand>,
+    pub rejections: Vec<CommandRejection>,
+    pub fuel: TickFuelLedger,
+    pub deploy_activation_decision: Vec<DeployActivationDecision>,
+    pub canonical_codec_version: u32,
+    pub snapshot_hash: [u8; 32],
+    pub commands_hash: [u8; 32],
+    pub state_checksum: u64,
+    pub manifest_hash: [u8; 32],
+    pub world_config_hash: [u8; 32],
+}
+
+impl TickCommitRecord {
+    pub fn from_trace(trace: &TickTrace, environment: &ReplayEnvironment) -> Self {
+        Self {
+            commands: trace.commands.clone(),
+            rejections: trace.rejections.clone(),
+            fuel: TickFuelLedger::from_environment(environment),
+            deploy_activation_decision: environment.deploy_activation_decisions.clone(),
+            canonical_codec_version: CANONICAL_CODEC_VERSION,
+            snapshot_hash: environment.collect_snapshot_hash,
+            commands_hash: commands_hash(&trace.commands, &trace.rejections),
+            state_checksum: trace.state_checksum,
+            manifest_hash: replay_manifest_hash(trace, environment),
+            world_config_hash: world_config_hash(&environment.world_config),
+        }
+    }
+}
+
+fn deploy_activation_decisions_for_tick(
+    world: &World,
+    tick: Tick,
+) -> Vec<DeployActivationDecision> {
+    world
+        .get_resource::<ActiveDeployments>()
+        .map(|deployments| deployments.pending_ready_for_tick(tick))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|deployment| DeployActivationDecision {
+            schema_version: 1,
+            deploy_id: deployment.deploy_id,
+            player_id: deployment.player_id,
+            world_id: deployment.world_id,
+            module_slot: deployment.module_slot,
+            drone_id: deployment.drone_id,
+            wasm_module_hash: deployment.module_hash,
+            metadata_hash: deployment.metadata_hash,
+            signed_payload_hash: deployment.signed_payload_hash,
+            compiled_artifact_hash: deployment.compiled_artifact_hash,
+            client_version_counter: deployment.client_version_counter,
+            redb_version_counter: deployment.redb_version_counter,
+            certificate_id: deployment.certificate_id,
+            certificate_fingerprint: deployment.certificate_fingerprint,
+            transport: deployment.transport,
+            signed_at: deployment.signed_at,
+            accepted_at_tick: deployment.accepted_at_tick,
+            activation_tick: deployment.load_after_tick,
+            status: "active".to_string(),
+            archive: false,
+            failure: None,
+        })
+        .collect()
+}
+
+fn consume_deploy_activations_for_tick(world: &World, tick: Tick) -> Vec<ActiveDeployment> {
+    world
+        .get_resource::<ActiveDeployments>()
+        .map(|deployments| deployments.consume_ready_for_tick(tick))
+        .unwrap_or_default()
+}
+
+pub fn commands_hash(commands: &[RawCommand], rejections: &[CommandRejection]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&serde_json::to_vec(commands).unwrap_or_default());
+    hasher.update(&serde_json::to_vec(rejections).unwrap_or_default());
+    *hasher.finalize().as_bytes()
+}
+
+fn canonical_active_players(mut active_players: Vec<PlayerId>) -> Vec<PlayerId> {
+    active_players.sort_unstable();
+    active_players.dedup();
+    active_players
+}
+
+pub fn world_config_hash(world_config: &WorldConfigSnapshot) -> [u8; 32] {
+    *blake3::hash(&serde_json::to_vec(world_config).unwrap_or_default()).as_bytes()
+}
+
+fn replay_manifest_hash(trace: &TickTrace, environment: &ReplayEnvironment) -> [u8; 32] {
+    replay_manifest_hash_with_fuel_schedule(
+        trace,
+        environment,
+        HOST_FUEL_SCHEDULE_VERSION,
+        HOST_FUEL_SCHEDULE,
+    )
+}
+
+fn replay_manifest_hash_with_fuel_schedule(
+    trace: &TickTrace,
+    environment: &ReplayEnvironment,
+    fuel_schedule_version: &str,
+    fuel_schedule: &[(&str, u64, &str)],
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"swarm.replay-manifest.v1");
+    hasher.update(&trace.system_manifest_hash);
+    hasher.update(&trace.action_manifest_hash);
+    hasher.update(&serde_json::to_vec(&environment.mods_lock).unwrap_or_default());
+    hasher.update(fuel_schedule_version.as_bytes());
+    hasher.update(&serde_json::to_vec(fuel_schedule).unwrap_or_default());
+    hasher.update(&world_config_hash(&environment.world_config));
+    *hasher.finalize().as_bytes()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RngContext {
+    pub world_seed: u64,
+    pub seed_epoch: u64,
+    pub tick: Tick,
+    pub namespace: String,
+    pub seed: [u8; 32],
+}
+
+impl Default for RngContext {
+    fn default() -> Self {
+        Self::derive(0, 0, 0, "default")
+    }
+}
+
+impl RngContext {
+    pub fn derive(world_seed: u64, seed_epoch: u64, tick: Tick, namespace: &str) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(namespace.as_bytes());
+        hasher.update(&world_seed.to_le_bytes());
+        hasher.update(&seed_epoch.to_le_bytes());
+        hasher.update(&tick.to_le_bytes());
+        Self {
+            world_seed,
+            seed_epoch,
+            tick,
+            namespace: namespace.to_string(),
+            seed: *hasher.finalize().as_bytes(),
+        }
+    }
+}
 
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickTraceEventLog {
@@ -318,9 +676,6 @@ impl TickMetrics {
         self.rejected_commands += rejections.len() as u64;
         let total_commands = (accepted_count + rejections.len()) as u64;
         self.total_commands += total_commands;
-        self.fuel_consumed = self
-            .fuel_consumed
-            .saturating_add(total_commands.saturating_mul(COMMAND_REJECTION_FUEL_COST));
         for rejection in rejections {
             if let Some(refund_fuel) = rejection
                 .detail
@@ -363,11 +718,15 @@ struct CollectCache {
     state_checksum: u64,
     by_player: indexmap::IndexMap<PlayerId, Vec<RawCommand>>,
     fuel_metrics: TickMetrics,
+    collect_snapshot_hash: [u8; 32],
+    rng_context: RngContext,
+    active_players: Vec<PlayerId>,
+    player_fuel_metrics: Vec<PlayerFuelMetric>,
 }
 
 impl CollectCache {
-    fn raw_commands(&self) -> Vec<RawCommand> {
-        serial_execution_queue(
+    fn raw_commands(&self, world_seed: u64) -> Vec<RawCommand> {
+        serial_execution_queue_for_active_players(
             self.by_player
                 .iter()
                 .map(|(&player_id, commands)| CollectedPlayerCommands {
@@ -375,12 +734,103 @@ impl CollectCache {
                     commands: commands.clone(),
                 })
                 .collect(),
+            world_seed,
+            &self.active_players,
         )
     }
 
     fn matches(&self, tick: Tick, state_checksum: u64) -> bool {
         self.tick == tick && self.state_checksum == state_checksum
     }
+}
+
+fn snapshot_config_for_world(world: &World) -> SnapshotConfig {
+    let fog_of_war = world
+        .get_resource::<WorldConfig>()
+        .map(|config| config.visibility.fog_of_war)
+        .unwrap_or(true);
+    SnapshotConfig {
+        fog_of_war,
+        ..Default::default()
+    }
+}
+
+fn rng_context_for_world(world: &World, tick: Tick, namespace: &str) -> RngContext {
+    let world_seed = world_seed_for_world(world);
+    let seed_epoch = world
+        .get_resource::<crate::systems::SeedRotationState>()
+        .map(|state| state.next_rotation_at)
+        .unwrap_or_default();
+    RngContext::derive(world_seed, seed_epoch, tick, namespace)
+}
+
+fn world_seed_for_world(world: &World) -> u64 {
+    world
+        .get_resource::<WorldConfig>()
+        .map(|config| config.world.world_seed)
+        .unwrap_or_default()
+}
+
+fn empty_player_snapshot(player_id: PlayerId, tick: Tick) -> PerPlayerSnapshot {
+    PerPlayerSnapshot {
+        tick,
+        player_id,
+        actor_context: SnapshotActorContext {
+            active_drones: Vec::new(),
+            primary_drone: String::new(),
+        },
+        truncated: false,
+        degraded: false,
+        over_budget: false,
+        omitted_categories: crate::sim::OmittedCategories::all_zero(),
+        entities: Vec::new(),
+        resources: Vec::new(),
+        events: Vec::new(),
+    }
+}
+
+fn collect_inputs_for_players(
+    world: &mut SwarmWorld,
+    player_ids: &[PlayerId],
+    tick: Tick,
+    state_checksum: u64,
+) -> (HashMap<PlayerId, TickSnapshot>, [u8; 32], RngContext) {
+    let snapshot_config = snapshot_config_for_world(world.app.world());
+    let rng_context = rng_context_for_world(world.app.world(), tick, "collect");
+    let player_snapshots =
+        collect_player_snapshots(world.app.world_mut(), player_ids, tick, &snapshot_config)
+            .into_iter()
+            .map(|snapshot| (snapshot.player_id, snapshot))
+            .collect::<HashMap<_, _>>();
+
+    let mut inputs = HashMap::new();
+    let mut ordered_player_ids = player_ids.to_vec();
+    ordered_player_ids.sort_unstable();
+    ordered_player_ids.dedup();
+
+    let mut collect_hasher = blake3::Hasher::new();
+    for player_id in ordered_player_ids {
+        let perception = player_snapshots
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_else(|| empty_player_snapshot(player_id, tick));
+        let hash = snapshot_hash(&perception);
+        collect_hasher.update(&player_id.to_le_bytes());
+        collect_hasher.update(&hash);
+        inputs.insert(
+            player_id,
+            TickSnapshot {
+                tick,
+                player_id,
+                state_checksum,
+                perception,
+                snapshot_hash: hash,
+                rng_context: rng_context.clone(),
+            },
+        );
+    }
+
+    (inputs, *collect_hasher.finalize().as_bytes(), rng_context)
 }
 
 impl TickMetrics {
@@ -647,7 +1097,6 @@ fn aggregate_multiplayer_trace_commands(
         accumulator.tick_count += 1;
         accumulator.total_commands += total_commands;
         accumulator.rejected_commands += rejected_commands;
-        accumulator.fuel_consumed += total_commands.saturating_mul(COMMAND_REJECTION_FUEL_COST);
         accumulator.first_tick.get_or_insert(trace.tick);
         accumulator.last_tick = Some(trace.tick);
     }
@@ -765,6 +1214,7 @@ pub struct PlayerCollectResult {
     pub player_id: PlayerId,
     pub commands: Vec<RawCommand>,
     pub metrics: TickMetrics,
+    pub fuel_metrics: PlayerCollectMetrics,
 }
 
 pub fn seeded_player_shuffle(
@@ -772,38 +1222,70 @@ pub fn seeded_player_shuffle(
     tick: Tick,
     state_checksum: u64,
 ) -> Vec<PlayerId> {
-    let mut seed_input = Vec::with_capacity(16);
-    seed_input.extend_from_slice(&tick.to_le_bytes());
-    seed_input.extend_from_slice(&state_checksum.to_le_bytes());
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&seed_input);
-    let mut reader = hasher.finalize_xof();
+    players.sort_unstable();
+    let context = RngContext::derive(state_checksum, 0, tick, "player_shuffle");
+    seeded_player_shuffle_with_context(players, &context)
+}
+
+pub fn seeded_player_shuffle_with_context(
+    mut players: Vec<PlayerId>,
+    context: &RngContext,
+) -> Vec<PlayerId> {
+    players.sort_unstable();
+    let mut reader = blake3::Hasher::new_derive_key("swarm-engine-player-shuffle");
+    reader.update(&context.seed);
+    let mut reader = reader.finalize_xof();
 
     for i in 0..players.len() {
         let remaining = players.len() - i;
-        let mut bytes = [0_u8; 8];
-        reader.fill(&mut bytes);
-        let offset = (u64::from_le_bytes(bytes) as usize) % remaining;
+        let offset = unbiased_xof_index(&mut reader, remaining);
         players.swap(i, i + offset);
     }
 
     players
 }
 
+fn unbiased_xof_index(reader: &mut blake3::OutputReader, remaining: usize) -> usize {
+    let bound = remaining as u64;
+    let zone = u64::MAX - (u64::MAX % bound);
+    loop {
+        let mut bytes = [0_u8; 8];
+        reader.fill(&mut bytes);
+        let value = u64::from_le_bytes(bytes);
+        if value < zone {
+            return (value % bound) as usize;
+        }
+    }
+}
+
 fn collect_player_commands<E: PlayerExecutor + ?Sized>(
     tick: Tick,
     player_id: PlayerId,
     state_checksum: u64,
+    collect_inputs: &HashMap<PlayerId, TickSnapshot>,
     executor: &mut E,
 ) -> PlayerCollectResult {
-    let snapshot = TickSnapshot {
-        tick,
-        player_id,
-        state_checksum,
-    };
+    let snapshot = collect_inputs
+        .get(&player_id)
+        .cloned()
+        .unwrap_or_else(|| TickSnapshot {
+            tick,
+            player_id,
+            state_checksum,
+            perception: empty_player_snapshot(player_id, tick),
+            snapshot_hash: snapshot_hash(&empty_player_snapshot(player_id, tick)),
+            rng_context: RngContext::default(),
+        });
     let mut metrics = TickMetrics::default();
-    let intents = match executor.collect(snapshot) {
-        Ok(intents) => intents,
+    let mut fuel_metrics = PlayerCollectMetrics::default();
+    let intents = match executor.collect_with_metrics(snapshot) {
+        Ok(output) => {
+            fuel_metrics = output.metrics;
+            metrics.fuel_consumed = fuel_metrics.fuel_consumed;
+            metrics.refund_events = fuel_metrics.refund_events;
+            metrics.refund_fuel = fuel_metrics.refunded;
+            output.intents
+        }
         Err(ExecutorError::Timeout) => {
             metrics.executor_timeouts += 1;
             Vec::new()
@@ -820,15 +1302,20 @@ fn collect_player_commands<E: PlayerExecutor + ?Sized>(
         player_id,
         commands,
         metrics,
+        fuel_metrics,
     }
 }
 
-fn serial_execution_queue(collected: Vec<CollectedPlayerCommands>) -> Vec<RawCommand> {
+fn serial_execution_queue_for_active_players(
+    collected: Vec<CollectedPlayerCommands>,
+    world_seed: u64,
+    active_players: &[PlayerId],
+) -> Vec<RawCommand> {
     let mut queue = Vec::new();
     for collected in collected {
         queue.extend(collected.commands);
     }
-    sort_raw_commands(&mut queue);
+    sort_raw_commands_for_active_players(&mut queue, world_seed, active_players);
     queue
 }
 
@@ -836,12 +1323,19 @@ fn collect_player_results(
     executors: &mut HashMap<PlayerId, Box<dyn PlayerExecutor>>,
     tick: Tick,
     state_checksum: u64,
+    collect_inputs: &HashMap<PlayerId, TickSnapshot>,
 ) -> Vec<PlayerCollectResult> {
     if executors.len() <= 1 {
         return executors
             .iter_mut()
             .map(|(&player_id, executor)| {
-                collect_player_commands(tick, player_id, state_checksum, executor.as_mut())
+                collect_player_commands(
+                    tick,
+                    player_id,
+                    state_checksum,
+                    collect_inputs,
+                    executor.as_mut(),
+                )
             })
             .collect();
     }
@@ -849,7 +1343,13 @@ fn collect_player_results(
     executors
         .par_iter_mut()
         .map(|(&player_id, executor)| {
-            collect_player_commands(tick, player_id, state_checksum, executor.as_mut())
+            collect_player_commands(
+                tick,
+                player_id,
+                state_checksum,
+                collect_inputs,
+                executor.as_mut(),
+            )
         })
         .collect()
 }
@@ -906,6 +1406,8 @@ where
             })
             .collect::<Vec<_>>();
         realtime_before.sort_by_key(|(player_id, _)| *player_id);
+        let world_seed = world_seed_for_world(self.world.app.world());
+        let active_players = canonical_active_players(self.executors.keys().copied().collect());
 
         // S1: Check COLLECT cache before executing WASM.
         // If redb commit failed last tick and we're retrying with the same state,
@@ -914,28 +1416,44 @@ where
             .collect_cache
             .as_ref()
             .filter(|cache| cache.matches(tick, state_checksum));
+        let cache_context = cache_hit.map(|cache| {
+            (
+                cache.collect_snapshot_hash,
+                cache.rng_context.clone(),
+                cache.raw_commands(world_seed),
+                cache.player_fuel_metrics.clone(),
+            )
+        });
 
         let collect_started_at = Instant::now();
         tick_loop.enter(TickPhase::Collect);
-        let raw_commands = if let Some(cache) = cache_hit {
-            debug_assert!(
-                cache.fuel_metrics.fuel_consumed <= MAX_FUEL,
-                "cached COLLECT fuel exceeds MAX_FUEL"
-            );
-            cache.raw_commands()
+        let player_ids = self.executors.keys().copied().collect::<Vec<_>>();
+        let (collect_inputs, collect_snapshot_hash, rng_context) =
+            collect_inputs_for_players(&mut self.world, &player_ids, tick, state_checksum);
+        let (raw_commands, player_fuel_metrics) = if let Some((_, _, commands, fuel_metrics)) =
+            &cache_context
+        {
+            (commands.clone(), fuel_metrics.clone())
         } else {
-            let mut results = collect_player_results(&mut self.executors, tick, state_checksum);
+            let mut results =
+                collect_player_results(&mut self.executors, tick, state_checksum, &collect_inputs);
             results.sort_by_key(|result| result.player_id);
 
             for result in &results {
-                self.metrics.executor_errors += result.metrics.executor_errors;
-                self.metrics.executor_timeouts += result.metrics.executor_timeouts;
+                self.metrics.add(&result.metrics);
             }
 
             // Build CollectCache for potential retry
             let mut by_player: indexmap::IndexMap<PlayerId, Vec<RawCommand>> =
                 indexmap::IndexMap::new();
             let mut collect_fuel_metrics = TickMetrics::default();
+            let player_fuel_metrics = collect_player_fuel_metrics(
+                &active_players,
+                &results
+                    .iter()
+                    .map(|result| (result.player_id, result.fuel_metrics.clone()))
+                    .collect::<indexmap::IndexMap<_, _>>(),
+            );
             for result in &results {
                 by_player.insert(result.player_id, result.commands.clone());
                 collect_fuel_metrics.add(&result.metrics);
@@ -945,6 +1463,10 @@ where
                 state_checksum,
                 by_player,
                 fuel_metrics: collect_fuel_metrics,
+                collect_snapshot_hash,
+                rng_context: rng_context.clone(),
+                active_players: active_players.clone(),
+                player_fuel_metrics: player_fuel_metrics.clone(),
             });
 
             let collected = results
@@ -954,7 +1476,10 @@ where
                     commands: result.commands,
                 })
                 .collect::<Vec<_>>();
-            serial_execution_queue(collected)
+            (
+                serial_execution_queue_for_active_players(collected, world_seed, &active_players),
+                player_fuel_metrics,
+            )
         };
         let collect_duration_ms = collect_started_at.elapsed().as_millis() as u64;
         self.metrics.collect_duration_ms = collect_duration_ms;
@@ -1004,7 +1529,7 @@ where
                 metrics: self.metrics.clone(),
                 state_checksum: checksum,
                 system_manifest_hash: system_manifest_hash(),
-                action_manifest_hash: action_manifest_hash(),
+                action_manifest_hash: action_manifest_hash(self.world.app.world()),
                 security_alerts: Vec::new(),
                 trace_events: std::mem::take(
                     &mut self
@@ -1014,9 +1539,27 @@ where
                         .resource_mut::<TickTraceEventLog>()
                         .events,
                 ),
+                resource_ledger: execution.resource_ledger.clone(),
             };
             trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
-            let environment = ReplayEnvironment::capture(self.world.app.world());
+            let (environment_snapshot_hash, environment_rng_context) = cache_context
+                .as_ref()
+                .map(|(snapshot_hash, rng_context, _, _)| (*snapshot_hash, rng_context.clone()))
+                .unwrap_or((collect_snapshot_hash, rng_context.clone()));
+            let environment_fuel_metrics = cache_context
+                .as_ref()
+                .map(|(_, _, _, fuel_metrics)| fuel_metrics.clone())
+                .unwrap_or_else(|| player_fuel_metrics.clone());
+            let deploy_activation_decisions =
+                deploy_activation_decisions_for_tick(self.world.app.world(), tick);
+            let environment = ReplayEnvironment::capture(self.world.app.world())
+                .with_collect_context(
+                    environment_snapshot_hash,
+                    environment_rng_context,
+                    active_players.clone(),
+                    environment_fuel_metrics,
+                )
+                .with_deploy_activation_decisions(deploy_activation_decisions);
             last_accepted = accepted;
             last_rejections = rejections;
             last_security_alerts = trace.security_alerts.clone();
@@ -1026,6 +1569,7 @@ where
                 .commit_with_environment(trace.clone(), environment)
                 .is_ok()
             {
+                consume_deploy_activations_for_tick(self.world.app.world(), tick);
                 committed_trace = Some(trace);
                 break;
             }
@@ -1140,15 +1684,30 @@ where
         let started_at = Instant::now();
         let realtime_before =
             visible_entities_for_player(self.world.app.world_mut(), self.player_id);
-        let snapshot = TickSnapshot {
-            tick,
-            player_id: self.player_id,
-            state_checksum: self.world.state_checksum(),
-        };
+        let state_checksum = self.world.state_checksum();
+        let world_seed = world_seed_for_world(self.world.app.world());
+        let active_players = vec![self.player_id];
+        let (collect_inputs, collect_snapshot_hash, rng_context) =
+            collect_inputs_for_players(&mut self.world, &[self.player_id], tick, state_checksum);
+        let snapshot = collect_inputs
+            .get(&self.player_id)
+            .cloned()
+            .unwrap_or_else(|| TickSnapshot {
+                tick,
+                player_id: self.player_id,
+                state_checksum,
+                perception: empty_player_snapshot(self.player_id, tick),
+                snapshot_hash: snapshot_hash(&empty_player_snapshot(self.player_id, tick)),
+                rng_context: rng_context.clone(),
+            });
         let collect_started_at = Instant::now();
         tick_loop.enter(TickPhase::Collect);
-        let intents = match self.executor.collect(snapshot) {
-            Ok(intents) => intents,
+        let mut player_collect_metrics = PlayerCollectMetrics::default();
+        let intents = match self.executor.collect_with_metrics(snapshot) {
+            Ok(output) => {
+                player_collect_metrics = output.metrics;
+                output.intents
+            }
             Err(ExecutorError::Timeout) => {
                 self.metrics.executor_timeouts += 1;
                 Vec::new()
@@ -1160,6 +1719,15 @@ where
         };
         let collect_duration_ms = collect_started_at.elapsed().as_millis() as u64;
         self.metrics.collect_duration_ms = collect_duration_ms;
+        self.metrics.fuel_consumed = self
+            .metrics
+            .fuel_consumed
+            .saturating_add(player_collect_metrics.fuel_consumed);
+        self.metrics.refund_events += player_collect_metrics.refund_events;
+        self.metrics.refund_fuel = self
+            .metrics
+            .refund_fuel
+            .saturating_add(player_collect_metrics.refunded);
         if collect_duration_ms > COLLECT_TIMEOUT_MS {
             self.metrics.collect_timeouts += 1;
         }
@@ -1168,7 +1736,7 @@ where
         let mut raw_commands =
             collect_command_intents(self.player_id, tick, CommandSource::Wasm, intents)
                 .unwrap_or_default();
-        sort_raw_commands(&mut raw_commands);
+        sort_raw_commands_for_active_players(&mut raw_commands, world_seed, &active_players);
 
         let mut last_accepted = Vec::new();
         let mut last_rejections = Vec::new();
@@ -1210,7 +1778,7 @@ where
                 metrics: self.metrics.clone(),
                 state_checksum: checksum,
                 system_manifest_hash: system_manifest_hash(),
-                action_manifest_hash: action_manifest_hash(),
+                action_manifest_hash: action_manifest_hash(self.world.app.world()),
                 security_alerts: Vec::new(),
                 trace_events: std::mem::take(
                     &mut self
@@ -1220,9 +1788,19 @@ where
                         .resource_mut::<TickTraceEventLog>()
                         .events,
                 ),
+                resource_ledger: execution.resource_ledger.clone(),
             };
             trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
-            let environment = ReplayEnvironment::capture(self.world.app.world());
+            let deploy_activation_decisions =
+                deploy_activation_decisions_for_tick(self.world.app.world(), tick);
+            let environment = ReplayEnvironment::capture(self.world.app.world())
+                .with_collect_context(
+                    collect_snapshot_hash,
+                    rng_context.clone(),
+                    active_players.clone(),
+                    single_player_fuel_metrics(self.player_id, &player_collect_metrics),
+                )
+                .with_deploy_activation_decisions(deploy_activation_decisions);
             last_accepted = accepted;
             last_rejections = rejections;
             last_security_alerts = trace.security_alerts.clone();
@@ -1232,6 +1810,7 @@ where
                 .commit_with_environment(trace.clone(), environment)
                 .is_ok()
             {
+                consume_deploy_activations_for_tick(self.world.app.world(), tick);
                 committed_trace = Some(trace);
                 break;
             }
@@ -1358,6 +1937,11 @@ where
             world_config: WorldConfigSnapshot {
                 config: WorldConfig::default(),
             },
+            collect_snapshot_hash: [0; 32],
+            rng_context: RngContext::default(),
+            active_players: Vec::new(),
+            player_fuel_metrics: Vec::new(),
+            deploy_activation_decisions: Vec::new(),
         };
         self.commit_with_environment(trace, environment)
     }
@@ -1378,6 +1962,11 @@ pub fn tick_trace_writes(trace: &TickTrace) -> Result<Vec<TickTraceWrite>, Commi
         world_config: WorldConfigSnapshot {
             config: WorldConfig::default(),
         },
+        collect_snapshot_hash: [0; 32],
+        rng_context: RngContext::default(),
+        active_players: Vec::new(),
+        player_fuel_metrics: Vec::new(),
+        deploy_activation_decisions: Vec::new(),
     };
     tick_trace_writes_with_environment(trace, &environment)
 }
@@ -1393,6 +1982,13 @@ pub fn tick_trace_writes_with_environment(
 
     let mut writes = vec![
         (
+            tick_key(trace.tick, "commit_record"),
+            encode(
+                &TickCommitRecord::from_trace(trace, environment),
+                "tick commit record",
+            )?,
+        ),
+        (
             tick_key(trace.tick, "state"),
             encode(&trace.state, "tick state")?,
         ),
@@ -1407,6 +2003,10 @@ pub fn tick_trace_writes_with_environment(
         (
             tick_key(trace.tick, "metrics"),
             encode(&trace.metrics, "tick metrics")?,
+        ),
+        (
+            tick_key(trace.tick, "resource_ledger"),
+            encode(&trace.resource_ledger, "resource ledger")?,
         ),
         (
             tick_key(trace.tick, "security_alerts"),
@@ -1451,11 +2051,13 @@ pub struct DeterministicExecution {
     pub next_tick_fuel_credit: u64,
     pub state: TickState,
     pub state_checksum: u64,
+    pub resource_ledger: ResourceLedgerTraceSnapshot,
 }
 
 const COMMAND_REJECTION_FUEL_COST: u64 = 10_000;
 
-pub fn execute_deterministic(
+#[cfg(test)]
+fn execute_deterministic(
     world: &mut SwarmWorld,
     commands: Vec<RawCommand>,
 ) -> DeterministicExecution {
@@ -1484,7 +2086,8 @@ pub fn execute_deterministic(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let _snapshots = collect_snapshots(world.app.world_mut(), &player_ids, tick, &snapshot_config);
+    let _snapshots =
+        collect_player_snapshots(world.app.world_mut(), &player_ids, tick, &snapshot_config);
 
     execute_deterministic_with_loop(world, commands, &mut tick_loop)
 }
@@ -1501,15 +2104,8 @@ fn execute_deterministic_with_loop(
     for raw in commands {
         let current_tick = world.tick_head();
         world.app.world_mut().resource_mut::<CurrentTick>().0 = current_tick.max(raw.tick);
-        match validate_command(world.app.world_mut(), raw.clone()) {
-            Ok(validated) => match apply_command(world.app.world_mut(), validated) {
-                Ok(()) => accepted.push(raw),
-                Err(rejection) => {
-                    let refund_fuel =
-                        refunds.record_rejection(&raw, &rejection, COMMAND_REJECTION_FUEL_COST);
-                    rejections.push(command_rejection_with_refund(raw, rejection, refund_fuel));
-                }
-            },
+        match raw.clone().validate_and_apply(world.app.world_mut()) {
+            Ok(()) => accepted.push(raw),
             Err(rejection) => {
                 let refund_fuel =
                     refunds.record_rejection(&raw, &rejection, COMMAND_REJECTION_FUEL_COST);
@@ -1518,16 +2114,30 @@ fn execute_deterministic_with_loop(
         }
     }
 
+    let ledger_before_apply = world
+        .app
+        .world()
+        .resource::<ResourceLedger>()
+        .trace_snapshot();
     tick_loop.enter(TickPhase::Apply);
     world.run_tick_for(tick_loop.tick);
     let state_checksum = world.state_checksum();
     let state = TickState::capture(world.app.world_mut());
+    let mut resource_ledger = world
+        .app
+        .world()
+        .resource::<ResourceLedger>()
+        .trace_snapshot();
+    if resource_ledger.operations.is_empty() {
+        resource_ledger.operations = ledger_before_apply.operations;
+    }
     DeterministicExecution {
         commands: accepted,
         rejections,
         next_tick_fuel_credit: refunds.next_tick_fuel_credit,
         state,
         state_checksum,
+        resource_ledger,
     }
 }
 
@@ -1543,7 +2153,7 @@ fn command_rejection_with_refund(
     command_rejection
 }
 
-pub fn replay_tick(
+pub(crate) fn replay_tick(
     previous_state: &TickState,
     trace: &TickTrace,
 ) -> Result<TickState, ReplayError> {
@@ -1565,7 +2175,8 @@ pub fn replay_tick(
     Ok(replayed.state)
 }
 
-pub fn replay(initial_state: &TickState, traces: &[TickTrace]) -> Result<TickState, ReplayError> {
+#[cfg(test)]
+fn replay(initial_state: &TickState, traces: &[TickTrace]) -> Result<TickState, ReplayError> {
     let mut state = initial_state.clone();
     for trace in traces {
         state = replay_tick(&state, trace)?;
@@ -1791,6 +2402,10 @@ pub struct WorldSnapshot {
     local_storage: PlayerLocalStorage,
     global_storage: PlayerGlobalStorage,
     pending_global_transfers: PendingGlobalTransfers,
+    pending_allied_transfers: PendingAlliedTransfers,
+    allied_transfer_cooldowns: AlliedTransferCooldowns,
+    allied_transfer_daily_usage: AlliedTransferDailyUsage,
+    allied_transfer_daily_tick: AlliedTransferDailyTick,
     resource_ledger: ResourceLedger,
     starting_resources_granted: crate::systems::StartingResourcesGranted,
     player_first_spawn_tick: crate::systems::PlayerFirstSpawnTick,
@@ -1904,7 +2519,7 @@ impl WorldSnapshot {
 
     pub fn capture(world: &mut World) -> Self {
         let entity_ids: Vec<Entity> = world.query::<Entity>().iter(world).collect();
-        let entities = entity_ids
+        let entities: HashMap<SnapshotEntity, EntitySnapshot> = entity_ids
             .into_iter()
             .filter_map(|entity| {
                 let snapshot = EntitySnapshot {
@@ -1952,6 +2567,7 @@ impl WorldSnapshot {
             })
             .collect();
 
+        let tracked_entity_count = entities.len() as u32;
         let allocator = world.entities();
         Self {
             entities,
@@ -1962,6 +2578,22 @@ impl WorldSnapshot {
             local_storage: world.resource::<PlayerLocalStorage>().clone(),
             global_storage: world.resource::<PlayerGlobalStorage>().clone(),
             pending_global_transfers: world.resource::<PendingGlobalTransfers>().clone(),
+            pending_allied_transfers: world
+                .get_resource::<PendingAlliedTransfers>()
+                .cloned()
+                .unwrap_or_default(),
+            allied_transfer_cooldowns: world
+                .get_resource::<AlliedTransferCooldowns>()
+                .cloned()
+                .unwrap_or_default(),
+            allied_transfer_daily_usage: world
+                .get_resource::<AlliedTransferDailyUsage>()
+                .cloned()
+                .unwrap_or_default(),
+            allied_transfer_daily_tick: world
+                .get_resource::<AlliedTransferDailyTick>()
+                .cloned()
+                .unwrap_or_default(),
             resource_ledger: world.resource::<ResourceLedger>().clone(),
             starting_resources_granted: world
                 .resource::<crate::systems::StartingResourcesGranted>()
@@ -1971,7 +2603,7 @@ impl WorldSnapshot {
                 .clone(),
             event_log: world.resource::<EventLog>().clone(),
             entity_total_count: allocator.len(),
-            entity_alive_count: allocator.count_spawned(),
+            entity_alive_count: tracked_entity_count,
         }
     }
 
@@ -2032,6 +2664,10 @@ impl WorldSnapshot {
         *world.resource_mut::<PlayerLocalStorage>() = self.local_storage;
         *world.resource_mut::<PlayerGlobalStorage>() = self.global_storage;
         *world.resource_mut::<PendingGlobalTransfers>() = self.pending_global_transfers;
+        world.insert_resource(self.pending_allied_transfers);
+        world.insert_resource(self.allied_transfer_cooldowns);
+        world.insert_resource(self.allied_transfer_daily_usage);
+        world.insert_resource(self.allied_transfer_daily_tick);
         *world.resource_mut::<ResourceLedger>() = self.resource_ledger;
         *world.resource_mut::<crate::systems::StartingResourcesGranted>() =
             self.starting_resources_granted;
@@ -2242,6 +2878,33 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Default)]
+    struct EnvironmentRecordingCommitter {
+        records: Vec<TickTrace>,
+        environments: Vec<ReplayEnvironment>,
+        fail_count: u32,
+    }
+
+    impl TickCommitter for EnvironmentRecordingCommitter {
+        fn commit(&mut self, trace: TickTrace) -> Result<(), CommitError> {
+            self.records.push(trace);
+            Ok(())
+        }
+
+        fn commit_with_environment(
+            &mut self,
+            trace: TickTrace,
+            environment: ReplayEnvironment,
+        ) -> Result<(), CommitError> {
+            if self.fail_count > 0 {
+                self.fail_count -= 1;
+                return Err(CommitError::Failed("test commit failed".to_string()));
+            }
+            self.environments.push(environment);
+            self.commit(trace)
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct CountingExecutor {
         result: Result<Vec<CommandIntent>, ExecutorError>,
@@ -2255,6 +2918,43 @@ mod tests {
         ) -> Result<Vec<CommandIntent>, ExecutorError> {
             *self.calls.lock().unwrap() += 1;
             self.result.clone()
+        }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct SnapshotRecordingExecutor {
+        snapshots: Arc<Mutex<Vec<TickSnapshot>>>,
+    }
+
+    impl PlayerExecutor for SnapshotRecordingExecutor {
+        fn collect(&mut self, snapshot: TickSnapshot) -> Result<Vec<CommandIntent>, ExecutorError> {
+            self.snapshots.lock().unwrap().push(snapshot);
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct MetricsExecutor {
+        intents: Vec<CommandIntent>,
+        metrics: PlayerCollectMetrics,
+    }
+
+    impl PlayerExecutor for MetricsExecutor {
+        fn collect(
+            &mut self,
+            _snapshot: TickSnapshot,
+        ) -> Result<Vec<CommandIntent>, ExecutorError> {
+            Ok(self.intents.clone())
+        }
+
+        fn collect_with_metrics(
+            &mut self,
+            _snapshot: TickSnapshot,
+        ) -> Result<PlayerCollectOutput, ExecutorError> {
+            Ok(PlayerCollectOutput {
+                intents: self.intents.clone(),
+                metrics: self.metrics.clone(),
+            })
         }
     }
 
@@ -2293,9 +2993,10 @@ mod tests {
             },
             state_checksum: world.state_checksum(),
             system_manifest_hash: system_manifest_hash(),
-            action_manifest_hash: action_manifest_hash(),
+            action_manifest_hash: action_manifest_hash(world.app.world()),
             security_alerts: Vec::new(),
             trace_events: Vec::new(),
+            resource_ledger: ResourceLedgerTraceSnapshot::default(),
         }
     }
 
@@ -2309,12 +3010,14 @@ mod tests {
             .expect("atomic tick commit should succeed");
         let store = committer.into_inner();
 
-        assert_eq!(store.writes.len(), 6);
+        assert_eq!(store.writes.len(), 8);
         for suffix in [
+            "commit_record",
             "state",
             "commands",
             "rejections",
             "metrics",
+            "resource_ledger",
             "security_alerts",
             "delta",
         ] {
@@ -2334,6 +3037,214 @@ mod tests {
             serde_json::from_slice(&store.writes[&tick_key(42, "delta")]).unwrap();
         assert_eq!(delta.to_tick, 42);
         assert_eq!(delta.commands.len(), 1);
+    }
+
+    #[test]
+    fn redb_tick_committer_writes_ten_field_commit_record() {
+        let trace = sample_trace();
+        let mut committer = RedbTickCommitter::new(FakeAtomicStore::default());
+
+        committer.commit(trace.clone()).unwrap();
+        let store = committer.into_inner();
+        let record: TickCommitRecord =
+            serde_json::from_slice(&store.writes[&tick_key(42, "commit_record")]).unwrap();
+        let record_json = serde_json::to_value(&record).unwrap();
+
+        assert_eq!(record_json.as_object().unwrap().len(), 10);
+        assert_eq!(record.commands, trace.commands);
+        assert_eq!(record.rejections, trace.rejections);
+        assert_eq!(record.state_checksum, trace.state_checksum);
+        assert_eq!(
+            record.commands_hash,
+            commands_hash(&record.commands, &record.rejections)
+        );
+    }
+
+    #[test]
+    fn commands_hash_excludes_active_player_roster_while_fuel_keeps_zero_entries() {
+        let trace = sample_trace();
+        let world = create_world();
+        let environment_for = |active_players| {
+            ReplayEnvironment::capture(world.app.world()).with_collect_context(
+                [8; 32],
+                RngContext::default(),
+                active_players,
+                Vec::new(),
+            )
+        };
+
+        let one_player = TickCommitRecord::from_trace(&trace, &environment_for(vec![7]));
+        let two_players = TickCommitRecord::from_trace(&trace, &environment_for(vec![7, 8]));
+
+        assert_eq!(one_player.commands_hash, two_players.commands_hash);
+        assert_eq!(one_player.fuel.entries.len(), 1);
+        assert_eq!(two_players.fuel.entries.len(), 2);
+        assert_eq!(two_players.fuel.entries[1].player_id, 8);
+        assert_eq!(two_players.fuel.entries[1].consumed, 0);
+    }
+
+    #[test]
+    fn action_and_replay_manifest_hashes_bind_runtime_actions_and_fuel_schedule() {
+        let mut world = create_world();
+        let base_action_hash = action_manifest_hash(world.app.world());
+        world
+            .app
+            .world_mut()
+            .resource_mut::<ActionRegistry>()
+            .handlers
+            .insert("mod-action".to_string(), "mod-handler".to_string());
+        let changed_action_hash = action_manifest_hash(world.app.world());
+        assert_ne!(base_action_hash, changed_action_hash);
+
+        let trace = sample_trace();
+        let environment = ReplayEnvironment::capture(world.app.world());
+        let current = replay_manifest_hash_with_fuel_schedule(
+            &trace,
+            &environment,
+            HOST_FUEL_SCHEDULE_VERSION,
+            HOST_FUEL_SCHEDULE,
+        );
+        let version_changed = replay_manifest_hash_with_fuel_schedule(
+            &trace,
+            &environment,
+            "swarm.host-fuel.v2",
+            HOST_FUEL_SCHEDULE,
+        );
+        let mut changed_schedule = HOST_FUEL_SCHEDULE.to_vec();
+        changed_schedule[0].1 += 1;
+        let schedule_changed = replay_manifest_hash_with_fuel_schedule(
+            &trace,
+            &environment,
+            HOST_FUEL_SCHEDULE_VERSION,
+            &changed_schedule,
+        );
+
+        assert_ne!(current, version_changed);
+        assert_ne!(current, schedule_changed);
+    }
+
+    #[test]
+    fn tick_commit_record_serializes_per_player_fuel_and_resource_ledger_snapshot() {
+        let mut trace = sample_trace();
+        trace.commands = vec![raw_harvest(7, 1, 42, 100, 200)];
+        trace.rejections = vec![command_rejection_with_refund(
+            raw_harvest(9, 1, 42, 101, 201),
+            RejectionReason::SourceEmpty,
+            5_000,
+        )];
+        let mut resource_ledger = ResourceLedger::default();
+        resource_ledger.record_transfer_amounts(
+            42,
+            Some(7),
+            Some(9),
+            "Energy",
+            100,
+            98,
+            crate::resource_ledger::ResourceOperation::AlliedTransfer,
+            2,
+            200,
+        );
+        trace.resource_ledger = resource_ledger.trace_snapshot();
+        let environment = ReplayEnvironment {
+            mods_lock: ModsLock::default(),
+            world_config: WorldConfigSnapshot {
+                config: WorldConfig::default(),
+            },
+            collect_snapshot_hash: [8; 32],
+            rng_context: RngContext::default(),
+            active_players: vec![7, 8, 9],
+            player_fuel_metrics: vec![
+                PlayerFuelMetric {
+                    player_id: 7,
+                    consumed: 123,
+                    refund_events: 0,
+                    refunded: 0,
+                },
+                PlayerFuelMetric {
+                    player_id: 9,
+                    consumed: 456,
+                    refund_events: 1,
+                    refunded: 5_000,
+                },
+            ],
+            deploy_activation_decisions: Vec::new(),
+        };
+
+        let writes = tick_trace_writes_with_environment(&trace, &environment).unwrap();
+        let writes = writes.into_iter().collect::<HashMap<_, _>>();
+        let record: TickCommitRecord =
+            serde_json::from_slice(&writes[&tick_key(42, "commit_record")]).unwrap();
+        let persisted_ledger: ResourceLedgerTraceSnapshot =
+            serde_json::from_slice(&writes[&tick_key(42, "resource_ledger")]).unwrap();
+
+        assert_eq!(record.fuel.entries.len(), 3);
+        assert_eq!(record.fuel.entries[0].player_id, 7);
+        assert_eq!(record.fuel.entries[0].consumed, 123);
+        assert_eq!(record.fuel.entries[1].player_id, 8);
+        assert_eq!(record.fuel.entries[1].consumed, 0);
+        assert_eq!(record.fuel.entries[2].player_id, 9);
+        assert_eq!(record.fuel.entries[2].consumed, 456);
+        assert_eq!(record.fuel.entries[2].refund_events, 1);
+        assert_eq!(record.fuel.entries[2].refunded, 5_000);
+        assert_eq!(persisted_ledger, trace.resource_ledger);
+        assert_eq!(persisted_ledger.operations.len(), 1);
+        assert_eq!(persisted_ledger.operations[0].fee_paid, 2);
+        assert_eq!(persisted_ledger.operations[0].basis_points_used, 200);
+        assert_eq!(
+            *persisted_ledger
+                .balance_delta
+                .get(&7)
+                .unwrap()
+                .get("Energy")
+                .unwrap(),
+            -100
+        );
+        assert_eq!(
+            *persisted_ledger
+                .balance_delta
+                .get(&9)
+                .unwrap()
+                .get("Energy")
+                .unwrap(),
+            98
+        );
+        assert_eq!(persisted_ledger.ledger_checksum, 442);
+    }
+
+    #[test]
+    fn metrics_aware_executor_persists_actual_collect_fuel() {
+        let executor = MetricsExecutor {
+            intents: Vec::new(),
+            metrics: PlayerCollectMetrics {
+                fuel_consumed: 777,
+                refund_events: 2,
+                refunded: 33,
+            },
+        };
+        let mut scheduler = TickScheduler::new(
+            create_world(),
+            1,
+            executor,
+            RedbTickCommitter::new(FakeAtomicStore::default()),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+        let store = scheduler.committer.into_inner();
+        let record: TickCommitRecord =
+            serde_json::from_slice(&store.writes[&tick_key(0, "commit_record")]).unwrap();
+        let metrics: TickMetrics =
+            serde_json::from_slice(&store.writes[&tick_key(0, "metrics")]).unwrap();
+
+        assert!(report.committed);
+        assert_eq!(metrics.fuel_consumed, 777);
+        assert_eq!(metrics.refund_events, 2);
+        assert_eq!(metrics.refund_fuel, 33);
+        assert_eq!(record.fuel.entries.len(), 1);
+        assert_eq!(record.fuel.entries[0].player_id, 1);
+        assert_eq!(record.fuel.entries[0].consumed, 777);
+        assert_eq!(record.fuel.entries[0].refund_events, 2);
+        assert_eq!(record.fuel.entries[0].refunded, 33);
     }
 
     #[test]
@@ -2488,28 +3399,95 @@ mod tests {
     }
 
     #[test]
-    fn serial_execution_queue_orders_players_by_id_and_commands_by_sequence() {
-        let queue = serial_execution_queue(vec![
-            CollectedPlayerCommands {
-                player_id: 20,
-                commands: vec![
-                    raw_harvest(20, 3, 1, 300, 400),
-                    raw_harvest(20, 1, 1, 301, 401),
-                ],
-            },
-            CollectedPlayerCommands {
-                player_id: 10,
-                commands: vec![raw_harvest(10, 2, 1, 100, 200)],
-            },
-        ]);
+    fn rng_context_canonicalizes_shuffle_input_and_namespaces_seed() {
+        let players = vec![8, 1, 5, 3, 2, 7, 4, 6];
+        let same_players_different_input_order = vec![3, 5, 8, 1, 6, 7, 2, 4];
+        let context = RngContext::derive(1234, 2, 99, "shuffle");
+        let same_context = RngContext::derive(1234, 2, 99, "shuffle");
+        let different_namespace = RngContext::derive(1234, 2, 99, "combat");
 
+        assert_eq!(context, same_context);
+        assert_ne!(context.seed, different_namespace.seed);
+        assert_eq!(context.namespace, "shuffle");
         assert_eq!(
-            queue
-                .iter()
-                .map(|command| (command.player_id, command.sequence))
-                .collect::<Vec<_>>(),
-            vec![(10, 2), (20, 1), (20, 3)]
+            seeded_player_shuffle_with_context(players, &context),
+            seeded_player_shuffle_with_context(same_players_different_input_order, &context)
         );
+    }
+
+    fn active_deployment(player_id: PlayerId, load_after_tick: Tick) -> ActiveDeployment {
+        ActiveDeployment {
+            deploy_id: "deploy-tick".to_string(),
+            world_id: "world-alpha".to_string(),
+            module_slot: "spawn:10:10".to_string(),
+            player_id,
+            room_id: RoomId(1),
+            drone_id: 99,
+            module_hash: [7; 32],
+            metadata_hash: "blake3:metadata".to_string(),
+            signed_payload_hash: "blake3:signed-payload".to_string(),
+            compiled_artifact_hash: [8; 32],
+            client_version_counter: 4,
+            redb_version_counter: 4,
+            certificate_id: "cert-1".to_string(),
+            certificate_fingerprint: "fingerprint-1".to_string(),
+            transport: "mcp".to_string(),
+            signed_at: "1700000000".to_string(),
+            accepted_at_tick: load_after_tick.saturating_sub(1),
+            wasm_bytes: b"\0asmtest".to_vec(),
+            load_after_tick,
+        }
+    }
+
+    #[test]
+    fn serial_execution_queue_uses_world_seed_for_stable_player_shuffle() {
+        let collected = |players: &[PlayerId]| {
+            players
+                .iter()
+                .map(|player_id| CollectedPlayerCommands {
+                    player_id: *player_id,
+                    commands: vec![raw_harvest(*player_id, 1, 1, *player_id as u64, 200)],
+                })
+                .collect::<Vec<_>>()
+        };
+        let order = |commands: Vec<RawCommand>| {
+            commands
+                .into_iter()
+                .map(|command| command.player_id)
+                .collect::<Vec<_>>()
+        };
+
+        let active_players = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let command_players = vec![1, 2, 4, 5, 6, 7, 8];
+        let first = order(serial_execution_queue_for_active_players(
+            collected(&[8, 1, 5, 2, 7, 4, 6]),
+            99,
+            &active_players,
+        ));
+        let second = order(serial_execution_queue_for_active_players(
+            collected(&[5, 8, 1, 6, 7, 2, 4]),
+            99,
+            &active_players,
+        ));
+        let changed_seed = (0..128)
+            .map(|seed| {
+                order(serial_execution_queue_for_active_players(
+                    collected(&command_players),
+                    seed,
+                    &active_players,
+                ))
+            })
+            .find(|candidate| *candidate != first)
+            .expect("fixture should expose world-seed-sensitive shuffle");
+        let command_derived_order = order(serial_execution_queue_for_active_players(
+            collected(&command_players),
+            99,
+            &command_players,
+        ));
+
+        assert_eq!(first, second);
+        assert_ne!(first, changed_seed);
+        assert_ne!(first, command_derived_order);
     }
 
     #[test]
@@ -2524,12 +3502,51 @@ mod tests {
             }),
         );
 
-        let results = collect_player_results(&mut executors, 3, 99);
+        let mut world = create_world();
+        let (collect_inputs, _, _) = collect_inputs_for_players(&mut world, &[7], 3, 99);
+
+        let results = collect_player_results(&mut executors, 3, 99, &collect_inputs);
 
         assert_eq!(*calls.lock().unwrap(), 1);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].player_id, 7);
         assert!(results[0].commands.is_empty());
+    }
+
+    #[test]
+    fn collect_retry_reuses_per_player_snapshot_hash_without_rerunning_executor() {
+        let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let mut executors: HashMap<PlayerId, Box<dyn PlayerExecutor>> = HashMap::new();
+        executors.insert(
+            1,
+            Box::new(SnapshotRecordingExecutor {
+                snapshots: snapshots.clone(),
+            }),
+        );
+        let mut scheduler = MultiPlayerTickScheduler::new(
+            create_world(),
+            executors,
+            InMemoryTickCommitter {
+                fail_count: 1,
+                ..Default::default()
+            },
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        let captured = snapshots.lock().unwrap();
+        assert!(report.committed);
+        assert_eq!(
+            captured.len(),
+            1,
+            "COLLECT must not rerun after commit retry"
+        );
+        assert_eq!(captured[0].perception.player_id, 1);
+        assert_eq!(
+            captured[0].snapshot_hash,
+            snapshot_hash(&captured[0].perception)
+        );
     }
 
     #[test]
@@ -2553,9 +3570,10 @@ mod tests {
             metrics,
             state_checksum: 99,
             system_manifest_hash: system_manifest_hash(),
-            action_manifest_hash: action_manifest_hash(),
+            action_manifest_hash: action_manifest_hash(create_world().app.world()),
             security_alerts: Vec::new(),
             trace_events: Vec::new(),
+            resource_ledger: ResourceLedgerTraceSnapshot::default(),
         };
 
         let row = ClickHouseTickMetricsRow::from_trace(&trace, &[10, 20, 30, 40]);
@@ -2592,9 +3610,10 @@ mod tests {
             metrics,
             state_checksum: world.state_checksum(),
             system_manifest_hash: system_manifest_hash(),
-            action_manifest_hash: action_manifest_hash(),
+            action_manifest_hash: action_manifest_hash(world.app.world()),
             security_alerts: Vec::new(),
             trace_events: Vec::new(),
+            resource_ledger: ResourceLedgerTraceSnapshot::default(),
         }
     }
 
@@ -2664,8 +3683,8 @@ mod tests {
         );
         assert_eq!(rows[0].command_rejection_rate, 0.0);
         assert_eq!(rows[1].command_rejection_rate, 1.0);
-        assert_eq!(rows[0].fuel_consumed, 10_000);
-        assert_eq!(rows[1].fuel_consumed, 10_000);
+        assert_eq!(rows[0].fuel_consumed, 0);
+        assert_eq!(rows[1].fuel_consumed, 0);
     }
 
     #[test]
@@ -2697,7 +3716,7 @@ mod tests {
 
         assert_eq!(metrics.total_commands, 2);
         assert_eq!(metrics.rejected_commands, 1);
-        assert_eq!(metrics.fuel_consumed, 20_000);
+        assert_eq!(metrics.fuel_consumed, 0);
         assert_eq!(metrics.refund_events, 1);
         assert_eq!(metrics.refund_fuel, 5_000);
         assert_eq!(metrics.command_rejection_rate(), 0.5);
@@ -3083,6 +4102,73 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_restore_preserves_allied_transfer_resources() {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .insert_resource(PendingAlliedTransfers(vec![
+                crate::resources::PendingAlliedTransfer {
+                    from_player: 1,
+                    to_player: 2,
+                    resource: "energy".to_string(),
+                    amount: 100,
+                    deliver_amount: 98,
+                    remaining_ticks: 3,
+                },
+            ]));
+        world
+            .app
+            .world_mut()
+            .insert_resource(AlliedTransferCooldowns(indexmap::indexmap! {(1, 2) => 44}));
+        world
+            .app
+            .world_mut()
+            .insert_resource(AlliedTransferDailyUsage(indexmap::indexmap! {1 => 100}));
+        world
+            .app
+            .world_mut()
+            .insert_resource(AlliedTransferDailyTick(1440));
+
+        let snapshot = WorldSnapshot::capture(world.app.world_mut());
+        world
+            .app
+            .world_mut()
+            .insert_resource(PendingAlliedTransfers::default());
+        world
+            .app
+            .world_mut()
+            .insert_resource(AlliedTransferCooldowns::default());
+        world
+            .app
+            .world_mut()
+            .insert_resource(AlliedTransferDailyUsage::default());
+        world
+            .app
+            .world_mut()
+            .insert_resource(AlliedTransferDailyTick::default());
+
+        snapshot.restore(world.app.world_mut());
+
+        assert_eq!(
+            world.app.world().resource::<PendingAlliedTransfers>().0[0].deliver_amount,
+            98
+        );
+        assert_eq!(
+            world.app.world().resource::<AlliedTransferCooldowns>().0[&(1, 2)],
+            44
+        );
+        assert_eq!(
+            world.app.world().resource::<AlliedTransferDailyUsage>().0[&1],
+            100
+        );
+        assert_eq!(
+            world.app.world().resource::<AlliedTransferDailyTick>().0,
+            1440
+        );
+    }
+
+    #[test]
     fn commit_failure_rolls_back_world_and_does_not_increment_or_broadcast() {
         let mut world = create_world();
         let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
@@ -3123,6 +4209,69 @@ mod tests {
             q.single(world).unwrap().y
         };
         assert_eq!(drone_y, 10);
+    }
+
+    #[test]
+    fn deploy_activation_is_not_consumed_when_all_commit_attempts_fail() {
+        let mut world = create_world();
+        let deployments = ActiveDeployments::default();
+        deployments.stage_activation(active_deployment(1, 0));
+        world.app.world_mut().insert_resource(deployments.clone());
+        let executor = StaticExecutor {
+            result: Ok(Vec::new()),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter {
+                fail_count: MAX_COMMIT_ATTEMPTS,
+                ..Default::default()
+            },
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(!report.committed);
+        assert_eq!(deployments.pending_ready_for_tick(0).len(), 1);
+        assert!(deployments.active_for_player(1, 0).is_none());
+        assert!(scheduler.committer.records.is_empty());
+    }
+
+    #[test]
+    fn deploy_activation_is_consumed_only_after_retry_commit_succeeds() {
+        let mut world = create_world();
+        let deployments = ActiveDeployments::default();
+        deployments.stage_activation(active_deployment(1, 0));
+        world.app.world_mut().insert_resource(deployments.clone());
+        let executor = StaticExecutor {
+            result: Ok(Vec::new()),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            EnvironmentRecordingCommitter {
+                fail_count: 1,
+                ..Default::default()
+            },
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(report.committed);
+        assert_eq!(report.metrics.commit_failures, 1);
+        assert!(deployments.pending_ready_for_tick(0).is_empty());
+        assert_eq!(
+            deployments.active_for_player(1, 0).unwrap().deploy_id,
+            "deploy-tick"
+        );
+        assert_eq!(
+            scheduler.committer.environments[0].deploy_activation_decisions[0].deploy_id,
+            "deploy-tick"
+        );
     }
 
     #[test]
@@ -3282,12 +4431,13 @@ mod tests {
     #[test]
     fn spawn_drone_command_materializes_after_phase_2b() {
         let mut world = create_world();
+        let actor = world.spawn_drone(1, 9, 10, vec![BodyPart::Move]);
         let spawn = spawn_structure(&mut world, 1, 10, 10);
         let executor = StaticExecutor {
             result: Ok(vec![CommandIntent {
                 sequence: 1,
                 action: CommandAction::Spawn {
-                    object_id: object_id(spawn),
+                    object_id: object_id(actor),
                     spawn_id: object_id(spawn),
                     body_parts: vec![BodyPart::Move],
                 },
@@ -3315,7 +4465,7 @@ mod tests {
                 .len(),
             0
         );
-        assert_eq!(drone_count(&mut scheduler.world), 1);
+        assert_eq!(drone_count(&mut scheduler.world), 2);
     }
 
     #[test]
@@ -3433,12 +4583,7 @@ mod tests {
             player_id,
             tick,
             source: CommandSource::Wasm,
-            auth: CommandAuth {
-                source: CommandSource::Wasm,
-                player_id,
-                tick_submitted: tick,
-                tick_target: tick,
-            },
+            auth: CommandAuth::server_injected(CommandSource::Wasm, player_id, tick, tick),
             sequence,
             action: CommandAction::Harvest {
                 object_id,
@@ -3460,12 +4605,7 @@ mod tests {
             player_id,
             tick,
             source: CommandSource::Wasm,
-            auth: CommandAuth {
-                source: CommandSource::Wasm,
-                player_id,
-                tick_submitted: tick,
-                tick_target: tick,
-            },
+            auth: CommandAuth::server_injected(CommandSource::Wasm, player_id, tick, tick),
             sequence,
             action: CommandAction::Build {
                 object_id,
@@ -3488,12 +4628,7 @@ mod tests {
             player_id,
             tick,
             source: CommandSource::Wasm,
-            auth: CommandAuth {
-                source: CommandSource::Wasm,
-                player_id,
-                tick_submitted: tick,
-                tick_target: tick,
-            },
+            auth: CommandAuth::server_injected(CommandSource::Wasm, player_id, tick, tick),
             sequence,
             action: CommandAction::Transfer {
                 object_id,

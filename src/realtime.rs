@@ -380,6 +380,7 @@ mod tests {
             action_manifest_hash: [0; 32],
             security_alerts: Vec::new(),
             trace_events: Vec::new(),
+            resource_ledger: crate::resource_ledger::ResourceLedgerTraceSnapshot::default(),
         };
         let replay_entities = replay_visible_entities(&trace, 1);
 

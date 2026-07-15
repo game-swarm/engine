@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::components::{Drone, Owner, Position};
-use crate::resource_ledger::compute_continuous_storage_tax;
+use crate::resource_ledger::{ResourceLedger, ResourceOperation, compute_continuous_storage_tax};
 use crate::resources::{
     GlobalStorageConfig, GlobalTransferDirection, PendingAlliedTransfers, PendingGlobalTransfers,
     PlayerGlobalStorage, PlayerLocalStorage, ResourceCost, ResourceName,
@@ -12,6 +12,8 @@ pub fn global_storage_system(
     mut global_storage: ResMut<PlayerGlobalStorage>,
     mut local_storage: ResMut<PlayerLocalStorage>,
     mut pending_transfers: ResMut<PendingGlobalTransfers>,
+    current_tick: Res<crate::resources::CurrentTick>,
+    mut ledger: ResMut<ResourceLedger>,
     drones: Query<(&Position, &Owner), With<Drone>>,
 ) {
     let mut delivered = Vec::new();
@@ -48,11 +50,39 @@ pub fn global_storage_system(
                 local_storage.0.entry(transfer.player_id).or_default()
             }
         };
-        add_resource(target, transfer.resource, transfer.deliver_amount);
+        add_resource(target, transfer.resource.clone(), transfer.deliver_amount);
+        let basis_points_used = match transfer.direction {
+            GlobalTransferDirection::ToGlobal => config.transfer_to_global_fee_per_10_000,
+            GlobalTransferDirection::FromGlobal => config.transfer_from_global_fee_per_10_000,
+        };
+        ledger.record_transfer_amounts(
+            current_tick.0,
+            None,
+            Some(transfer.player_id),
+            &transfer.resource,
+            transfer.amount,
+            transfer.deliver_amount,
+            match transfer.direction {
+                GlobalTransferDirection::ToGlobal => ResourceOperation::GlobalDeposit,
+                GlobalTransferDirection::FromGlobal => ResourceOperation::GlobalWithdraw,
+            },
+            transfer.amount.saturating_sub(transfer.deliver_amount),
+            basis_points_used,
+        );
     }
 
-    for storage in global_storage.0.values_mut() {
-        apply_continuous_tax(storage, &config);
+    for (player_id, storage) in global_storage.0.iter_mut() {
+        let tax = apply_continuous_tax(storage, &config);
+        if tax > 0 {
+            ledger.record(
+                current_tick.0,
+                Some(*player_id),
+                None,
+                "",
+                i64::from(tax),
+                ResourceOperation::StorageTax,
+            );
+        }
     }
 }
 
@@ -117,15 +147,15 @@ fn add_resource(storage: &mut ResourceCost, resource: ResourceName, amount: u32)
     *storage.entry(resource).or_default() += amount;
 }
 
-fn apply_continuous_tax(storage: &mut ResourceCost, config: &GlobalStorageConfig) {
+fn apply_continuous_tax(storage: &mut ResourceCost, config: &GlobalStorageConfig) -> u32 {
     if config.capacity == 0 {
-        return;
+        return 0;
     }
 
     let total: u32 = storage.values().sum();
     let tax = compute_continuous_storage_tax(total, config.capacity, config);
     if tax == 0 {
-        return;
+        return 0;
     }
 
     let mut remaining_tax = tax;
@@ -137,6 +167,7 @@ fn apply_continuous_tax(storage: &mut ResourceCost, config: &GlobalStorageConfig
             break;
         }
     }
+    tax - remaining_tax
 }
 
 // ── Associated Functions ──
@@ -145,6 +176,8 @@ fn apply_continuous_tax(storage: &mut ResourceCost, config: &GlobalStorageConfig
 pub fn allied_transfer_system(
     mut pending: ResMut<PendingAlliedTransfers>,
     mut global_storage: ResMut<PlayerGlobalStorage>,
+    current_tick: Res<crate::resources::CurrentTick>,
+    mut ledger: ResMut<ResourceLedger>,
 ) {
     let mut delivered = Vec::new();
     let mut remaining = Vec::new();
@@ -161,7 +194,18 @@ pub fn allied_transfer_system(
 
     for transfer in delivered {
         let target = global_storage.0.entry(transfer.to_player).or_default();
-        add_resource(target, transfer.resource, transfer.deliver_amount);
+        add_resource(target, transfer.resource.clone(), transfer.deliver_amount);
+        ledger.record_transfer_amounts(
+            current_tick.0,
+            Some(transfer.from_player),
+            Some(transfer.to_player),
+            &transfer.resource,
+            transfer.amount,
+            transfer.deliver_amount,
+            ResourceOperation::AlliedTransfer,
+            transfer.amount.saturating_sub(transfer.deliver_amount),
+            crate::resources::ALLIED_TRANSFER_FEE_BP,
+        );
     }
 }
 

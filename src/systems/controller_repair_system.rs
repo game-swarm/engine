@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::components::{Controller, Drone, Position, RepairTracker};
+use crate::resource_ledger::{ResourceLedger, ResourceOperation};
 use crate::resources::{PlayerGlobalStorage, ResourceRegistry};
 use crate::tick::{TickTraceEvent, TickTraceEventLog};
 use crate::world::WorldConfig;
@@ -9,14 +10,17 @@ use crate::world::WorldConfig;
 /// Depot repair is handled separately in depot_repair_system.
 /// Both systems share RepairTracker to enforce the combined hard cap.
 /// Runs after command execution, before decay.
+#[allow(clippy::too_many_arguments)]
 pub fn controller_repair_system(
     mut drones: Query<(Entity, &mut Drone, &Position)>,
     controllers: Query<(&Controller, &Position)>,
     registry: Res<ResourceRegistry>,
     config: Res<WorldConfig>,
+    current_tick: Res<crate::resources::CurrentTick>,
     mut global_storage: ResMut<PlayerGlobalStorage>,
     mut repair_tracker: ResMut<RepairTracker>,
     mut trace_events: ResMut<TickTraceEventLog>,
+    mut ledger: ResMut<ResourceLedger>,
 ) {
     let hard_cap = repair_tracker.hard_cap;
     let mut body_repair_this_tick = 0;
@@ -84,6 +88,14 @@ pub fn controller_repair_system(
             }
 
             *energy -= repair_cost;
+            ledger.record(
+                current_tick.0,
+                Some(player_id),
+                None,
+                &config.empire_upkeep.resource,
+                i64::from(repair_cost),
+                ResourceOperation::UpkeepDeduction,
+            );
             drone.hits = drone.hits.saturating_add(repair_amount).min(drone.hits_max);
             body_repair_this_tick += repair_amount;
             *repair_tracker.per_player.entry(player_id).or_default() += repair_amount;
