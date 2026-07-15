@@ -1,38 +1,134 @@
 use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, HashMap},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bevy::prelude::Resource;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::command::ObjectId;
 use crate::components::{PlayerId, RoomId};
 
 const DEFAULT_COLLECT_TIMEOUT_MS: u64 = 2_500;
 const AUTH_FRESHNESS_MS: u64 = 60_000;
 const AUTH_FUTURE_SKEW_MS: u64 = 5_000;
+const MODULE_FETCH_SCHEMA: &str = "swarm.sandbox.module-fetch.v1";
+type PendingDeploymentKey = (PlayerId, RoomId, u64);
+type PendingDeploymentMap = BTreeMap<PendingDeploymentKey, ActiveDeployment>;
 
 #[derive(Resource, Debug, Clone, Default)]
 pub struct ActiveDeployments {
     inner: Arc<Mutex<BTreeMap<(PlayerId, RoomId), ActiveDeployment>>>,
+    pending: Arc<Mutex<PendingDeploymentMap>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveDeployment {
+    pub deploy_id: String,
+    pub world_id: String,
+    pub module_slot: String,
     pub player_id: PlayerId,
     pub room_id: RoomId,
+    pub drone_id: ObjectId,
     pub module_hash: [u8; 32],
+    pub metadata_hash: String,
+    pub signed_payload_hash: String,
+    pub compiled_artifact_hash: [u8; 32],
+    pub client_version_counter: u64,
+    pub redb_version_counter: u64,
+    pub certificate_id: String,
+    pub certificate_fingerprint: String,
+    pub transport: String,
+    pub signed_at: String,
+    pub accepted_at_tick: u64,
     pub wasm_bytes: Vec<u8>,
     pub load_after_tick: u64,
 }
 
 impl ActiveDeployments {
     pub fn activate(&self, deployment: ActiveDeployment) {
+        assert!(
+            !deployment.wasm_bytes.is_empty(),
+            "active deployment must include verified module bytes"
+        );
         let mut deployments = self.inner.lock().expect("active deployments lock poisoned");
         deployments.insert((deployment.player_id, deployment.room_id), deployment);
+    }
+
+    pub fn stage_activation(&self, deployment: ActiveDeployment) {
+        assert!(
+            !deployment.wasm_bytes.is_empty(),
+            "pending deployment must include verified module bytes"
+        );
+        let mut pending = self
+            .pending
+            .lock()
+            .expect("pending deployments lock poisoned");
+        pending.retain(|(player_id, room_id, _), pending_deployment| {
+            *player_id != deployment.player_id
+                || *room_id != deployment.room_id
+                || pending_deployment.redb_version_counter >= deployment.redb_version_counter
+        });
+        pending.insert(
+            (
+                deployment.player_id,
+                deployment.room_id,
+                deployment.load_after_tick,
+            ),
+            deployment,
+        );
+    }
+
+    pub fn pending_ready_for_tick(&self, tick: u64) -> Vec<ActiveDeployment> {
+        let pending = self
+            .pending
+            .lock()
+            .expect("pending deployments lock poisoned");
+        let mut ready = pending
+            .values()
+            .filter(|deployment| deployment.load_after_tick <= tick)
+            .cloned()
+            .collect::<Vec<_>>();
+        ready.sort_by_key(|deployment| {
+            (
+                deployment.player_id,
+                deployment.room_id.0,
+                deployment.load_after_tick,
+                deployment.module_hash,
+            )
+        });
+        ready
+    }
+
+    pub fn consume_ready_for_tick(&self, tick: u64) -> Vec<ActiveDeployment> {
+        let ready = self.pending_ready_for_tick(tick);
+        if ready.is_empty() {
+            return ready;
+        }
+        let mut pending = self
+            .pending
+            .lock()
+            .expect("pending deployments lock poisoned");
+        let mut deployments = self.inner.lock().expect("active deployments lock poisoned");
+        for deployment in &ready {
+            pending.remove(&(
+                deployment.player_id,
+                deployment.room_id,
+                deployment.load_after_tick,
+            ));
+            deployments.insert(
+                (deployment.player_id, deployment.room_id),
+                deployment.clone(),
+            );
+        }
+        ready
     }
 
     pub fn active_for_player(&self, player_id: PlayerId, tick: u64) -> Option<ActiveDeployment> {
@@ -65,6 +161,7 @@ pub struct SandboxTickRequest {
     pub snapshot_json: String,
     pub fuel_budget: u64,
     pub collect_timeout_ms: u64,
+    pub collect_deadline_ms: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,6 +179,7 @@ pub struct SandboxTickReply {
 pub struct SandboxDeployAck {
     pub instance_id: String,
     pub module_hash: String,
+    pub compiled_artifact_hash: String,
     pub status: String,
 }
 
@@ -100,6 +198,35 @@ struct SandboxDeployRequest {
     module_bytes: Vec<u8>,
     validation_policy_version: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SandboxModuleFetchRequest {
+    schema: String,
+    module_hash: [u8; 32],
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SandboxModuleFetchReply {
+    schema: String,
+    module_hash: [u8; 32],
+    module_bytes: Vec<u8>,
+    validation_policy_version: String,
+}
+
+#[derive(Clone)]
+struct ModuleFetchArtifact {
+    module_bytes: Vec<u8>,
+    validation_policy_version: String,
+}
+
+#[derive(Default)]
+struct ModuleFetchRegistry {
+    modules: Mutex<HashMap<[u8; 32], ModuleFetchArtifact>>,
+    seen_requests: Mutex<HashMap<String, u64>>,
+    responder_started: AtomicBool,
+}
+
+static MODULE_FETCH_REGISTRY: OnceLock<ModuleFetchRegistry> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthenticatedMessage<T> {
@@ -127,6 +254,7 @@ pub async fn execute_tick_remote(
     module_hash: &[u8; 32],
     fuel_budget: u64,
 ) -> Result<SandboxTickReply, String> {
+    let collect_deadline_ms = current_time_ms()?.saturating_add(DEFAULT_COLLECT_TIMEOUT_MS);
     let request = SandboxTickRequest {
         schema: "swarm.sandbox.tick.v1".to_string(),
         tick,
@@ -136,12 +264,13 @@ pub async fn execute_tick_remote(
         snapshot_json: String::from_utf8_lossy(snapshot_json).into_owned(),
         fuel_budget,
         collect_timeout_ms: DEFAULT_COLLECT_TIMEOUT_MS,
+        collect_deadline_ms,
     };
     let subject = format!("swarm.tick.{tick}.player.{player_id}");
     let request_id = new_hex_id(16)?;
     let payload = authenticated_payload_with_request_id(&request, &request_id)?;
     let response = tokio::time::timeout(
-        Duration::from_millis(DEFAULT_COLLECT_TIMEOUT_MS),
+        remaining_collect_duration(collect_deadline_ms)?,
         nats.request(subject, payload.into()),
     )
     .await
@@ -159,15 +288,23 @@ pub async fn deploy_module_remote(
     nats: &async_nats::Client,
     module_hash: &[u8; 32],
     wasm_bytes: &[u8],
-) -> Result<(), String> {
+) -> Result<[u8; 32], String> {
     if blake3::hash(wasm_bytes).as_bytes() != module_hash {
         return Err("module_hash must equal BLAKE3(module_bytes)".to_string());
     }
+    let validation_policy_version = "raw-wasm-v1".to_string();
+    register_module_fetch_artifact(
+        nats,
+        *module_hash,
+        wasm_bytes.to_vec(),
+        validation_policy_version.clone(),
+    )
+    .await?;
     let request = SandboxDeployRequest {
         schema: "swarm.sandbox.deploy.v1".to_string(),
         module_hash: *module_hash,
         module_bytes: wasm_bytes.to_vec(),
-        validation_policy_version: "raw-wasm-v1".to_string(),
+        validation_policy_version,
     };
     let subject = format!("swarm.deploy.{}", blake3::Hash::from(*module_hash).to_hex());
     let request_id = new_hex_id(16)?;
@@ -188,7 +325,139 @@ pub async fn deploy_module_remote(
     if !ack.status.starts_with("cached:") {
         return Err(format!("sandbox deploy failed: {}", ack.status));
     }
+    module_hash_from_hex(&ack.compiled_artifact_hash)
+        .map_err(|error| format!("sandbox deploy ack compiled_artifact_hash invalid: {error}"))
+}
+
+fn remaining_collect_duration(collect_deadline_ms: u64) -> Result<Duration, String> {
+    let remaining_ms = collect_deadline_ms.saturating_sub(current_time_ms()?);
+    if remaining_ms == 0 {
+        return Err("sandbox collect deadline exceeded".to_string());
+    }
+    Ok(Duration::from_millis(remaining_ms))
+}
+
+async fn register_module_fetch_artifact(
+    nats: &async_nats::Client,
+    module_hash: [u8; 32],
+    module_bytes: Vec<u8>,
+    validation_policy_version: String,
+) -> Result<(), String> {
+    let registry = MODULE_FETCH_REGISTRY.get_or_init(ModuleFetchRegistry::default);
+    registry
+        .modules
+        .lock()
+        .map_err(|_| "module fetch registry lock poisoned".to_string())?
+        .insert(
+            module_hash,
+            ModuleFetchArtifact {
+                module_bytes,
+                validation_policy_version,
+            },
+        );
+
+    if registry
+        .responder_started
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let subscriber = match nats.subscribe("swarm.module.fetch.*").await {
+            Ok(subscriber) => subscriber,
+            Err(error) => {
+                registry.responder_started.store(false, Ordering::Release);
+                return Err(format!("subscribe sandbox module fetch: {error}"));
+            }
+        };
+        let client = nats.clone();
+        tokio::spawn(async move {
+            run_module_fetch_responder(client, subscriber).await;
+            if let Some(registry) = MODULE_FETCH_REGISTRY.get() {
+                registry.responder_started.store(false, Ordering::Release);
+            }
+        });
+    }
     Ok(())
+}
+
+pub fn register_recovered_module_fetch_artifact(
+    module_hash: [u8; 32],
+    module_bytes: Vec<u8>,
+    validation_policy_version: impl Into<String>,
+) -> Result<(), String> {
+    if module_bytes.is_empty() {
+        return Err("recovered module bytes are empty".to_string());
+    }
+    if blake3::hash(&module_bytes).as_bytes() != &module_hash {
+        return Err("recovered module hash mismatch".to_string());
+    }
+    let registry = MODULE_FETCH_REGISTRY.get_or_init(ModuleFetchRegistry::default);
+    registry
+        .modules
+        .lock()
+        .map_err(|_| "module fetch registry lock poisoned".to_string())?
+        .insert(
+            module_hash,
+            ModuleFetchArtifact {
+                module_bytes,
+                validation_policy_version: validation_policy_version.into(),
+            },
+        );
+    Ok(())
+}
+
+async fn run_module_fetch_responder(
+    client: async_nats::Client,
+    mut subscriber: async_nats::Subscriber,
+) {
+    while let Some(message) = subscriber.next().await {
+        let Some(reply_subject) = message.reply else {
+            continue;
+        };
+        let Ok(envelope) =
+            decode_authenticated_message::<SandboxModuleFetchRequest>(&message.payload)
+        else {
+            continue;
+        };
+        if envelope.payload.schema != MODULE_FETCH_SCHEMA || !accept_module_fetch_request(&envelope)
+        {
+            continue;
+        }
+        let Some(artifact) = MODULE_FETCH_REGISTRY
+            .get()
+            .and_then(|registry| registry.modules.lock().ok())
+            .and_then(|modules| modules.get(&envelope.payload.module_hash).cloned())
+        else {
+            continue;
+        };
+        let reply = SandboxModuleFetchReply {
+            schema: MODULE_FETCH_SCHEMA.to_string(),
+            module_hash: envelope.payload.module_hash,
+            module_bytes: artifact.module_bytes,
+            validation_policy_version: artifact.validation_policy_version,
+        };
+        if let Ok(payload) = authenticated_payload_with_request_id(&reply, &envelope.request_id) {
+            let _ = client.publish(reply_subject, payload.into()).await;
+        }
+    }
+}
+
+fn accept_module_fetch_request<T>(envelope: &AuthenticatedMessage<T>) -> bool {
+    let Ok(now) = current_time_ms() else {
+        return false;
+    };
+    let Some(registry) = MODULE_FETCH_REGISTRY.get() else {
+        return false;
+    };
+    let Ok(mut seen_requests) = registry.seen_requests.lock() else {
+        return false;
+    };
+    seen_requests.retain(|_, timestamp_ms| now.saturating_sub(*timestamp_ms) <= AUTH_FRESHNESS_MS);
+    let key = format!("{}:{}", envelope.request_id, envelope.nonce);
+    if seen_requests.contains_key(&key) {
+        return false;
+    }
+    seen_requests.insert(key, envelope.timestamp_ms);
+    true
 }
 
 pub fn module_hash_from_hex(value: &str) -> Result<[u8; 32], String> {
@@ -225,6 +494,7 @@ fn authenticated_payload_with_request_id<T: Serialize>(
     payload: &T,
     request_id: &str,
 ) -> Result<Vec<u8>, String> {
+    validate_hex_id(request_id, 16, "request_id")?;
     let nonce = new_hex_id(16)?;
     let timestamp_ms = current_time_ms()?;
     let secret = nats_auth_secret_from_env()?;
@@ -249,11 +519,22 @@ pub fn decode_authenticated_payload<T>(bytes: &[u8], expected_request_id: &str) 
 where
     T: for<'de> Deserialize<'de> + Serialize,
 {
-    let envelope: AuthenticatedMessage<T> =
-        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    validate_hex_id(expected_request_id, 16, "expected_request_id")?;
+    let envelope = decode_authenticated_message(bytes)?;
     if envelope.request_id != expected_request_id {
         return Err("sandbox reply request_id mismatch".to_string());
     }
+    Ok(envelope.payload)
+}
+
+fn decode_authenticated_message<T>(bytes: &[u8]) -> Result<AuthenticatedMessage<T>, String>
+where
+    T: for<'de> Deserialize<'de> + Serialize,
+{
+    let envelope: AuthenticatedMessage<T> =
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    validate_hex_id(&envelope.request_id, 16, "request_id")?;
+    validate_hex_id(&envelope.nonce, 16, "nonce")?;
     verify_fresh_timestamp(envelope.timestamp_ms)?;
     let secret = nats_auth_secret_from_env()?;
     let signing = AuthenticatedSigningMessage {
@@ -265,15 +546,34 @@ where
     let payload_bytes = serde_json::to_vec(&signing).map_err(|error| error.to_string())?;
     let expected = hmac_sha256_hex(secret.as_bytes(), &payload_bytes);
     if !constant_time_eq(expected.as_bytes(), envelope.auth_tag_hex.as_bytes()) {
-        return Err("invalid sandbox reply auth tag".to_string());
+        return Err("invalid sandbox message auth tag".to_string());
     }
-    Ok(envelope.payload)
+    Ok(envelope)
 }
 
 fn new_hex_id(byte_len: usize) -> Result<String, String> {
+    if byte_len == 0 {
+        return Err("random identifier byte length must be greater than zero".to_string());
+    }
     let mut bytes = vec![0_u8; byte_len];
     getrandom::fill(&mut bytes).map_err(|error| error.to_string())?;
     Ok(hex_encode(&bytes))
+}
+
+fn validate_hex_id(value: &str, byte_len: usize, field: &str) -> Result<(), String> {
+    if value.len() != byte_len.saturating_mul(2) {
+        return Err(format!(
+            "{field} must be {} lowercase hex characters",
+            byte_len * 2
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(format!("{field} must be lowercase hex"));
+    }
+    Ok(())
 }
 
 fn current_time_ms() -> Result<u64, String> {
@@ -448,6 +748,7 @@ mod tests {
             snapshot_json: "{}".to_string(),
             fuel_budget: 10,
             collect_timeout_ms: 20,
+            collect_deadline_ms: current_time_ms().unwrap().saturating_add(20),
         };
 
         assert_eq!(
@@ -469,6 +770,7 @@ mod tests {
             snapshot_json: "{}".to_string(),
             fuel_budget: 10,
             collect_timeout_ms: 20,
+            collect_deadline_ms: current_time_ms().unwrap().saturating_add(20),
         };
 
         let encoded = authenticated_payload(&request).unwrap();
@@ -483,12 +785,76 @@ mod tests {
         let payload_bytes = serde_json::to_vec(&signing).unwrap();
 
         assert_eq!(envelope.payload.module_hash, [7; 32]);
+        assert_eq!(
+            envelope.payload.collect_deadline_ms,
+            request.collect_deadline_ms
+        );
         assert_eq!(envelope.request_id.len(), 32);
         assert_eq!(envelope.nonce.len(), 32);
         assert_eq!(
             envelope.auth_tag_hex,
             hmac_sha256_hex(b"secret", &payload_bytes)
         );
+    }
+
+    #[test]
+    fn authenticated_transport_rejects_malformed_rng_identifiers() {
+        let env = EnvGuard::acquire();
+        env.set("secret");
+        let request = SandboxTickRequest {
+            schema: "swarm.sandbox.tick.v1".to_string(),
+            tick: 9,
+            player_id: "1".to_string(),
+            room_id: "0".to_string(),
+            module_hash: [7; 32],
+            snapshot_json: "{}".to_string(),
+            fuel_budget: 10,
+            collect_timeout_ms: 20,
+            collect_deadline_ms: current_time_ms().unwrap().saturating_add(20),
+        };
+
+        assert_eq!(
+            new_hex_id(0).unwrap_err(),
+            "random identifier byte length must be greater than zero"
+        );
+        assert_eq!(
+            authenticated_payload_with_request_id(&request, "short").unwrap_err(),
+            "request_id must be 32 lowercase hex characters"
+        );
+
+        let mut envelope: AuthenticatedMessage<SandboxTickRequest> =
+            serde_json::from_slice(&authenticated_payload(&request).unwrap()).unwrap();
+        envelope.nonce = "ABCDEFABCDEFABCDEFABCDEFABCDEFAB".to_string();
+        let encoded = serde_json::to_vec(&envelope).unwrap();
+        assert_eq!(
+            decode_authenticated_payload::<SandboxTickRequest>(&encoded, &envelope.request_id)
+                .unwrap_err(),
+            "nonce must be lowercase hex"
+        );
+    }
+
+    #[test]
+    fn absolute_collect_deadline_rejects_expired_requests() {
+        assert_eq!(
+            remaining_collect_duration(current_time_ms().unwrap().saturating_sub(1)).unwrap_err(),
+            "sandbox collect deadline exceeded"
+        );
+    }
+
+    #[test]
+    fn authenticated_module_fetch_request_replay_is_rejected() {
+        let env = EnvGuard::acquire();
+        env.set("secret");
+        MODULE_FETCH_REGISTRY.get_or_init(ModuleFetchRegistry::default);
+        let request = SandboxModuleFetchRequest {
+            schema: MODULE_FETCH_SCHEMA.to_string(),
+            module_hash: [3; 32],
+        };
+        let encoded = authenticated_payload(&request).unwrap();
+        let envelope = decode_authenticated_message::<SandboxModuleFetchRequest>(&encoded).unwrap();
+
+        assert!(accept_module_fetch_request(&envelope));
+        assert!(!accept_module_fetch_request(&envelope));
     }
 
     #[test]
@@ -523,6 +889,7 @@ mod tests {
         let ack = SandboxDeployAck {
             instance_id: "sandbox-1".to_string(),
             module_hash: "ab".repeat(32),
+            compiled_artifact_hash: "cd".repeat(32),
             status: "cached:raw-wasm-v1".to_string(),
         };
         let encoded = signed_reply(
@@ -547,6 +914,7 @@ mod tests {
         let ack = SandboxDeployAck {
             instance_id: "sandbox-1".to_string(),
             module_hash: "ab".repeat(32),
+            compiled_artifact_hash: "cd".repeat(32),
             status: "cached:raw-wasm-v1".to_string(),
         };
         let timestamp_ms = current_time_ms().unwrap() - AUTH_FRESHNESS_MS - 1;

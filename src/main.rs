@@ -1,59 +1,86 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    env, fs,
+    env,
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use swarm_engine::{
-    BodyPart, CommandIntent, ExecutorError, PlayerExecutor, PlayerId, TickBroadcaster,
-    TickSnapshot, WorldMode, create_world_with_mode,
+    BodyPart, CommandIntent, ExecutorError, PlayerCollectMetrics, PlayerCollectOutput,
+    PlayerExecutor, PlayerId, RoomId, TickBroadcaster, TickSnapshot, WorldMode,
+    create_world_with_mode,
     sandbox_transport::{
-        ActiveDeployments, SandboxBackend, execute_tick_remote, hex_encode, hmac_sha256_hex,
-        nats_auth_secret_from_env,
+        ActiveDeployment, ActiveDeployments, SandboxBackend, execute_tick_remote, hex_encode,
+        nats_auth_secret_from_env, register_recovered_module_fetch_artifact,
     },
     sim::{create_local_simulation_world, summarize_local_simulation},
 };
 
 #[cfg(feature = "mod_combat_core")]
+#[allow(dead_code)]
 #[path = "../mods/combat-core/src/lib.rs"]
 mod swarm_mod_combat_core;
 #[cfg(feature = "mod_depot_storage")]
 #[path = "../mods/depot-storage/src/lib.rs"]
 mod swarm_mod_depot_storage;
 #[cfg(feature = "mod_empire_upkeep")]
+#[allow(dead_code)]
 #[path = "../mods/empire-upkeep/src/lib.rs"]
 mod swarm_mod_empire_upkeep;
 #[cfg(feature = "mod_fog_of_war")]
+#[allow(dead_code)]
 #[path = "../mods/fog-of-war/src/lib.rs"]
 mod swarm_mod_fog_of_war;
 #[cfg(feature = "mod_pve_spawning")]
+#[allow(dead_code)]
 #[path = "../mods/pve-spawning/src/lib.rs"]
 mod swarm_mod_pve_spawning;
 #[cfg(feature = "mod_resource_decay")]
 #[path = "../mods/resource-decay/src/lib.rs"]
 mod swarm_mod_resource_decay;
 #[cfg(feature = "mod_special_attacks")]
+#[allow(dead_code)]
 #[path = "../mods/special-attacks/src/lib.rs"]
 mod swarm_mod_special_attacks;
 #[cfg(feature = "mod_vanilla_boss")]
 #[path = "../mods/vanilla-boss/src/lib.rs"]
 mod swarm_mod_vanilla_boss;
 
-const DEFAULT_HEALTH_ADDR: &str = "0.0.0.0:8080";
+const DEFAULT_HEALTH_ADDR: &str = "127.0.0.1:8080";
+const MAX_PRE_AUTH_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MCP_PROXY_REPLAY_WINDOW_SECONDS: i64 = 300;
 const DEFAULT_PROXY_NONCE_PATH: &str = "swarm-proxy-nonces.db";
+const PRODUCTION_PROXY_NONCE_PATH: &str = "/var/lib/swarm-engine/proxy-nonces.db";
+const NATS_DEFAULT_PORT: u16 = 4222;
+const ENGINE_MODE_PRODUCTION: &str = "production";
+const ENGINE_MODE_DEVELOPMENT: &str = "development";
+const ENGINE_MODE_TEST: &str = "test";
+const ISSUER_KEY_FILE_ENV: &str = "SWARM_ENGINE_ISSUER_KEY_FILE";
+const ISSUER_KEY_B64_ENV: &str = "SWARM_ENGINE_ISSUER_KEY_B64";
+const PROXY_NONCE_PATH_ENV: &str = "SWARM_PROXY_NONCE_PATH";
+
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW_FLAG: i32 = 0o400000;
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn geteuid() -> u32;
+}
 
 #[derive(Clone, Debug)]
 struct Endpoint {
@@ -62,15 +89,43 @@ struct Endpoint {
 }
 
 struct McpHttpState {
-    server: swarm_engine::McpServer,
-    world: swarm_engine::world::SwarmWorld,
+    dispatch_tx: mpsc::Sender<McpDispatch>,
+    proxy_verifier: Result<swarm_engine::mcp::GatewayProxyVerifier, String>,
     seen_proxy_nonces: ProxyNonceStore,
+}
+
+struct McpDispatch {
+    player_id: PlayerId,
+    principal: swarm_engine::mcp::VerifiedMcpPrincipal,
+    request: swarm_engine::JsonRpcRequest,
+    response_tx: mpsc::SyncSender<swarm_engine::JsonRpcResponse>,
+    cancelled: Arc<AtomicBool>,
 }
 
 struct ProxyNonceStore {
     path: PathBuf,
     seen: BTreeMap<String, i64>,
     persistence_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ProxyPrincipal {
+    player_id: PlayerId,
+    cert_id: String,
+    cert_fingerprint: String,
+    transport: String,
+    scopes: String,
+    auth_mode: String,
+}
+
+#[derive(Debug, Clone)]
+struct NatsSecurityConfig {
+    url: String,
+    tls_required: bool,
+    ca_file: Option<PathBuf>,
+    client_cert_file: Option<PathBuf>,
+    client_key_file: Option<PathBuf>,
+    credentials_file: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -162,15 +217,61 @@ fn main() {
     );
 
     let healthy = Arc::new(AtomicBool::new(false));
+    let authoritative_tick = Arc::new(AtomicU64::new(0));
 
-    let redb_store = swarm_engine::RedbStore::open(&redb_path);
+    let redb_store_result = swarm_engine::RedbStore::open(&redb_path);
     let nats_endpoint = parse_nats_endpoint(&nats_url);
+    let nats_security = match NatsSecurityConfig::from_env(&nats_url) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    let certificate_issuer = match certificate_issuer_from_env() {
+        Ok(issuer) => issuer,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
 
-    let redb_connected = redb_store.is_ok();
-    match &redb_store {
-        Ok(_) => println!("redb opened path={redb_path}"),
-        Err(error) => eprintln!("redb unavailable: {error}"),
-    }
+    let redb_store = match redb_store_result {
+        Ok(store) => {
+            println!("redb opened path={redb_path}");
+            store
+        }
+        Err(error) => {
+            eprintln!("redb unavailable: {error}");
+            std::process::exit(1);
+        }
+    };
+    let redb_connected = true;
+    let recovered_world = match redb_store.recover_latest() {
+        Ok(Some(point)) => {
+            let recovered_tick = point.tick;
+            let expected_checksum = point.head.state_checksum;
+            match redb_store
+                .read_tick_state(recovered_tick)
+                .ok()
+                .flatten()
+                .or_else(|| point.snapshot.map(|snapshot| snapshot.state))
+            {
+                Some(state) => Some((recovered_tick, expected_checksum, state)),
+                None => {
+                    eprintln!(
+                        "redb recovery failed: tick {recovered_tick} has no recoverable state"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        Ok(None) => None,
+        Err(error) => {
+            eprintln!("redb recovery failed: {error}");
+            std::process::exit(1);
+        }
+    };
     match &nats_endpoint {
         Ok(endpoint) => println!(
             "nats configured url={} endpoint={}:{}",
@@ -190,8 +291,9 @@ fn main() {
         std::process::exit(1);
     }
     let (mcp_runtime_tx, mcp_runtime_rx) = mpsc::channel();
+    let (mcp_dispatch_tx, mcp_dispatch_rx) = mpsc::channel();
     start_health_server(health_addr, Arc::clone(&healthy), mcp_runtime_rx, mode);
-    let nats_client = connect_nats_client_with_retry(&nats_url, &healthy, tick_interval);
+    let nats_client = connect_nats_client_with_retry(&nats_security, &healthy, tick_interval);
     let shared_nats_client = Some(nats_client.clone());
     let sandbox_backend = SandboxBackend::Remote {
         nats_client,
@@ -200,33 +302,40 @@ fn main() {
             .unwrap_or_else(|_| "engine-0".to_string()),
     };
     let active_deployments = ActiveDeployments::default();
-
-    if mcp_runtime_tx
-        .send((sandbox_backend.clone(), active_deployments.clone()))
-        .is_err()
-    {
-        eprintln!("health server unavailable; mcp runtime state was not installed");
-    }
+    restore_deployments_from_redb(&redb_store, &active_deployments);
 
     swarm_engine::world::ensure_world_config_exists("world.toml", "mods.lock");
     let mut world = create_world_with_mode(mode);
     add_feature_gated_mod_plugins(&mut world.app);
     world.app.insert_resource(sandbox_backend.clone());
     world.app.insert_resource(active_deployments.clone());
-    world
-        .app
-        .insert_resource(swarm_engine::RedbStore::unavailable(
-            "owned by tick scheduler",
-        ));
+    world.app.insert_resource(redb_store.clone());
     world
         .app
         .insert_resource(swarm_engine::InMemorySnapshotCache::in_process());
-    world.spawn_drone(
-        1,
-        10,
-        10,
-        vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
-    );
+    if let Some((recovered_tick, expected_checksum, state)) = recovered_world {
+        state.restore(world.app.world_mut());
+        let actual_checksum = world.state_checksum();
+        if actual_checksum != expected_checksum {
+            eprintln!(
+                "redb recovery failed: tick {recovered_tick} checksum expected={expected_checksum} actual={actual_checksum}"
+            );
+            std::process::exit(1);
+        }
+        world
+            .app
+            .world_mut()
+            .resource_mut::<swarm_engine::CurrentTick>()
+            .0 = recovered_tick.saturating_add(1);
+        println!("redb recovered tick={recovered_tick}");
+    } else {
+        world.spawn_drone(
+            1,
+            10,
+            10,
+            vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
+        );
+    }
 
     let broadcaster: Arc<dyn TickBroadcaster> = if let Some(ref client) = shared_nats_client {
         Arc::new(swarm_engine::NatsTickBroadcaster::new(
@@ -240,15 +349,27 @@ fn main() {
     let mut scheduler = swarm_engine::MultiPlayerTickScheduler::new(
         world,
         scheduler_executors(&sandbox_backend, &active_deployments),
-        swarm_engine::RedbTickCommitter::new(match redb_store {
-            Ok(store) => store,
-            Err(error) => swarm_engine::RedbStore::unavailable(error.to_string()),
-        }),
+        swarm_engine::RedbTickCommitter::new(redb_store),
         broadcaster,
     );
+    let mut mcp_server = swarm_engine::McpServer::with_runtime_state_and_issuer(
+        sandbox_backend.clone(),
+        active_deployments.clone(),
+        certificate_issuer,
+    );
+    if mcp_runtime_tx.send(mcp_dispatch_tx).is_err() {
+        eprintln!("health server unavailable; mcp dispatcher was not installed");
+    }
 
-    let mut tick: u64 = 0;
     loop {
+        let tick = scheduler.tick_counter;
+        authoritative_tick.store(tick, Ordering::Release);
+        dispatch_pending_mcp_requests(
+            &mut mcp_server,
+            &mut scheduler.world,
+            &mcp_dispatch_rx,
+            authoritative_tick.load(Ordering::Acquire),
+        );
         let redb_ok = redb_connected;
         let nats_ok = nats_endpoint.as_ref().map(tcp_check).unwrap_or(false);
         healthy.store(redb_ok && nats_ok, Ordering::Relaxed);
@@ -263,16 +384,12 @@ fn main() {
                 "tick={tick} dependency=nats status=degraded action=continue_without_broadcast"
             );
         }
-        if redb_ok && nats_ok {
-            let report = scheduler.tick();
-            if !report.committed {
-                eprintln!(
-                    "tick={tick} scheduler_commit=failed commit_failures={}",
-                    report.metrics.commit_failures
-                );
-            }
-        } else {
-            scheduler.world.run_tick();
+        let report = scheduler.tick();
+        if !report.committed {
+            eprintln!(
+                "tick={tick} scheduler_commit=failed commit_failures={}",
+                report.metrics.commit_failures
+            );
         }
         println!(
             "tick={} state_checksum={} redb={} nats={}",
@@ -281,29 +398,131 @@ fn main() {
             status(redb_ok),
             status(nats_ok)
         );
-        tick += 1;
         thread::sleep(tick_interval);
     }
 }
 
+fn dispatch_pending_mcp_requests(
+    server: &mut swarm_engine::McpServer,
+    world: &mut swarm_engine::world::SwarmWorld,
+    dispatch_rx: &mpsc::Receiver<McpDispatch>,
+    tick: u64,
+) {
+    while let Ok(dispatch) = dispatch_rx.try_recv() {
+        if dispatch.cancelled.load(Ordering::Acquire) {
+            continue;
+        }
+        let response = server.handle_json_rpc_verified_proxy(
+            world,
+            swarm_engine::McpContext {
+                player_id: dispatch.player_id,
+                tick,
+            },
+            &dispatch.principal,
+            dispatch.request,
+        );
+        let _ = dispatch.response_tx.send(response);
+    }
+}
+
 fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) {
+    #[cfg(any(
+        feature = "mod_combat_core",
+        feature = "mod_depot_storage",
+        feature = "mod_empire_upkeep",
+        feature = "mod_fog_of_war",
+        feature = "mod_pve_spawning",
+        feature = "mod_resource_decay",
+        feature = "mod_special_attacks",
+        feature = "mod_vanilla_boss"
+    ))]
+    let lock = swarm_engine::plugins::load_default_plugin_lock();
     let _ = app;
     #[cfg(feature = "mod_combat_core")]
-    app.add_plugins(swarm_mod_combat_core::CombatCoreModPlugin);
+    if let Some(entry) = lock
+        .plugins
+        .get("combat-core")
+        .filter(|entry| entry.enabled)
+    {
+        let mut config = swarm_mod_combat_core::CombatConfig::default();
+        if let Some(value) = entry.config_u32("damage_multiplier") {
+            config.damage_multiplier_bp = value;
+        }
+        app.insert_resource(config);
+        app.add_plugins(swarm_mod_combat_core::CombatCoreModPlugin);
+    }
     #[cfg(feature = "mod_depot_storage")]
-    app.add_plugins(swarm_mod_depot_storage::DepotStorageModPlugin);
+    if lock
+        .plugins
+        .get("depot-storage")
+        .map(|entry| entry.enabled)
+        .unwrap_or(true)
+    {
+        app.add_plugins(swarm_mod_depot_storage::DepotStorageModPlugin);
+    }
     #[cfg(feature = "mod_empire_upkeep")]
-    app.add_plugins(swarm_mod_empire_upkeep::EmpireUpkeepModPlugin);
+    if lock
+        .plugins
+        .get("empire-upkeep")
+        .map(|entry| entry.enabled)
+        .unwrap_or(true)
+    {
+        app.add_plugins(swarm_mod_empire_upkeep::EmpireUpkeepModPlugin);
+    }
     #[cfg(feature = "mod_fog_of_war")]
-    app.add_plugins(swarm_mod_fog_of_war::FogOfWarModPlugin);
+    if lock
+        .plugins
+        .get("fog-of-war")
+        .map(|entry| entry.enabled)
+        .unwrap_or(true)
+    {
+        app.add_plugins(swarm_mod_fog_of_war::FogOfWarModPlugin);
+    }
     #[cfg(feature = "mod_pve_spawning")]
-    app.add_plugins(swarm_mod_pve_spawning::PveSpawningModPlugin);
+    if lock
+        .plugins
+        .get("pve-spawning")
+        .map(|entry| entry.enabled)
+        .unwrap_or(true)
+    {
+        app.add_plugins(swarm_mod_pve_spawning::PveSpawningModPlugin);
+    }
     #[cfg(feature = "mod_resource_decay")]
-    app.add_plugins(swarm_mod_resource_decay::ResourceDecayModPlugin);
+    if lock
+        .plugins
+        .get("resource-decay")
+        .map(|entry| entry.enabled)
+        .unwrap_or(true)
+    {
+        app.add_plugins(swarm_mod_resource_decay::ResourceDecayModPlugin);
+    }
     #[cfg(feature = "mod_special_attacks")]
-    app.add_plugins(swarm_mod_special_attacks::SpecialAttacksModPlugin);
+    if lock
+        .plugins
+        .get("special-attacks")
+        .map(|entry| entry.enabled)
+        .unwrap_or(true)
+    {
+        app.add_plugins(swarm_mod_special_attacks::SpecialAttacksModPlugin);
+    }
     #[cfg(feature = "mod_vanilla_boss")]
-    app.add_plugins(swarm_mod_vanilla_boss::VanillaBossPlugin::default());
+    if let Some(entry) = lock
+        .plugins
+        .get("vanilla-boss")
+        .filter(|entry| entry.enabled)
+    {
+        let mut plugin = swarm_mod_vanilla_boss::VanillaBossPlugin::default();
+        if let Some(value) = entry.config_bool("arena_bosses_enabled") {
+            plugin.arena_bosses_enabled = value;
+        }
+        if let Some(value) = entry.config_bool("world_bosses_enabled") {
+            plugin.world_bosses_enabled = value;
+        }
+        if let Some(value) = entry.config_u64("boss_spawn_interval") {
+            plugin.boss_spawn_interval = value;
+        }
+        app.add_plugins(plugin);
+    }
 }
 
 fn scheduler_executors(
@@ -338,15 +557,36 @@ impl SandboxPlayerExecutor {
     }
 }
 
+fn sandbox_collect_metrics(
+    metrics: &swarm_engine::sandbox_transport::SandboxExecutionMetrics,
+) -> PlayerCollectMetrics {
+    PlayerCollectMetrics {
+        fuel_consumed: metrics.fuel_consumed,
+        refund_events: 0,
+        refunded: 0,
+    }
+}
+
 impl PlayerExecutor for SandboxPlayerExecutor {
     fn collect(&mut self, snapshot: TickSnapshot) -> Result<Vec<CommandIntent>, ExecutorError> {
+        self.collect_with_metrics(snapshot)
+            .map(|output| output.intents)
+    }
+
+    fn collect_with_metrics(
+        &mut self,
+        snapshot: TickSnapshot,
+    ) -> Result<PlayerCollectOutput, ExecutorError> {
         match &self.backend {
             SandboxBackend::Remote { nats_client, .. } => {
                 let Some(deployment) = self
                     .active_deployments
                     .active_for_player(snapshot.player_id, snapshot.tick)
                 else {
-                    return Ok(Vec::new());
+                    return Ok(PlayerCollectOutput {
+                        intents: Vec::new(),
+                        metrics: PlayerCollectMetrics::default(),
+                    });
                 };
                 let player_id = snapshot.player_id.to_string();
                 let room_id = deployment.room_id.0.to_string();
@@ -370,34 +610,52 @@ impl PlayerExecutor for SandboxPlayerExecutor {
                 if !reply.errors.is_empty() {
                     return Err(ExecutorError::Error(reply.errors.join("; ")));
                 }
-                reply
+                let metrics = sandbox_collect_metrics(&reply.metrics);
+                let intents = reply
                     .commands
                     .into_iter()
                     .map(serde_json::from_value)
                     .collect::<Result<Vec<CommandIntent>, _>>()
-                    .map_err(|error| ExecutorError::Error(error.to_string()))
+                    .map_err(|error| ExecutorError::Error(error.to_string()))?;
+                Ok(PlayerCollectOutput { intents, metrics })
             }
         }
     }
 }
 
-fn connect_nats_client(nats_url: &str) -> Result<async_nats::Client, String> {
+fn connect_nats_client(config: &NatsSecurityConfig) -> Result<async_nats::Client, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    runtime
-        .block_on(async_nats::connect(nats_url))
-        .map_err(|error| error.to_string())
+    runtime.block_on(async {
+        let mut options = async_nats::ConnectOptions::new().require_tls(config.tls_required);
+        if let Some(path) = &config.ca_file {
+            options = options.add_root_certificates(path.clone());
+        }
+        if let (Some(cert), Some(key)) = (&config.client_cert_file, &config.client_key_file) {
+            options = options.add_client_certificate(cert.clone(), key.clone());
+        }
+        if let Some(path) = &config.credentials_file {
+            options = options
+                .credentials_file(path)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        options
+            .connect(&config.url)
+            .await
+            .map_err(|error| error.to_string())
+    })
 }
 
 fn connect_nats_client_with_retry(
-    nats_url: &str,
+    nats_config: &NatsSecurityConfig,
     healthy: &Arc<AtomicBool>,
     retry_interval: Duration,
 ) -> async_nats::Client {
     loop {
-        match connect_nats_client(nats_url) {
+        match connect_nats_client(nats_config) {
             Ok(client) => {
                 println!("sandbox_backend=nats nats_client=available");
                 return client;
@@ -410,6 +668,294 @@ fn connect_nats_client_with_retry(
                 thread::sleep(retry_interval);
             }
         }
+    }
+}
+
+impl NatsSecurityConfig {
+    fn from_env(url: &str) -> Result<Self, String> {
+        let mode = engine_mode_from_env()?;
+        let tls_required = env::var("NATS_TLS_REQUIRED").ok();
+        Self::from_values_for_mode(
+            &mode,
+            url,
+            tls_required.as_deref(),
+            configured_file("NATS_TLS_CA_FILE")?,
+            configured_file("NATS_TLS_CERT_FILE")?,
+            configured_file("NATS_TLS_KEY_FILE")?,
+            configured_file("NATS_CREDENTIALS_FILE")?,
+        )
+    }
+
+    fn from_values_for_mode(
+        mode: &str,
+        url: &str,
+        tls_required: Option<&str>,
+        ca_file: Option<PathBuf>,
+        client_cert_file: Option<PathBuf>,
+        client_key_file: Option<PathBuf>,
+        credentials_file: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let mode = mode.trim().to_ascii_lowercase();
+        if !is_valid_engine_mode(&mode) {
+            return Err(format!("invalid SWARM_ENGINE_MODE `{mode}`"));
+        }
+        let config = Self::from_values(
+            url,
+            tls_required,
+            ca_file,
+            client_cert_file,
+            client_key_file,
+            credentials_file,
+        )?;
+        if mode == ENGINE_MODE_PRODUCTION && !config.tls_required {
+            return Err("production engine requires NATS TLS".to_string());
+        }
+        if mode == ENGINE_MODE_PRODUCTION && config.credentials_file.is_none() {
+            return Err("production engine requires NATS role credentials".to_string());
+        }
+        Ok(config)
+    }
+
+    fn from_values(
+        url: &str,
+        tls_required: Option<&str>,
+        ca_file: Option<PathBuf>,
+        client_cert_file: Option<PathBuf>,
+        client_key_file: Option<PathBuf>,
+        credentials_file: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let url = url.trim();
+        if url.is_empty() {
+            return Err("NATS_URL must be non-empty".to_string());
+        }
+        if client_cert_file.is_some() != client_key_file.is_some() {
+            return Err(
+                "NATS_TLS_CERT_FILE and NATS_TLS_KEY_FILE must be configured together".to_string(),
+            );
+        }
+        let explicitly_disabled = tls_required.is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        });
+        let configured_tls = ca_file.is_some()
+            || client_cert_file.is_some()
+            || credentials_file.is_some()
+            || url.starts_with("tls://");
+        if explicitly_disabled && configured_tls {
+            return Err(
+                "NATS_TLS_REQUIRED cannot be false when TLS or credentials are configured"
+                    .to_string(),
+            );
+        }
+        let tls_required = match tls_required.map(str::trim) {
+            None => configured_tls,
+            Some(value)
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                ) =>
+            {
+                true
+            }
+            Some(value)
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                ) =>
+            {
+                false
+            }
+            Some(_) => return Err("NATS_TLS_REQUIRED must be a boolean".to_string()),
+        };
+        for (name, path) in [
+            ("NATS_TLS_CA_FILE", ca_file.as_ref()),
+            ("NATS_TLS_CERT_FILE", client_cert_file.as_ref()),
+            ("NATS_TLS_KEY_FILE", client_key_file.as_ref()),
+            ("NATS_CREDENTIALS_FILE", credentials_file.as_ref()),
+        ] {
+            if let Some(path) = path {
+                let metadata = fs::metadata(path).map_err(|error| {
+                    format!("{name} is not readable ({}): {error}", path.display())
+                })?;
+                if !metadata.is_file() {
+                    return Err(format!("{name} must reference a file: {}", path.display()));
+                }
+            }
+        }
+        Ok(Self {
+            url: url.to_string(),
+            tls_required,
+            ca_file,
+            client_cert_file,
+            client_key_file,
+            credentials_file,
+        })
+    }
+}
+
+fn engine_mode_from_env() -> Result<String, String> {
+    let mode = env::var("SWARM_ENGINE_MODE")
+        .or_else(|_| env::var("SWARM_ENV"))
+        .unwrap_or_else(|_| ENGINE_MODE_PRODUCTION.to_string());
+    let mode = mode.trim().to_ascii_lowercase();
+    if !is_valid_engine_mode(&mode) {
+        return Err(format!("invalid SWARM_ENGINE_MODE `{mode}`"));
+    }
+    Ok(mode)
+}
+
+fn is_valid_engine_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        ENGINE_MODE_PRODUCTION | ENGINE_MODE_DEVELOPMENT | ENGINE_MODE_TEST
+    )
+}
+
+fn certificate_issuer_from_env() -> Result<swarm_engine::CertificateIssuer, String> {
+    let mode = engine_mode_from_env()?;
+    let key_file = configured_file(ISSUER_KEY_FILE_ENV)?;
+    let key_b64 = configured_secret(ISSUER_KEY_B64_ENV)?;
+    certificate_issuer_from_values_for_mode(&mode, key_file, key_b64)
+}
+
+fn certificate_issuer_from_values_for_mode(
+    mode: &str,
+    key_file: Option<PathBuf>,
+    key_b64: Option<String>,
+) -> Result<swarm_engine::CertificateIssuer, String> {
+    let mode = mode.trim().to_ascii_lowercase();
+    if !is_valid_engine_mode(&mode) {
+        return Err(format!("invalid SWARM_ENGINE_MODE `{mode}`"));
+    }
+    if mode != ENGINE_MODE_PRODUCTION {
+        return Ok(swarm_engine::CertificateIssuer::new());
+    }
+    match (key_file, key_b64) {
+        (Some(_), Some(_)) => Err(format!(
+            "production engine requires exactly one issuer seed source: {ISSUER_KEY_FILE_ENV} or {ISSUER_KEY_B64_ENV}"
+        )),
+        (None, None) => Err(format!(
+            "production engine requires exactly one issuer seed source: {ISSUER_KEY_FILE_ENV} or {ISSUER_KEY_B64_ENV}"
+        )),
+        (Some(path), None) => {
+            let mut seed = read_issuer_seed_file(&path)?;
+            let issuer = issuer_from_seed(&seed);
+            seed.fill(0);
+            issuer
+        }
+        (None, Some(encoded)) => {
+            let mut seed = decode_issuer_seed_b64(&encoded)?;
+            let issuer = issuer_from_seed(&seed);
+            seed.fill(0);
+            issuer
+        }
+    }
+}
+
+fn read_issuer_seed_file(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("{ISSUER_KEY_FILE_ENV} cannot be inspected: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("{ISSUER_KEY_FILE_ENV} must not be a symlink"));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "{ISSUER_KEY_FILE_ENV} must point to a regular file"
+        ));
+    }
+    let seed =
+        fs::read(path).map_err(|error| format!("{ISSUER_KEY_FILE_ENV} cannot be read: {error}"))?;
+    if seed.len() != swarm_engine::CertificateIssuer::ED25519_SEED_LEN {
+        return Err(format!(
+            "{ISSUER_KEY_FILE_ENV} must contain exactly {} bytes",
+            swarm_engine::CertificateIssuer::ED25519_SEED_LEN
+        ));
+    }
+    Ok(seed)
+}
+
+fn issuer_from_seed(seed: &[u8]) -> Result<swarm_engine::CertificateIssuer, String> {
+    swarm_engine::CertificateIssuer::from_seed(seed).map_err(|error| error.message)
+}
+
+fn decode_issuer_seed_b64(encoded: &str) -> Result<Vec<u8>, String> {
+    let seed = decode_base64_secret(encoded.trim())?;
+    if seed.len() != swarm_engine::CertificateIssuer::ED25519_SEED_LEN {
+        return Err(format!(
+            "{ISSUER_KEY_B64_ENV} must decode to exactly {} bytes",
+            swarm_engine::CertificateIssuer::ED25519_SEED_LEN
+        ));
+    }
+    Ok(seed)
+}
+
+fn decode_base64_secret(input: &str) -> Result<Vec<u8>, String> {
+    if input.is_empty() || !input.len().is_multiple_of(4) {
+        return Err(format!("{ISSUER_KEY_B64_ENV} is not valid base64"));
+    }
+    let mut output = Vec::with_capacity(input.len() / 4 * 3);
+    let bytes = input.as_bytes();
+    for (index, chunk) in bytes.chunks(4).enumerate() {
+        let is_last = index == bytes.len() / 4 - 1;
+        let a = base64_secret_value(chunk[0])?;
+        let b = base64_secret_value(chunk[1])?;
+        let c_padding = chunk[2] == b'=';
+        let d_padding = chunk[3] == b'=';
+        if c_padding && !d_padding {
+            return Err(format!("{ISSUER_KEY_B64_ENV} is not valid base64"));
+        }
+        if (c_padding || d_padding) && !is_last {
+            return Err(format!("{ISSUER_KEY_B64_ENV} is not valid base64"));
+        }
+        let c = if c_padding {
+            0
+        } else {
+            base64_secret_value(chunk[2])?
+        };
+        let d = if d_padding {
+            0
+        } else {
+            base64_secret_value(chunk[3])?
+        };
+        output.push((a << 2) | (b >> 4));
+        if !c_padding {
+            output.push((b << 4) | (c >> 2));
+        }
+        if !d_padding {
+            output.push((c << 6) | d);
+        }
+    }
+    Ok(output)
+}
+
+fn base64_secret_value(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        _ => Err(format!("{ISSUER_KEY_B64_ENV} is not valid base64")),
+    }
+}
+
+fn configured_file(name: &str) -> Result<Option<PathBuf>, String> {
+    match env::var(name) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => Ok(Some(PathBuf::from(value))),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("{name} is not valid unicode: {error}")),
+    }
+}
+
+fn configured_secret(name: &str) -> Result<Option<String>, String> {
+    match env::var(name) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("{name} is not valid unicode: {error}")),
     }
 }
 
@@ -518,7 +1064,7 @@ fn parse_sim_speed(value: &str) -> Result<String, String> {
 fn start_health_server(
     addr: String,
     healthy: Arc<AtomicBool>,
-    mcp_runtime_rx: mpsc::Receiver<(SandboxBackend, ActiveDeployments)>,
+    mcp_runtime_rx: mpsc::Receiver<mpsc::Sender<McpDispatch>>,
     mode: WorldMode,
 ) {
     thread::spawn(move || {
@@ -537,7 +1083,7 @@ fn start_health_server(
         for stream in listener.incoming() {
             match stream {
                 Ok(mut stream) => {
-                    install_pending_mcp_state(&mut mcp_state, &mcp_runtime_rx, mode);
+                    install_pending_mcp_state(&mut mcp_state, &mcp_runtime_rx);
                     respond_http(
                         &mut stream,
                         healthy.load(Ordering::Relaxed),
@@ -554,23 +1100,102 @@ fn start_health_server(
 
 fn install_pending_mcp_state(
     mcp_state: &mut Option<McpHttpState>,
-    mcp_runtime_rx: &mpsc::Receiver<(SandboxBackend, ActiveDeployments)>,
-    mode: WorldMode,
+    mcp_runtime_rx: &mpsc::Receiver<mpsc::Sender<McpDispatch>>,
 ) {
-    while let Ok((sandbox_backend, active_deployments)) = mcp_runtime_rx.try_recv() {
-        let mut world = create_world_with_mode(mode);
-        add_feature_gated_mod_plugins(&mut world.app);
-        world.app.insert_resource(sandbox_backend.clone());
-        world.app.insert_resource(active_deployments.clone());
+    while let Ok(dispatch_tx) = mcp_runtime_rx.try_recv() {
         *mcp_state = Some(McpHttpState {
-            server: swarm_engine::McpServer::with_runtime_state(
-                sandbox_backend,
-                active_deployments,
-            ),
-            world,
+            dispatch_tx,
+            proxy_verifier: swarm_engine::mcp::GatewayProxyVerifier::from_env()
+                .map_err(|error| error.message),
             seen_proxy_nonces: ProxyNonceStore::open(proxy_nonce_store_path()),
         });
-        println!("health server mcp runtime state installed");
+        println!("health server mcp dispatcher installed");
+    }
+}
+
+fn restore_deployments_from_redb(
+    redb_store: &swarm_engine::RedbStore,
+    active_deployments: &ActiveDeployments,
+) {
+    let manifests = match redb_store.recover_deploy_manifests() {
+        Ok(manifests) => manifests,
+        Err(error) => {
+            eprintln!("deploy recovery unavailable: {error}");
+            return;
+        }
+    };
+    for manifest in manifests {
+        let Some(room_id) = manifest
+            .module_slot
+            .strip_prefix("room:")
+            .and_then(|value| value.parse::<u32>().ok())
+            .map(RoomId)
+        else {
+            eprintln!(
+                "deploy recovery failed deploy_id={} reason=invalid_module_slot",
+                manifest.deploy_id
+            );
+            let _ = redb_store.mark_deploy_recovery_failed(
+                &manifest.deploy_id,
+                format!("invalid module_slot {}", manifest.module_slot),
+            );
+            continue;
+        };
+        let artifact = match redb_store.read_verified_deploy_artifact(&manifest) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                eprintln!(
+                    "deploy recovery failed deploy_id={} reason={error}",
+                    manifest.deploy_id
+                );
+                let _ = redb_store.mark_deploy_recovery_failed(
+                    &manifest.deploy_id,
+                    format!("deploy artifact unavailable: {error}"),
+                );
+                continue;
+            }
+        };
+        let deployment = ActiveDeployment {
+            deploy_id: manifest.deploy_id,
+            world_id: manifest.world_id,
+            module_slot: manifest.module_slot,
+            player_id: manifest.player_id,
+            room_id,
+            drone_id: manifest.drone_id,
+            module_hash: manifest.wasm_module_hash,
+            metadata_hash: manifest.metadata_hash,
+            signed_payload_hash: manifest.signed_payload_hash,
+            compiled_artifact_hash: manifest.compiled_artifact_hash,
+            client_version_counter: manifest.client_version_counter,
+            redb_version_counter: manifest.redb_version_counter,
+            certificate_id: manifest.certificate_id,
+            certificate_fingerprint: manifest.certificate_fingerprint,
+            transport: manifest.transport,
+            signed_at: manifest.signed_at,
+            accepted_at_tick: manifest.accepted_at_tick,
+            wasm_bytes: artifact.wasm_bytes,
+            load_after_tick: manifest.activation_tick,
+        };
+        if let Err(error) = register_recovered_module_fetch_artifact(
+            deployment.module_hash,
+            deployment.wasm_bytes.clone(),
+            "redb-recovered-v1",
+        ) {
+            eprintln!(
+                "deploy recovery failed deploy_id={} reason={error}",
+                deployment.deploy_id
+            );
+            let _ = redb_store.mark_deploy_recovery_failed(
+                &deployment.deploy_id,
+                format!("module fetch cache recovery failed: {error}"),
+            );
+            continue;
+        }
+        if manifest.status == "active" {
+            active_deployments.activate(deployment);
+        } else {
+            active_deployments.stage_activation(deployment);
+        }
     }
 }
 
@@ -646,6 +1271,9 @@ fn read_http_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         .get("content-length")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
+    if content_length > MAX_PRE_AUTH_HTTP_BODY_BYTES {
+        return None;
+    }
     let body_start = header_end + 4;
     while buffer.len().saturating_sub(body_start) < content_length {
         let mut chunk = [0_u8; 4096];
@@ -654,6 +1282,9 @@ fn read_http_request(stream: &mut TcpStream) -> Option<HttpRequest> {
             return None;
         }
         buffer.extend_from_slice(&chunk[..bytes_read]);
+        if buffer.len().saturating_sub(body_start) > MAX_PRE_AUTH_HTTP_BODY_BYTES {
+            return None;
+        }
     }
 
     Some(HttpRequest {
@@ -693,8 +1324,9 @@ fn respond_mcp(
         return;
     };
 
-    let secret = match proxy_signature_secret_from_env() {
-        Ok(secret) => secret,
+    let state = mcp_state;
+    let verifier = match state.proxy_verifier.as_ref() {
+        Ok(verifier) => verifier,
         Err(error) => {
             respond_bytes(
                 stream,
@@ -706,8 +1338,8 @@ fn respond_mcp(
         }
     };
 
-    let player_id = match proxy_player_id(&request) {
-        Ok(player_id) => player_id,
+    let principal = match proxy_principal(&request) {
+        Ok(principal) => principal,
         Err(error) => {
             respond_bytes(
                 stream,
@@ -718,28 +1350,9 @@ fn respond_mcp(
             return;
         }
     };
+    let player_id = principal.player_id;
     let tick_header = request.headers.get("x-swarm-tick").cloned();
-    let tick = match proxy_tick(tick_header.as_deref()) {
-        Ok(tick) => tick,
-        Err(error) => {
-            respond_bytes(
-                stream,
-                "HTTP/1.1 401 Unauthorized",
-                "text/plain; charset=utf-8",
-                format!("{error}\n").as_bytes(),
-            );
-            return;
-        }
-    };
-
-    let state = mcp_state;
-    if let Err(error) = verify_proxy_signature(
-        &request,
-        secret.as_bytes(),
-        player_id,
-        tick_header.as_deref().unwrap_or(""),
-        &mut state.seen_proxy_nonces,
-    ) {
+    if let Err(error) = proxy_tick(tick_header.as_deref()) {
         respond_bytes(
             stream,
             "HTTP/1.1 401 Unauthorized",
@@ -748,6 +1361,26 @@ fn respond_mcp(
         );
         return;
     }
+    let request_tick = tick_header.as_deref().unwrap_or("");
+
+    let mcp_principal = match verify_proxy_signature(
+        &request,
+        verifier,
+        &principal,
+        request_tick,
+        &mut state.seen_proxy_nonces,
+    ) {
+        Ok(principal) => principal,
+        Err(error) => {
+            respond_bytes(
+                stream,
+                "HTTP/1.1 401 Unauthorized",
+                "text/plain; charset=utf-8",
+                format!("{error}\n").as_bytes(),
+            );
+            return;
+        }
+    };
 
     let rpc_request = match serde_json::from_slice::<swarm_engine::JsonRpcRequest>(&request.body) {
         Ok(request) => request,
@@ -763,12 +1396,40 @@ fn respond_mcp(
             return;
         }
     };
-    let McpHttpState { server, world, .. } = &mut *state;
-    let response = server.handle_json_rpc(
-        world,
-        swarm_engine::McpContext { player_id, tick },
-        rpc_request,
-    );
+    let (response_tx, response_rx) = mpsc::sync_channel(1);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    if state
+        .dispatch_tx
+        .send(McpDispatch {
+            player_id,
+            principal: mcp_principal,
+            request: rpc_request,
+            response_tx,
+            cancelled: Arc::clone(&cancelled),
+        })
+        .is_err()
+    {
+        respond_bytes(
+            stream,
+            "HTTP/1.1 503 Service Unavailable",
+            "text/plain; charset=utf-8",
+            b"mcp dispatcher unavailable\n",
+        );
+        return;
+    }
+    let response = match response_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(response) => response,
+        Err(error) => {
+            cancelled.store(true, Ordering::Release);
+            respond_bytes(
+                stream,
+                "HTTP/1.1 503 Service Unavailable",
+                "text/plain; charset=utf-8",
+                format!("mcp dispatch failed: {error}\n").as_bytes(),
+            );
+            return;
+        }
+    };
     match serde_json::to_vec(&response) {
         Ok(body) => respond_bytes(stream, "HTTP/1.1 200 OK", "application/json", &body),
         Err(error) => respond_bytes(
@@ -780,14 +1441,31 @@ fn respond_mcp(
     }
 }
 
-fn proxy_nonce_store_path() -> PathBuf {
-    env::var("SWARM_PROXY_NONCE_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_PROXY_NONCE_PATH))
+fn proxy_nonce_store_path() -> Result<PathBuf, String> {
+    let mode = engine_mode_from_env()?;
+    let configured = env::var(PROXY_NONCE_PATH_ENV).ok().map(PathBuf::from);
+    let path = match (mode.as_str(), configured) {
+        (ENGINE_MODE_PRODUCTION, Some(path)) => path,
+        (ENGINE_MODE_PRODUCTION, None) => PathBuf::from(PRODUCTION_PROXY_NONCE_PATH),
+        (_, Some(path)) => path,
+        (_, None) => PathBuf::from(DEFAULT_PROXY_NONCE_PATH),
+    };
+    validate_proxy_nonce_path_for_mode(&mode, &path)?;
+    Ok(path)
 }
 
 impl ProxyNonceStore {
-    fn open(path: PathBuf) -> Self {
+    fn open(path: Result<PathBuf, String>) -> Self {
+        let path = match path {
+            Ok(path) => path,
+            Err(error) => {
+                return Self {
+                    path: PathBuf::from(PRODUCTION_PROXY_NONCE_PATH),
+                    seen: BTreeMap::new(),
+                    persistence_error: Some(error),
+                };
+            }
+        };
         match Self::load(path.clone()) {
             Ok(store) => store,
             Err(error) => Self {
@@ -799,36 +1477,22 @@ impl ProxyNonceStore {
     }
 
     fn load(path: PathBuf) -> Result<Self, String> {
-        let mut seen = BTreeMap::new();
-        if path.exists() {
-            let contents = fs::read_to_string(&path)
-                .map_err(|error| format!("proxy nonce store read failed: {error}"))?;
-            for (line_index, line) in contents.lines().enumerate() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let (timestamp, nonce) = line.split_once('\t').ok_or_else(|| {
-                    format!("proxy nonce store line {} is malformed", line_index + 1)
-                })?;
-                let timestamp = timestamp.parse::<i64>().map_err(|_| {
-                    format!(
-                        "proxy nonce store line {} has invalid timestamp",
-                        line_index + 1
-                    )
-                })?;
-                seen.insert(nonce.to_string(), timestamp);
-            }
-        }
-
+        ensure_proxy_nonce_parent(&path)?;
         let mut store = Self {
             path,
-            seen,
+            seen: BTreeMap::new(),
             persistence_error: None,
         };
         let now = current_unix_timestamp()?;
-        if store.prune_expired(now) {
-            store.persist()?;
-        }
+        store.seen = store.with_store_lock(|| {
+            let mut seen = load_proxy_nonce_entries(&store.path)?;
+            let before = seen.len();
+            seen.retain(|_, timestamp| now - *timestamp <= MCP_PROXY_REPLAY_WINDOW_SECONDS);
+            if seen.len() != before {
+                persist_proxy_nonce_entries(&store.path, &seen)?;
+            }
+            Ok(seen)
+        })?;
         Ok(store)
     }
 
@@ -846,9 +1510,18 @@ impl ProxyNonceStore {
         if nonce.contains('\n') || nonce.contains('\r') || nonce.contains('\t') {
             return Err("invalid proxy nonce".to_string());
         }
-        self.prune_expired(now);
-        self.seen.insert(nonce.to_string(), timestamp);
-        self.persist()
+        let mut locked_seen = self.with_store_lock(|| {
+            let mut locked_seen = load_proxy_nonce_entries(&self.path)?;
+            locked_seen.retain(|_, seen_at| now - *seen_at <= MCP_PROXY_REPLAY_WINDOW_SECONDS);
+            if locked_seen.contains_key(nonce) {
+                return Err("proxy nonce replayed".to_string());
+            }
+            locked_seen.insert(nonce.to_string(), timestamp);
+            persist_proxy_nonce_entries(&self.path, &locked_seen)?;
+            Ok(locked_seen)
+        })?;
+        std::mem::swap(&mut self.seen, &mut locked_seen);
+        Ok(())
     }
 
     fn prune_expired(&mut self, now: i64) -> bool {
@@ -858,23 +1531,211 @@ impl ProxyNonceStore {
         before != self.seen.len()
     }
 
+    #[cfg(test)]
     fn persist(&self) -> Result<(), String> {
-        if let Some(parent) = self.path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("proxy nonce store mkdir failed: {error}"))?;
-        }
-        let mut contents = String::new();
-        for (nonce, timestamp) in &self.seen {
-            contents.push_str(&format!("{timestamp}\t{nonce}\n"));
-        }
-        let temp_path = self.path.with_extension("tmp");
-        fs::write(&temp_path, contents)
-            .map_err(|error| format!("proxy nonce store write failed: {error}"))?;
-        fs::rename(&temp_path, &self.path)
-            .map_err(|error| format!("proxy nonce store replace failed: {error}"))
+        self.with_store_lock(|| persist_proxy_nonce_entries(&self.path, &self.seen))
     }
+
+    fn with_store_lock<T>(&self, action: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let lock_path = self.path.with_extension("lock");
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+            #[cfg(target_os = "linux")]
+            options.custom_flags(O_NOFOLLOW_FLAG);
+        }
+        let lock_file = options
+            .open(&lock_path)
+            .map_err(|error| format!("proxy nonce store lock open failed: {error}"))?;
+        lock_file
+            .lock()
+            .map_err(|error| format!("proxy nonce store lock failed: {error}"))?;
+        let result = action();
+        let unlock_result = lock_file.unlock();
+        match (result, unlock_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(format!("proxy nonce store unlock failed: {error}")),
+        }
+    }
+}
+
+fn validate_proxy_nonce_path_for_mode(mode: &str, path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err(format!("{PROXY_NONCE_PATH_ENV} must not be empty"));
+    }
+    if mode == ENGINE_MODE_PRODUCTION {
+        if !path.is_absolute() {
+            return Err(format!(
+                "{PROXY_NONCE_PATH_ENV} must be absolute in production"
+            ));
+        }
+        if path.starts_with(env::temp_dir()) || path.starts_with("/tmp") {
+            return Err(format!(
+                "{PROXY_NONCE_PATH_ENV} must not be under /tmp in production"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_proxy_nonce_parent(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "proxy nonce store path must have a parent directory".to_string())?;
+    let parent_exists = parent.exists();
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("proxy nonce store mkdir failed: {error}"))?;
+    #[cfg(unix)]
+    if !parent_exists {
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("proxy nonce store parent chmod failed: {error}"))?;
+    }
+    validate_proxy_nonce_parent(parent)?;
+    Ok(())
+}
+
+fn validate_proxy_nonce_parent(parent: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(parent)
+        .map_err(|error| format!("proxy nonce store parent inspect failed: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("proxy nonce store parent must not be a symlink".to_string());
+    }
+    if !metadata.file_type().is_dir() {
+        return Err("proxy nonce store parent must be a directory".to_string());
+    }
+    #[cfg(unix)]
+    {
+        if metadata.mode() & 0o077 != 0 {
+            return Err("proxy nonce store parent must be private".to_string());
+        }
+        if metadata.uid() != effective_uid() {
+            return Err("proxy nonce store parent must be owned by the engine user".to_string());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn effective_uid() -> u32 {
+    unsafe { geteuid() }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn effective_uid() -> u32 {
+    fs::metadata(".")
+        .map(|metadata| metadata.uid())
+        .unwrap_or(0)
+}
+
+fn validate_proxy_nonce_target(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err("proxy nonce store must not be a symlink".to_string());
+            }
+            if !metadata.file_type().is_file() {
+                return Err("proxy nonce store must be a regular file".to_string());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("proxy nonce store inspect failed: {error}")),
+    }
+    Ok(())
+}
+
+fn load_proxy_nonce_entries(path: &Path) -> Result<BTreeMap<String, i64>, String> {
+    validate_proxy_nonce_target(path)?;
+    let mut seen = BTreeMap::new();
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(seen),
+        Err(error) => return Err(format!("proxy nonce store read failed: {error}")),
+    };
+    for (line_index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (timestamp, nonce) = line
+            .split_once('\t')
+            .ok_or_else(|| format!("proxy nonce store line {} is malformed", line_index + 1))?;
+        let timestamp = timestamp.parse::<i64>().map_err(|_| {
+            format!(
+                "proxy nonce store line {} has invalid timestamp",
+                line_index + 1
+            )
+        })?;
+        seen.insert(nonce.to_string(), timestamp);
+    }
+    Ok(seen)
+}
+
+fn persist_proxy_nonce_entries(path: &Path, seen: &BTreeMap<String, i64>) -> Result<(), String> {
+    ensure_proxy_nonce_parent(path)?;
+    validate_proxy_nonce_target(path)?;
+    let mut contents = String::new();
+    for (nonce, timestamp) in seen {
+        contents.push_str(&format!("{timestamp}\t{nonce}\n"));
+    }
+    let (temp_path, mut temp_file) = create_proxy_nonce_temp(path)?;
+    temp_file
+        .write_all(contents.as_bytes())
+        .map_err(|error| format!("proxy nonce store write failed: {error}"))?;
+    temp_file
+        .sync_all()
+        .map_err(|error| format!("proxy nonce store sync failed: {error}"))?;
+    drop(temp_file);
+    fs::rename(&temp_path, path).map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
+        format!("proxy nonce store replace failed: {error}")
+    })?;
+    sync_parent_dir(path)?;
+    Ok(())
+}
+
+fn create_proxy_nonce_temp(path: &Path) -> Result<(PathBuf, File), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "proxy nonce store path must have a parent directory".to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("proxy-nonces.db");
+    for _ in 0..16 {
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random)
+            .map_err(|error| format!("proxy nonce temp randomness failed: {error}"))?;
+        let suffix = hex_encode(&random);
+        let temp_path = parent.join(format!(".{file_name}.{suffix}.tmp"));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+            #[cfg(target_os = "linux")]
+            options.custom_flags(O_NOFOLLOW_FLAG);
+        }
+        match options.open(&temp_path) {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("proxy nonce temp create failed: {error}")),
+        }
+    }
+    Err("proxy nonce temp create failed: exhausted random names".to_string())
+}
+
+fn sync_parent_dir(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "proxy nonce store path must have a parent directory".to_string())?;
+    File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|error| format!("proxy nonce store parent sync failed: {error}"))
 }
 
 fn current_unix_timestamp() -> Result<i64, String> {
@@ -884,27 +1745,73 @@ fn current_unix_timestamp() -> Result<i64, String> {
         .as_secs() as i64)
 }
 
-fn proxy_signature_secret_from_env() -> Result<String, String> {
-    let secret = env::var("SWARM_PROXY_SIGNATURE_SECRET")
-        .map_err(|_| "proxy auth secret missing".to_string())?;
-    validate_proxy_signature_secret(secret)
-}
-
-fn validate_proxy_signature_secret(secret: String) -> Result<String, String> {
-    if secret.trim().is_empty() {
-        return Err("proxy auth secret empty".to_string());
-    }
-    Ok(secret)
-}
-
-fn proxy_player_id(request: &HttpRequest) -> Result<PlayerId, String> {
-    let value = request
-        .headers
-        .get("x-swarm-player-id")
-        .ok_or_else(|| "missing X-Swarm-Player-Id".to_string())?;
-    value
+fn proxy_principal(request: &HttpRequest) -> Result<ProxyPrincipal, String> {
+    let player_id = required_header(request, "x-swarm-principal-player-id")?
         .parse::<PlayerId>()
-        .map_err(|_| "invalid X-Swarm-Player-Id".to_string())
+        .map_err(|_| "invalid X-Swarm-Principal-Player-Id".to_string())?;
+    let cert_id = required_header(request, "x-swarm-principal-cert-id")?.to_string();
+    let cert_fingerprint =
+        required_header(request, "x-swarm-principal-cert-fingerprint")?.to_string();
+    let transport = required_header(request, "x-swarm-principal-transport")?.to_string();
+    let scopes = canonicalize_scopes(required_header(request, "x-swarm-principal-scopes")?);
+    let auth_mode = required_header(request, "x-swarm-principal-auth-mode")?.to_string();
+    if matches!(auth_mode.as_str(), "app_cert" | "admin_cert") {
+        if cert_id.trim().is_empty() {
+            return Err("empty X-Swarm-Principal-Cert-Id".to_string());
+        }
+        if cert_fingerprint.trim().is_empty() {
+            return Err("empty X-Swarm-Principal-Cert-Fingerprint".to_string());
+        }
+    }
+    if transport.trim().is_empty() || contains_canonical_delimiter(&transport) {
+        return Err("invalid X-Swarm-Principal-Transport".to_string());
+    }
+    if !matches!(
+        auth_mode.as_str(),
+        "unauthenticated" | "web_session" | "app_cert" | "admin_cert"
+    ) {
+        return Err("invalid X-Swarm-Principal-Auth-Mode".to_string());
+    }
+    for (name, value) in [
+        ("X-Swarm-Principal-Cert-Id", cert_id.as_str()),
+        (
+            "X-Swarm-Principal-Cert-Fingerprint",
+            cert_fingerprint.as_str(),
+        ),
+        ("X-Swarm-Principal-Scopes", scopes.as_str()),
+        ("X-Swarm-Principal-Auth-Mode", auth_mode.as_str()),
+    ] {
+        if contains_canonical_delimiter(value) {
+            return Err(format!("invalid {name}"));
+        }
+    }
+    Ok(ProxyPrincipal {
+        player_id,
+        cert_id,
+        cert_fingerprint,
+        transport,
+        scopes,
+        auth_mode,
+    })
+}
+
+fn required_header<'a>(request: &'a HttpRequest, name: &str) -> Result<&'a str, String> {
+    request
+        .headers
+        .get(name)
+        .map(|value| value.as_str())
+        .ok_or_else(|| format!("missing {name}"))
+}
+
+fn canonicalize_scopes(scopes: &str) -> String {
+    let mut scopes = scopes.split_ascii_whitespace().collect::<Vec<_>>();
+    scopes.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    scopes.dedup();
+    scopes.join(" ")
+}
+
+fn contains_canonical_delimiter(value: &str) -> bool {
+    value.contains('\n') || value.contains('\r') || value.contains('\t')
 }
 
 fn proxy_tick(value: Option<&str>) -> Result<u64, String> {
@@ -920,11 +1827,11 @@ fn proxy_tick(value: Option<&str>) -> Result<u64, String> {
 
 fn verify_proxy_signature(
     request: &HttpRequest,
-    secret: &[u8],
-    player_id: PlayerId,
+    verifier: &swarm_engine::mcp::GatewayProxyVerifier,
+    principal: &ProxyPrincipal,
     tick_header: &str,
     seen_nonces: &mut ProxyNonceStore,
-) -> Result<(), String> {
+) -> Result<swarm_engine::mcp::VerifiedMcpPrincipal, String> {
     let timestamp = request
         .headers
         .get("x-swarm-proxy-timestamp")
@@ -952,17 +1859,59 @@ fn verify_proxy_signature(
         return Err("proxy nonce replayed".to_string());
     }
 
-    let body_hash = hex_encode(&Sha256::digest(&request.body));
-    let canonical = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        request.method, request.path, timestamp, nonce, player_id, tick_header, body_hash
-    );
-    let expected = hmac_sha256_hex(secret, canonical.as_bytes());
-    if !constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
-        return Err("invalid proxy signature".to_string());
+    if contains_canonical_delimiter(tick_header) {
+        return Err("invalid X-Swarm-Tick".to_string());
     }
+    let body_hash = hex_encode(&Sha256::digest(&request.body));
+    let verified = verifier
+        .verify_signed_proxy(
+            swarm_engine::mcp::SignedProxyRequest {
+                method: request.method.clone(),
+                path: request.path.clone(),
+                timestamp,
+                nonce: nonce.clone(),
+                player_id: principal.player_id,
+                tick_header: tick_header.to_string(),
+                cert_id: principal.cert_id.clone(),
+                cert_fingerprint: principal.cert_fingerprint.clone(),
+                transport: principal.transport.clone(),
+                scopes: principal.scopes.clone(),
+                auth_mode: principal.auth_mode.clone(),
+                body_sha256_hex: body_hash,
+                signature: signature.clone(),
+            },
+            now,
+            Duration::from_secs(MCP_PROXY_REPLAY_WINDOW_SECONDS as u64),
+        )
+        .map_err(|error| error.message)?;
     seen_nonces.record_verified(nonce, timestamp, now)?;
-    Ok(())
+    Ok(verified)
+}
+
+#[cfg(test)]
+fn proxy_signature_canonical(
+    request: &HttpRequest,
+    timestamp: i64,
+    nonce: &str,
+    principal: &ProxyPrincipal,
+    tick_header: &str,
+) -> String {
+    let body_hash = hex_encode(&Sha256::digest(&request.body));
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        request.method.to_ascii_uppercase(),
+        request.path,
+        timestamp,
+        nonce,
+        principal.player_id,
+        tick_header,
+        principal.cert_id,
+        principal.cert_fingerprint,
+        principal.transport,
+        principal.scopes,
+        principal.auth_mode,
+        body_hash
+    )
 }
 
 fn redact_url_userinfo(url: &str) -> String {
@@ -985,16 +1934,6 @@ fn redact_url_userinfo(url: &str) -> String {
         &authority[userinfo_end + 1..],
         &url[authority_end..]
     )
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right.iter())
-        .fold(0_u8, |acc, (left, right)| acc | (left ^ right))
-        == 0
 }
 
 fn respond_health(stream: &mut TcpStream, healthy: bool) {
@@ -1125,21 +2064,46 @@ fn respond_bytes(stream: &mut TcpStream, status_line: &str, content_type: &str, 
 }
 
 fn parse_nats_endpoint(url: &str) -> Result<Endpoint, String> {
-    let without_scheme = url.strip_prefix("nats://").unwrap_or(url);
+    let without_scheme = url
+        .strip_prefix("nats://")
+        .or_else(|| url.strip_prefix("tls://"))
+        .unwrap_or(url);
     let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
-    parse_host_port(authority, 4222)
+    parse_host_port(authority, NATS_DEFAULT_PORT)
 }
 
 fn parse_host_port(value: &str, default_port: u16) -> Result<Endpoint, String> {
-    let mut parts = value.rsplitn(2, ':');
-    let maybe_port = parts.next().unwrap_or(value);
-    let port = maybe_port.parse::<u16>().unwrap_or(default_port);
-    let host = if port == default_port && !value.ends_with(&format!(":{default_port}")) {
-        value
-    } else {
-        parts.next().unwrap_or(value)
+    let authority = value
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(value)
+        .trim();
+    if authority.is_empty() {
+        return Err(format!("missing host in endpoint={value}"));
     }
-    .trim();
+
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, remainder)) = rest.split_once(']') else {
+            return Err(format!("invalid bracketed host in endpoint={value}"));
+        };
+        let port = if remainder.is_empty() {
+            default_port
+        } else if let Some(port) = remainder.strip_prefix(':') {
+            parse_port(port, value)?
+        } else {
+            return Err(format!("invalid bracketed host in endpoint={value}"));
+        };
+        (host, port)
+    } else if authority.matches(':').count() > 1 {
+        (authority, default_port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        if port.is_empty() {
+            return Err(format!("missing port in endpoint={value}"));
+        }
+        (host, parse_port(port, value)?)
+    } else {
+        (authority, default_port)
+    };
 
     if host.is_empty() {
         return Err(format!("missing host in endpoint={value}"));
@@ -1149,6 +2113,11 @@ fn parse_host_port(value: &str, default_port: u16) -> Result<Endpoint, String> {
         host: host.to_string(),
         port,
     })
+}
+
+fn parse_port(port: &str, endpoint: &str) -> Result<u16, String> {
+    port.parse::<u16>()
+        .map_err(|_| format!("invalid port in endpoint={endpoint}"))
 }
 
 fn tcp_check(endpoint: &Endpoint) -> bool {
@@ -1177,22 +2146,61 @@ mod tests {
     fn temp_nonce_path(name: &str) -> PathBuf {
         let mut path = env::temp_dir();
         path.push(format!(
-            "swarm-engine-{name}-{}-{}.nonces",
+            "swarm-engine-{name}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
+        fs::create_dir_all(&path).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        path.push("proxy-nonces.db");
         path
     }
 
     fn temp_nonce_store(name: &str) -> ProxyNonceStore {
-        ProxyNonceStore::open(temp_nonce_path(name))
+        ProxyNonceStore::open(Ok(temp_nonce_path(name)))
+    }
+
+    #[test]
+    fn default_health_addr_is_loopback_only() {
+        assert_eq!(DEFAULT_HEALTH_ADDR, "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn http_reader_rejects_oversized_body_before_reading_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_http_request(&mut stream).is_none()
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        write!(
+            client,
+            "POST /mcp HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
+            MAX_PRE_AUTH_HTTP_BODY_BYTES + 1
+        )
+        .unwrap();
+
+        assert!(handle.join().unwrap());
     }
 
     fn signed_request(timestamp: i64, nonce: &str, body: &[u8]) -> HttpRequest {
         signed_request_for_player(timestamp, nonce, body, 1, "0")
+    }
+
+    fn test_proxy_verifier() -> swarm_engine::mcp::GatewayProxyVerifier {
+        // SAFETY: This fixed key is confined to the debug test process.
+        unsafe {
+            swarm_engine::mcp::GatewayProxyVerifier::from_trusted_secret_for_debug(
+                b"secret".to_vec(),
+            )
+            .unwrap()
+        }
     }
 
     fn signed_request_for_player(
@@ -1208,28 +2216,94 @@ mod tests {
             headers: HashMap::new(),
             body: body.to_vec(),
         };
-        let body_hash = hex_encode(&Sha256::digest(body));
-        let canonical =
-            format!("POST\n/mcp\n{timestamp}\n{nonce}\n{player_id}\n{tick_header}\n{body_hash}");
         request
             .headers
             .insert("x-swarm-proxy-timestamp".to_string(), timestamp.to_string());
         request
             .headers
             .insert("x-swarm-proxy-nonce".to_string(), nonce.to_string());
+        request.headers.insert(
+            "x-swarm-principal-player-id".to_string(),
+            player_id.to_string(),
+        );
+        request.headers.insert(
+            "x-swarm-principal-cert-id".to_string(),
+            "cert-1".to_string(),
+        );
+        request.headers.insert(
+            "x-swarm-principal-cert-fingerprint".to_string(),
+            "fingerprint-1".to_string(),
+        );
         request
             .headers
-            .insert("x-swarm-player-id".to_string(), player_id.to_string());
+            .insert("x-swarm-principal-transport".to_string(), "mcp".to_string());
+        request.headers.insert(
+            "x-swarm-principal-scopes".to_string(),
+            "swarm:read swarm:deploy".to_string(),
+        );
+        request.headers.insert(
+            "x-swarm-principal-auth-mode".to_string(),
+            "app_cert".to_string(),
+        );
         if !tick_header.is_empty() {
             request
                 .headers
                 .insert("x-swarm-tick".to_string(), tick_header.to_string());
         }
+        let principal = proxy_principal(&request).unwrap();
+        let body_hash = hex_encode(&Sha256::digest(body));
+        let canonical = format!(
+            "POST\n/mcp\n{timestamp}\n{nonce}\n{player_id}\n{tick_header}\n{}\n{}\n{}\n{}\n{}\n{body_hash}",
+            principal.cert_id,
+            principal.cert_fingerprint,
+            principal.transport,
+            principal.scopes,
+            principal.auth_mode,
+        );
         request.headers.insert(
             "x-swarm-proxy-signature".to_string(),
-            hmac_sha256_hex(b"secret", canonical.as_bytes()),
+            swarm_engine::sandbox_transport::hmac_sha256_hex(b"secret", canonical.as_bytes()),
         );
         request
+    }
+
+    #[test]
+    fn verified_proxy_principal_maps_to_mcp_principal_without_scope_loss() {
+        let request = signed_request(current_unix_timestamp().unwrap(), "principal-map", br#"{}"#);
+        let proxy = proxy_principal(&request).unwrap();
+        let mut seen = temp_nonce_store("principal-map");
+
+        let principal =
+            verify_proxy_signature(&request, &test_proxy_verifier(), &proxy, "0", &mut seen)
+                .unwrap();
+        let principal = principal.principal();
+
+        assert_eq!(principal.kind(), swarm_engine::McpPrincipalKind::ClientCert);
+        assert_eq!(principal.player_id(), Some(1));
+        assert_eq!(principal.subject(), Some("cert-1"));
+        assert_eq!(principal.scopes(), "swarm:deploy swarm:read");
+        assert_eq!(principal.observed_transport(), Some("mcp"));
+    }
+
+    #[test]
+    fn web_and_bootstrap_proxy_principals_do_not_require_certificate_fields() {
+        for auth_mode in ["web_session", "unauthenticated"] {
+            let mut request =
+                signed_request(current_unix_timestamp().unwrap(), auth_mode, br#"{}"#);
+            request.headers.insert(
+                "x-swarm-principal-auth-mode".to_string(),
+                auth_mode.to_string(),
+            );
+            request
+                .headers
+                .insert("x-swarm-principal-cert-id".to_string(), String::new());
+            request.headers.insert(
+                "x-swarm-principal-cert-fingerprint".to_string(),
+                String::new(),
+            );
+
+            assert!(proxy_principal(&request).is_ok(), "auth_mode={auth_mode}");
+        }
     }
 
     #[test]
@@ -1240,10 +2314,12 @@ mod tests {
             .as_secs() as i64;
         let request = signed_request(timestamp, "nonce-1", br#"{"jsonrpc":"2.0"}"#);
         let mut seen = temp_nonce_store("accept-replay");
+        let principal = proxy_principal(&request).unwrap();
 
-        verify_proxy_signature(&request, b"secret", 1, "0", &mut seen).unwrap();
+        let verifier = test_proxy_verifier();
+        verify_proxy_signature(&request, &verifier, &principal, "0", &mut seen).unwrap();
 
-        assert!(verify_proxy_signature(&request, b"secret", 1, "0", &mut seen).is_err());
+        assert!(verify_proxy_signature(&request, &verifier, &principal, "0", &mut seen).is_err());
     }
 
     #[test]
@@ -1255,11 +2331,13 @@ mod tests {
         let mut request = signed_request(timestamp, "nonce-2", b"{}");
         request.body = b"[]".to_vec();
         let mut seen = temp_nonce_store("tampered-body");
+        let principal = proxy_principal(&request).unwrap();
 
-        assert!(verify_proxy_signature(&request, b"secret", 1, "0", &mut seen).is_err());
+        let verifier = test_proxy_verifier();
+        assert!(verify_proxy_signature(&request, &verifier, &principal, "0", &mut seen).is_err());
         assert!(seen.seen.is_empty());
         request.body = b"{}".to_vec();
-        verify_proxy_signature(&request, b"secret", 1, "0", &mut seen).unwrap();
+        verify_proxy_signature(&request, &verifier, &principal, "0", &mut seen).unwrap();
     }
 
     #[test]
@@ -1271,46 +2349,134 @@ mod tests {
         let mut request = signed_request_for_player(timestamp, "nonce-player", b"{}", 1, "9");
         request
             .headers
-            .insert("x-swarm-player-id".to_string(), "2".to_string());
-        let player_id = proxy_player_id(&request).unwrap();
+            .insert("x-swarm-principal-player-id".to_string(), "2".to_string());
+        let principal = proxy_principal(&request).unwrap();
         let mut seen = temp_nonce_store("player-tamper");
 
-        assert!(verify_proxy_signature(&request, b"secret", player_id, "9", &mut seen).is_err());
+        assert!(
+            verify_proxy_signature(&request, &test_proxy_verifier(), &principal, "9", &mut seen)
+                .is_err()
+        );
         assert!(seen.seen.is_empty());
     }
 
     #[test]
-    fn proxy_identity_requires_valid_player_header() {
+    fn production_proxy_nonce_path_rejects_tmp_and_relative_paths() {
+        assert!(
+            validate_proxy_nonce_path_for_mode(
+                ENGINE_MODE_PRODUCTION,
+                &env::temp_dir().join("swarm-proxy-nonces.db")
+            )
+            .is_err()
+        );
+        assert!(
+            validate_proxy_nonce_path_for_mode(
+                ENGINE_MODE_PRODUCTION,
+                Path::new("swarm-proxy-nonces.db")
+            )
+            .is_err()
+        );
+        assert!(
+            validate_proxy_nonce_path_for_mode(
+                ENGINE_MODE_PRODUCTION,
+                Path::new(PRODUCTION_PROXY_NONCE_PATH)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn proxy_nonce_store_fails_closed_for_public_parent() {
+        let path = temp_nonce_path("public-parent");
+        let parent = path.parent().unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut store = ProxyNonceStore::open(Ok(path));
+
+        assert!(store.contains("nonce-public-parent").is_err());
+        assert!(
+            store
+                .record_verified(
+                    "nonce-public-parent",
+                    current_unix_timestamp().unwrap(),
+                    current_unix_timestamp().unwrap()
+                )
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proxy_nonce_store_fails_closed_for_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let target = temp_nonce_path("symlink-target-real");
+        let link = temp_nonce_path("symlink-target-link");
+        fs::write(&target, "99\texisting\n").unwrap();
+        fs::remove_file(&link).ok();
+        symlink(&target, &link).unwrap();
+
+        let mut store = ProxyNonceStore::open(Ok(link));
+
+        assert!(store.contains("existing").is_err());
+        assert!(
+            store
+                .record_verified(
+                    "nonce-symlink",
+                    current_unix_timestamp().unwrap(),
+                    current_unix_timestamp().unwrap()
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(target).unwrap(), "99\texisting\n");
+    }
+
+    #[test]
+    fn proxy_identity_requires_valid_principal_headers() {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
         let mut request = signed_request(timestamp, "nonce-missing-player", b"{}");
 
-        request.headers.remove("x-swarm-player-id");
+        request.headers.remove("x-swarm-principal-player-id");
         assert_eq!(
-            proxy_player_id(&request).unwrap_err(),
-            "missing X-Swarm-Player-Id"
+            proxy_principal(&request).unwrap_err(),
+            "missing x-swarm-principal-player-id"
         );
 
-        request
-            .headers
-            .insert("x-swarm-player-id".to_string(), "not-a-player".to_string());
+        request.headers.insert(
+            "x-swarm-principal-player-id".to_string(),
+            "not-a-player".to_string(),
+        );
         assert_eq!(
-            proxy_player_id(&request).unwrap_err(),
-            "invalid X-Swarm-Player-Id"
+            proxy_principal(&request).unwrap_err(),
+            "invalid X-Swarm-Principal-Player-Id"
         );
     }
 
     #[test]
-    fn proxy_secret_rejects_empty_values() {
+    fn gateway_proxy_verifier_rejects_missing_or_empty_config() {
         assert_eq!(
-            validate_proxy_signature_secret("   ".to_string()).unwrap_err(),
+            // SAFETY: The test intentionally supplies an invalid debug-only key.
+            unsafe {
+                swarm_engine::mcp::GatewayProxyVerifier::from_trusted_secret_for_debug(
+                    b"   ".to_vec(),
+                )
+            }
+            .unwrap_err()
+            .message,
             "proxy auth secret empty"
         );
-        assert_eq!(
-            validate_proxy_signature_secret("secret".to_string()).unwrap(),
-            "secret"
+        // SAFETY: This fixed key is confined to the debug test process.
+        assert!(
+            unsafe {
+                swarm_engine::mcp::GatewayProxyVerifier::from_trusted_secret_for_debug(
+                    b"secret".to_vec(),
+                )
+            }
+            .is_ok()
         );
     }
 
@@ -1327,6 +2493,337 @@ mod tests {
     }
 
     #[test]
+    fn oracle_gateway_principal_fixture_matches_expected_hmac() {
+        let body = br#"{"jsonrpc":"2.0","method":"swarm_deploy"}"#;
+        let mut request = HttpRequest {
+            method: "post".to_string(),
+            path: "/mcp".to_string(),
+            headers: HashMap::new(),
+            body: body.to_vec(),
+        };
+        for (name, value) in [
+            ("x-swarm-proxy-timestamp", "1700000000"),
+            ("x-swarm-proxy-nonce", "oracle-nonce-1"),
+            ("x-swarm-principal-player-id", "42"),
+            ("x-swarm-tick", "4523"),
+            ("x-swarm-principal-cert-id", "cert-abc"),
+            (
+                "x-swarm-principal-cert-fingerprint",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            ("x-swarm-principal-transport", "mcp"),
+            (
+                "x-swarm-principal-scopes",
+                "swarm:read swarm:admin swarm:deploy swarm:read",
+            ),
+            ("x-swarm-principal-auth-mode", "admin_cert"),
+        ] {
+            request.headers.insert(name.to_string(), value.to_string());
+        }
+        request.headers.insert(
+            "x-swarm-proxy-signature".to_string(),
+            "a9b21c9cb946efd127e4a79a46b0f1539324f9357bb606c2b87c8da316fb9ab6".to_string(),
+        );
+        let principal = proxy_principal(&request).unwrap();
+        assert_eq!(principal.scopes, "swarm:admin swarm:deploy swarm:read");
+        let canonical = proxy_signature_canonical(
+            &request,
+            1_700_000_000,
+            "oracle-nonce-1",
+            &principal,
+            "4523",
+        );
+        assert_eq!(
+            canonical,
+            "POST\n/mcp\n1700000000\noracle-nonce-1\n42\n4523\ncert-abc\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nmcp\nswarm:admin swarm:deploy swarm:read\nadmin_cert\n54b97b14427c5e331d73eb86d8407ffe60f7f3827e5fae0ab556bc2810850349"
+        );
+        assert_eq!(
+            swarm_engine::sandbox_transport::hmac_sha256_hex(
+                b"oracle-fixture-secret",
+                canonical.as_bytes(),
+            ),
+            "a9b21c9cb946efd127e4a79a46b0f1539324f9357bb606c2b87c8da316fb9ab6"
+        );
+    }
+
+    #[test]
+    fn proxy_signature_rejects_tampered_principal_field() {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut request = signed_request(timestamp, "nonce-principal-tamper", b"{}");
+        request.headers.insert(
+            "x-swarm-principal-cert-id".to_string(),
+            "cert-tampered".to_string(),
+        );
+        let principal = proxy_principal(&request).unwrap();
+        let mut seen = temp_nonce_store("principal-tamper");
+
+        assert!(
+            verify_proxy_signature(&request, &test_proxy_verifier(), &principal, "0", &mut seen)
+                .is_err()
+        );
+        assert!(seen.seen.is_empty());
+    }
+
+    #[test]
+    fn proxy_signature_accepts_web_session_read_scope() {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut request = signed_request(timestamp, "nonce-web-session", b"{}");
+        request.headers.insert(
+            "x-swarm-principal-scopes".to_string(),
+            "swarm:read".to_string(),
+        );
+        request.headers.insert(
+            "x-swarm-principal-auth-mode".to_string(),
+            "web_session".to_string(),
+        );
+        let principal = proxy_principal(&request).unwrap();
+        let canonical =
+            proxy_signature_canonical(&request, timestamp, "nonce-web-session", &principal, "0");
+        request.headers.insert(
+            "x-swarm-proxy-signature".to_string(),
+            swarm_engine::sandbox_transport::hmac_sha256_hex(b"secret", canonical.as_bytes()),
+        );
+        let mut seen = temp_nonce_store("web-session");
+
+        assert_eq!(principal.scopes, "swarm:read");
+        verify_proxy_signature(&request, &test_proxy_verifier(), &principal, "0", &mut seen)
+            .unwrap();
+    }
+
+    #[test]
+    fn http_reader_accepts_exact_8mib_body_and_rejects_larger() {
+        assert_eq!(MAX_PRE_AUTH_HTTP_BODY_BYTES, 8 * 1024 * 1024);
+        let ok_body = vec![b'a'; MAX_PRE_AUTH_HTTP_BODY_BYTES];
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ok_handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_http_request(&mut stream).map(|request| request.body.len())
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        write!(
+            client,
+            "POST /mcp HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
+            ok_body.len()
+        )
+        .unwrap();
+        client.write_all(&ok_body).unwrap();
+        assert_eq!(
+            ok_handle.join().unwrap(),
+            Some(MAX_PRE_AUTH_HTTP_BODY_BYTES)
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let reject_handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_http_request(&mut stream).is_none()
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        write!(
+            client,
+            "POST /mcp HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
+            MAX_PRE_AUTH_HTTP_BODY_BYTES + 1
+        )
+        .unwrap();
+        assert!(reject_handle.join().unwrap());
+    }
+
+    #[test]
+    fn nats_uri_parser_handles_userinfo_tls_and_ipv6() {
+        let endpoint = parse_nats_endpoint("nats://user:pass@example.test:4333/path").unwrap();
+        assert_eq!(endpoint.host, "example.test");
+        assert_eq!(endpoint.port, 4333);
+
+        let endpoint = parse_nats_endpoint("tls://[2001:db8::1]:4443").unwrap();
+        assert_eq!(endpoint.host, "2001:db8::1");
+        assert_eq!(endpoint.port, 4443);
+
+        let endpoint = parse_nats_endpoint("nats://2001:db8::2").unwrap();
+        assert_eq!(endpoint.host, "2001:db8::2");
+        assert_eq!(endpoint.port, NATS_DEFAULT_PORT);
+        assert!(parse_nats_endpoint("nats://example.test:notaport").is_err());
+    }
+
+    #[test]
+    fn nats_security_policy_fails_closed_in_production() {
+        assert!(
+            NatsSecurityConfig::from_values_for_mode(
+                "production",
+                "nats://127.0.0.1:4222",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .is_err()
+        );
+        let creds = temp_nonce_path("nats-creds");
+        fs::write(&creds, "creds").unwrap();
+        let config = NatsSecurityConfig::from_values_for_mode(
+            "production",
+            "tls://nats.example.test:4222",
+            Some("true"),
+            None,
+            None,
+            None,
+            Some(creds.clone()),
+        )
+        .unwrap();
+        assert!(config.tls_required);
+        assert_eq!(config.credentials_file, Some(creds.clone()));
+        assert!(
+            NatsSecurityConfig::from_values_for_mode(
+                "development",
+                "nats://127.0.0.1:4222",
+                Some("false"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .credentials_file
+            .is_none()
+        );
+        let _ = fs::remove_file(creds);
+    }
+
+    #[test]
+    fn production_certificate_issuer_requires_exactly_one_seed_source() {
+        assert!(
+            certificate_issuer_from_values_for_mode(ENGINE_MODE_PRODUCTION, None, None).is_err()
+        );
+        let seed_path = temp_nonce_path("issuer-seed");
+        fs::write(
+            &seed_path,
+            [9_u8; swarm_engine::CertificateIssuer::ED25519_SEED_LEN],
+        )
+        .unwrap();
+        let error = certificate_issuer_from_values_for_mode(
+            ENGINE_MODE_PRODUCTION,
+            Some(seed_path.clone()),
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("requires exactly one issuer seed source"));
+        let _ = fs::remove_file(seed_path);
+    }
+
+    #[test]
+    fn production_certificate_issuer_rejects_bad_seed_sources() {
+        let bad_b64 = certificate_issuer_from_values_for_mode(
+            ENGINE_MODE_PRODUCTION,
+            None,
+            Some("not base64".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(bad_b64, "SWARM_ENGINE_ISSUER_KEY_B64 is not valid base64");
+
+        let wrong_len_b64 = certificate_issuer_from_values_for_mode(
+            ENGINE_MODE_PRODUCTION,
+            None,
+            Some("AAAA".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            wrong_len_b64,
+            "SWARM_ENGINE_ISSUER_KEY_B64 must decode to exactly 32 bytes"
+        );
+
+        let short_path = temp_nonce_path("issuer-short-seed");
+        fs::write(&short_path, [3_u8; 31]).unwrap();
+        let short_file = certificate_issuer_from_values_for_mode(
+            ENGINE_MODE_PRODUCTION,
+            Some(short_path.clone()),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            short_file,
+            "SWARM_ENGINE_ISSUER_KEY_FILE must contain exactly 32 bytes"
+        );
+        let _ = fs::remove_file(short_path);
+    }
+
+    #[test]
+    fn production_certificate_issuer_accepts_file_or_base64_seed() {
+        let seed_path = temp_nonce_path("issuer-valid-seed");
+        fs::write(
+            &seed_path,
+            [4_u8; swarm_engine::CertificateIssuer::ED25519_SEED_LEN],
+        )
+        .unwrap();
+        let file_issuer = certificate_issuer_from_values_for_mode(
+            ENGINE_MODE_PRODUCTION,
+            Some(seed_path.clone()),
+            None,
+        )
+        .unwrap();
+        assert!(!file_issuer.public_key().is_empty());
+        let _ = fs::remove_file(seed_path);
+
+        let b64_issuer = certificate_issuer_from_values_for_mode(
+            ENGINE_MODE_PRODUCTION,
+            None,
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
+        )
+        .unwrap();
+        assert!(!b64_issuer.public_key().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_certificate_issuer_rejects_symlink_seed_file() {
+        use std::os::unix::fs::symlink;
+
+        let target = temp_nonce_path("issuer-seed-target");
+        let link = temp_nonce_path("issuer-seed-link");
+        fs::write(
+            &target,
+            [5_u8; swarm_engine::CertificateIssuer::ED25519_SEED_LEN],
+        )
+        .unwrap();
+        symlink(&target, &link).unwrap();
+
+        let error = certificate_issuer_from_values_for_mode(
+            ENGINE_MODE_PRODUCTION,
+            Some(link.clone()),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "SWARM_ENGINE_ISSUER_KEY_FILE must not be a symlink");
+        let _ = fs::remove_file(link);
+        let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn sandbox_reply_metrics_map_to_player_collect_metrics() {
+        let metrics = swarm_engine::sandbox_transport::SandboxExecutionMetrics {
+            fuel_consumed: 123_456,
+            wall_clock_ms: 17,
+            memory_peak_bytes: 65_536,
+            host_function_calls: 9,
+        };
+        assert_eq!(
+            sandbox_collect_metrics(&metrics),
+            PlayerCollectMetrics {
+                fuel_consumed: 123_456,
+                refund_events: 0,
+                refunded: 0,
+            }
+        );
+    }
+
+    #[test]
     fn proxy_nonce_store_survives_restart_and_prunes_expired_entries() {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1334,11 +2831,16 @@ mod tests {
             .as_secs() as i64;
         let path = temp_nonce_path("restart-reload");
         let request = signed_request(timestamp, "nonce-restart", b"{}");
-        let mut first_store = ProxyNonceStore::open(path.clone());
-        verify_proxy_signature(&request, b"secret", 1, "0", &mut first_store).unwrap();
+        let principal = proxy_principal(&request).unwrap();
+        let verifier = test_proxy_verifier();
+        let mut first_store = ProxyNonceStore::open(Ok(path.clone()));
+        verify_proxy_signature(&request, &verifier, &principal, "0", &mut first_store).unwrap();
 
-        let mut reloaded_store = ProxyNonceStore::open(path.clone());
-        assert!(verify_proxy_signature(&request, b"secret", 1, "0", &mut reloaded_store).is_err());
+        let mut reloaded_store = ProxyNonceStore::open(Ok(path.clone()));
+        assert!(
+            verify_proxy_signature(&request, &verifier, &principal, "0", &mut reloaded_store)
+                .is_err()
+        );
 
         let expired_timestamp = timestamp - MCP_PROXY_REPLAY_WINDOW_SECONDS - 1;
         let expired_store = ProxyNonceStore {
@@ -1348,10 +2850,41 @@ mod tests {
         };
         expired_store.persist().unwrap();
 
-        let mut pruned_store = ProxyNonceStore::open(path.clone());
+        let mut pruned_store = ProxyNonceStore::open(Ok(path.clone()));
         let reused_after_prune = signed_request(timestamp, "nonce-expired", b"{}");
-        verify_proxy_signature(&reused_after_prune, b"secret", 1, "0", &mut pruned_store).unwrap();
+        let principal = proxy_principal(&reused_after_prune).unwrap();
+        verify_proxy_signature(
+            &reused_after_prune,
+            &verifier,
+            &principal,
+            "0",
+            &mut pruned_store,
+        )
+        .unwrap();
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn proxy_nonce_store_persists_atomically_without_temp_residue() {
+        let timestamp = current_unix_timestamp().unwrap();
+        let path = temp_nonce_path("atomic-persist");
+        let mut store = ProxyNonceStore::open(Ok(path.clone()));
+
+        store
+            .record_verified("nonce-atomic", timestamp, timestamp)
+            .unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, format!("{timestamp}\tnonce-atomic\n"));
+        let parent = path.parent().unwrap();
+        for entry in fs::read_dir(parent).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.ends_with(".tmp"), "left temp file {name}");
+        }
+        let reloaded = ProxyNonceStore::open(Ok(path));
+        assert!(reloaded.seen.contains_key("nonce-atomic"));
     }
 }

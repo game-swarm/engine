@@ -102,12 +102,28 @@ impl Default for CertificateIssuer {
 }
 
 impl CertificateIssuer {
+    pub const ED25519_SEED_LEN: usize = 32;
+
     pub fn new() -> Self {
-        let mut seed = [0_u8; 32];
+        let mut seed = [0_u8; Self::ED25519_SEED_LEN];
         getrandom::fill(&mut seed).expect("OS randomness is required for certificate issuer");
         Self {
             signing_key: SigningKey::from_bytes(&seed),
         }
+    }
+
+    pub fn from_seed(seed: &[u8]) -> Result<Self, McpError> {
+        if seed.len() != Self::ED25519_SEED_LEN {
+            return Err(McpError::invalid_params(format!(
+                "issuer seed must be exactly {} bytes",
+                Self::ED25519_SEED_LEN
+            )));
+        }
+        let mut seed_bytes = [0_u8; Self::ED25519_SEED_LEN];
+        seed_bytes.copy_from_slice(seed);
+        let signing_key = SigningKey::from_bytes(&seed_bytes);
+        seed_bytes.fill(0);
+        Ok(Self { signing_key })
     }
 
     pub fn from_signing_key_for_tests(signing_key: SigningKey) -> Self {
@@ -261,4 +277,39 @@ fn has_leading_zero_bits(bytes: &[u8], difficulty_bits: u32) -> bool {
         .get(whole_bytes)
         .map(|byte| byte & mask == 0)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issuer_from_same_seed_verifies_after_restart() {
+        let seed = [17_u8; CertificateIssuer::ED25519_SEED_LEN];
+        let issuer_before_restart = CertificateIssuer::from_seed(&seed).unwrap();
+        let issuer_after_restart = CertificateIssuer::from_seed(&seed).unwrap();
+        let issued_at = 10_000;
+        let certificate = issuer_before_restart
+            .issue_auth(AuthCertificatePayload {
+                cert_id: "restart-cert".to_string(),
+                usage: "code_signing".to_string(),
+                player_id: 1,
+                public_key: issuer_before_restart.public_key(),
+                public_key_fingerprint: issuer_before_restart.public_key_fingerprint(),
+                scope: "deploy transport:mcp".to_string(),
+                audience: "swarm-wasm-deploy".to_string(),
+                label: "restart cert".to_string(),
+                issued_at,
+                expires_at: issued_at + 60,
+            })
+            .unwrap();
+
+        issuer_after_restart.verify_auth(&certificate).unwrap();
+    }
+
+    #[test]
+    fn issuer_seed_must_be_exact_ed25519_seed_length() {
+        let error = CertificateIssuer::from_seed(&[7_u8; 31]).unwrap_err();
+        assert_eq!(error.message, "issuer seed must be exactly 32 bytes");
+    }
 }

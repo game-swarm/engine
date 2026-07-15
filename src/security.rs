@@ -64,7 +64,7 @@ impl SecurityAuditor {
         alerts
     }
 
-    pub fn audit_trace(
+    pub(crate) fn audit_trace(
         &self,
         trace: &TickTrace,
         previous: Option<&TickTrace>,
@@ -225,10 +225,12 @@ impl ReplayAuditor {
                     actual_checksum: actual.state_checksum,
                 });
             }
-            alerts.extend(
-                self.security
-                    .audit_trace(expected, index.checked_sub(1).map(|i| &recorded[i])),
-            );
+            alerts.extend(self.security.audit_tick(
+                expected.player_id,
+                expected.metrics.fuel_consumed,
+                expected.metrics.rejected_commands as u32,
+                expected.tick,
+            ));
         }
 
         if recorded.len() != replayed.len() {
@@ -424,6 +426,30 @@ impl DeployVersionCounters {
             .copied()
             .unwrap_or(0)
     }
+
+    pub fn restore(&mut self, player_id: PlayerId, slot: &str, counter: u64) {
+        self.counters.insert((player_id, slot.to_string()), counter);
+    }
+
+    pub fn entries(&self) -> Vec<DeployVersionCounterEntry> {
+        self.counters
+            .iter()
+            .map(
+                |((player_id, slot), version_counter)| DeployVersionCounterEntry {
+                    player_id: *player_id,
+                    slot: slot.clone(),
+                    version_counter: *version_counter,
+                },
+            )
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployVersionCounterEntry {
+    pub player_id: PlayerId,
+    pub slot: String,
+    pub version_counter: u64,
 }
 
 /// Deploy nonce state machine (§7.4)
@@ -579,6 +605,7 @@ mod tests {
             .0
             .insert(player_id, energy_cost(local_energy));
         let state = TickState::capture(world.app.world_mut());
+        let state_checksum = checksum_state(&state);
         TickTrace {
             tick,
             player_id,
@@ -586,9 +613,10 @@ mod tests {
             state,
             rejections: Vec::new(),
             metrics,
-            state_checksum: world.state_checksum(),
+            state_checksum,
             system_manifest_hash: [0; 32],
             action_manifest_hash: [0; 32],
+            resource_ledger: crate::resource_ledger::ResourceLedgerTraceSnapshot::default(),
             security_alerts: Vec::new(),
             trace_events: Vec::new(),
         }
@@ -623,7 +651,7 @@ mod tests {
     #[test]
     fn normal_trace_and_minimal_wasm_do_not_alert() {
         let auditor = SecurityAuditor::default();
-        let previous = trace(
+        let mut previous = trace(
             1,
             7,
             TickMetrics {
@@ -634,17 +662,15 @@ mod tests {
             },
             100,
         );
-        let current = trace(
-            2,
-            7,
-            TickMetrics {
-                total_commands: 4,
-                accepted_commands: 4,
-                fuel_consumed: 45_000,
-                ..Default::default()
-            },
-            100,
-        );
+        previous.tick = 0;
+        let mut current = previous.clone();
+        current.tick = 2;
+        current.metrics = TickMetrics {
+            total_commands: 4,
+            accepted_commands: 4,
+            fuel_consumed: 45_000,
+            ..Default::default()
+        };
 
         assert!(auditor.audit_trace(&current, Some(&previous)).is_empty());
         assert!(
