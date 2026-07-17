@@ -7,7 +7,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc,
     },
     thread,
@@ -30,6 +30,8 @@ use swarm_engine::{
     },
     sim::{create_local_simulation_world, summarize_local_simulation},
 };
+
+mod metrics;
 
 #[cfg(feature = "mod_combat_core")]
 #[allow(dead_code)]
@@ -196,6 +198,22 @@ fn main() {
                     }
                 }
             }
+            "export-contracts" => {
+                let out_dir = cli_args
+                    .get(1)
+                    .map(|s| s.as_str())
+                    .unwrap_or("../frontend/src/generated");
+                match swarm_engine::contract_exports::export_contract_artifacts(out_dir) {
+                    Ok(()) => {
+                        println!("contracts exported to {out_dir}");
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -212,12 +230,14 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(match mode {
                 WorldMode::Tutorial => swarm_engine::TUTORIAL_TICK_INTERVAL_MS,
-                WorldMode::Default | WorldMode::Arena => swarm_engine::DEFAULT_TICK_INTERVAL_MS,
+                WorldMode::Default | WorldMode::Novice | WorldMode::Arena => {
+                    swarm_engine::DEFAULT_TICK_INTERVAL_MS
+                }
             }),
     );
 
     let healthy = Arc::new(AtomicBool::new(false));
-    let authoritative_tick = Arc::new(AtomicU64::new(0));
+    let metrics = Arc::new(metrics::EngineMetrics::default());
 
     let redb_store_result = swarm_engine::RedbStore::open(&redb_path);
     let nats_endpoint = parse_nats_endpoint(&nats_url);
@@ -292,7 +312,13 @@ fn main() {
     }
     let (mcp_runtime_tx, mcp_runtime_rx) = mpsc::channel();
     let (mcp_dispatch_tx, mcp_dispatch_rx) = mpsc::channel();
-    start_health_server(health_addr, Arc::clone(&healthy), mcp_runtime_rx, mode);
+    start_health_server(
+        health_addr,
+        Arc::clone(&healthy),
+        Arc::clone(&metrics),
+        mcp_runtime_rx,
+        mode,
+    );
     let nats_client = connect_nats_client_with_retry(&nats_security, &healthy, tick_interval);
     let shared_nats_client = Some(nats_client.clone());
     let sandbox_backend = SandboxBackend::Remote {
@@ -306,7 +332,10 @@ fn main() {
 
     swarm_engine::world::ensure_world_config_exists("world.toml", "mods.lock");
     let mut world = create_world_with_mode(mode);
-    add_feature_gated_mod_plugins(&mut world.app);
+    if let Err(error) = add_feature_gated_mod_plugins(&mut world.app) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
     world.app.insert_resource(sandbox_backend.clone());
     world.app.insert_resource(active_deployments.clone());
     world.app.insert_resource(redb_store.clone());
@@ -363,16 +392,18 @@ fn main() {
 
     loop {
         let tick = scheduler.tick_counter;
-        authoritative_tick.store(tick, Ordering::Release);
+        metrics.set_authoritative_tick(tick);
         dispatch_pending_mcp_requests(
             &mut mcp_server,
             &mut scheduler.world,
             &mcp_dispatch_rx,
-            authoritative_tick.load(Ordering::Acquire),
+            metrics.authoritative_tick(),
         );
         let redb_ok = redb_connected;
         let nats_ok = nats_endpoint.as_ref().map(tcp_check).unwrap_or(false);
-        healthy.store(redb_ok && nats_ok, Ordering::Relaxed);
+        let is_healthy = redb_ok && nats_ok;
+        healthy.store(is_healthy, Ordering::Relaxed);
+        metrics.set_dependencies(redb_ok, nats_ok);
 
         if !redb_ok {
             eprintln!(
@@ -425,7 +456,26 @@ fn dispatch_pending_mcp_requests(
     }
 }
 
-fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) {
+fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) -> Result<(), String> {
+    let lock = app
+        .world()
+        .resource::<swarm_engine::plugins::PluginRegistry>()
+        .lock
+        .clone();
+    lock.validate_enabled_features()?;
+    #[cfg(not(any(
+        feature = "mod_combat_core",
+        feature = "mod_depot_storage",
+        feature = "mod_empire_upkeep",
+        feature = "mod_fog_of_war",
+        feature = "mod_pve_spawning",
+        feature = "mod_resource_decay",
+        feature = "mod_special_attacks",
+        feature = "mod_vanilla_boss"
+    )))]
+    {
+        let _ = lock.runtime_config()?;
+    }
     #[cfg(any(
         feature = "mod_combat_core",
         feature = "mod_depot_storage",
@@ -436,93 +486,96 @@ fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) {
         feature = "mod_special_attacks",
         feature = "mod_vanilla_boss"
     ))]
-    let lock = swarm_engine::plugins::load_default_plugin_lock();
-    let _ = app;
+    let runtime = lock.runtime_config()?;
+    #[cfg(feature = "mod_special_attacks")]
+    let mode = app.world().resource::<swarm_engine::WorldSettings>().mode;
     #[cfg(feature = "mod_combat_core")]
-    if let Some(entry) = lock
-        .plugins
-        .get("combat-core")
-        .filter(|entry| entry.enabled)
-    {
+    if let Some(combat) = &runtime.combat_core {
         let mut config = swarm_mod_combat_core::CombatConfig::default();
-        if let Some(value) = entry.config_u32("damage_multiplier") {
-            config.damage_multiplier_bp = value;
-        }
+        config.damage_multiplier_bp = combat.damage_multiplier;
         app.insert_resource(config);
         app.add_plugins(swarm_mod_combat_core::CombatCoreModPlugin);
     }
     #[cfg(feature = "mod_depot_storage")]
-    if lock
-        .plugins
-        .get("depot-storage")
-        .map(|entry| entry.enabled)
-        .unwrap_or(true)
-    {
+    if let Some(depot) = &runtime.depot_storage {
+        app.insert_resource(swarm_mod_depot_storage::DepotStorageConfig {
+            repair_range: depot.repair_range,
+            repair_capacity: depot.repair_capacity,
+            depot_hits: depot.depot_hits,
+            depot_capacity: depot.depot_capacity,
+        });
         app.add_plugins(swarm_mod_depot_storage::DepotStorageModPlugin);
     }
     #[cfg(feature = "mod_empire_upkeep")]
-    if lock
-        .plugins
-        .get("empire-upkeep")
-        .map(|entry| entry.enabled)
-        .unwrap_or(true)
-    {
+    if runtime.empire_upkeep.is_some() {
         app.add_plugins(swarm_mod_empire_upkeep::EmpireUpkeepModPlugin);
     }
     #[cfg(feature = "mod_fog_of_war")]
-    if lock
-        .plugins
-        .get("fog-of-war")
-        .map(|entry| entry.enabled)
-        .unwrap_or(true)
-    {
+    if let Some(fog) = &runtime.fog_of_war {
+        app.insert_resource(swarm_mod_fog_of_war::VisibilityConfig {
+            fog_of_war: fog.fog_of_war,
+        });
         app.add_plugins(swarm_mod_fog_of_war::FogOfWarModPlugin);
     }
     #[cfg(feature = "mod_pve_spawning")]
-    if lock
-        .plugins
-        .get("pve-spawning")
-        .map(|entry| entry.enabled)
-        .unwrap_or(true)
-    {
+    if let Some(pve) = &runtime.pve_spawning {
+        app.insert_resource(swarm_mod_pve_spawning::PveSpawningConfig {
+            spawn_interval: pve.spawn_interval,
+            max_npcs_per_room: pve.max_npcs_per_room,
+            npc_drone_body: pve.npc_drone_body.clone(),
+            npc_drop_table: pve.npc_drop_table.clone(),
+        });
         app.add_plugins(swarm_mod_pve_spawning::PveSpawningModPlugin);
     }
     #[cfg(feature = "mod_resource_decay")]
-    if lock
-        .plugins
-        .get("resource-decay")
-        .map(|entry| entry.enabled)
-        .unwrap_or(true)
-    {
+    if let Some(decay) = &runtime.resource_decay {
+        app.insert_resource(swarm_mod_resource_decay::ResourceDecayConfig {
+            decay_rate_ppm: decay.decay_rate_ppm,
+            per_resource_decay_rate_ppm: decay.per_resource_decay_rate_ppm.clone(),
+        });
         app.add_plugins(swarm_mod_resource_decay::ResourceDecayModPlugin);
     }
     #[cfg(feature = "mod_special_attacks")]
-    if lock
-        .plugins
-        .get("special-attacks")
-        .map(|entry| entry.enabled)
-        .unwrap_or(true)
-    {
+    if let Some(special) = &runtime.special_attacks {
+        app.insert_resource(swarm_mod_special_attacks::SpecialAttacksConfig {
+            enabled: special.runtime_kinds_for_mode(mode),
+            damage_multiplier: special.damage_multiplier,
+        });
         app.add_plugins(swarm_mod_special_attacks::SpecialAttacksModPlugin);
     }
     #[cfg(feature = "mod_vanilla_boss")]
-    if let Some(entry) = lock
-        .plugins
-        .get("vanilla-boss")
-        .filter(|entry| entry.enabled)
-    {
+    if let Some(boss) = &runtime.vanilla_boss {
         let mut plugin = swarm_mod_vanilla_boss::VanillaBossPlugin::default();
-        if let Some(value) = entry.config_bool("arena_bosses_enabled") {
-            plugin.arena_bosses_enabled = value;
-        }
-        if let Some(value) = entry.config_bool("world_bosses_enabled") {
-            plugin.world_bosses_enabled = value;
-        }
-        if let Some(value) = entry.config_u64("boss_spawn_interval") {
-            plugin.boss_spawn_interval = value;
-        }
+        plugin.arena_bosses_enabled = boss.arena_bosses_enabled;
+        plugin.world_bosses_enabled = boss.world_bosses_enabled;
+        plugin.boss_spawn_interval = boss.boss_spawn_interval;
+        plugin.boss_templates = boss
+            .boss_templates
+            .iter()
+            .map(|template| swarm_mod_vanilla_boss::BossTemplate {
+                name: template.name.clone(),
+                mode: match template.mode {
+                    swarm_engine::plugins::BossModeConfig::World => {
+                        swarm_mod_vanilla_boss::BossMode::World
+                    }
+                    swarm_engine::plugins::BossModeConfig::Arena => {
+                        swarm_mod_vanilla_boss::BossMode::Arena
+                    }
+                },
+                hits: template.hits,
+                phases: template.phases.clone(),
+                drops: template.drops.clone(),
+                spawn_position: template.spawn_position,
+            })
+            .collect();
+        app.insert_resource(swarm_mod_vanilla_boss::WorldConfig {
+            world_bosses_enabled: boss.world_bosses_enabled,
+            arena_bosses_enabled: boss.arena_bosses_enabled,
+            boss_spawn_interval: boss.boss_spawn_interval,
+        });
         app.add_plugins(plugin);
     }
+    Ok(())
 }
 
 fn scheduler_executors(
@@ -865,6 +918,8 @@ fn read_issuer_seed_file(path: &Path) -> Result<Vec<u8>, String> {
             "{ISSUER_KEY_FILE_ENV} must point to a regular file"
         ));
     }
+    #[cfg(unix)]
+    validate_issuer_seed_file_metadata(&metadata, effective_uid())?;
     let seed =
         fs::read(path).map_err(|error| format!("{ISSUER_KEY_FILE_ENV} cannot be read: {error}"))?;
     if seed.len() != swarm_engine::CertificateIssuer::ED25519_SEED_LEN {
@@ -874,6 +929,22 @@ fn read_issuer_seed_file(path: &Path) -> Result<Vec<u8>, String> {
         ));
     }
     Ok(seed)
+}
+
+#[cfg(unix)]
+fn validate_issuer_seed_file_metadata(
+    metadata: &fs::Metadata,
+    owner_uid: u32,
+) -> Result<(), String> {
+    if metadata.mode() & 0o077 != 0 {
+        return Err(format!("{ISSUER_KEY_FILE_ENV} must be owner-only"));
+    }
+    if metadata.uid() != owner_uid {
+        return Err(format!(
+            "{ISSUER_KEY_FILE_ENV} must be owned by the current user"
+        ));
+    }
+    Ok(())
 }
 
 fn issuer_from_seed(seed: &[u8]) -> Result<swarm_engine::CertificateIssuer, String> {
@@ -982,7 +1053,11 @@ fn parse_world_mode(value: &str) -> Result<WorldMode, String> {
     match value {
         "default" => Ok(WorldMode::Default),
         "tutorial" => Ok(WorldMode::Tutorial),
-        _ => Err(format!("--mode must be default or tutorial, got {value}")),
+        "novice" => Ok(WorldMode::Novice),
+        "arena" => Ok(WorldMode::Arena),
+        _ => Err(format!(
+            "--mode must be default, tutorial, novice, or arena, got {value}"
+        )),
     }
 }
 
@@ -1064,6 +1139,7 @@ fn parse_sim_speed(value: &str) -> Result<String, String> {
 fn start_health_server(
     addr: String,
     healthy: Arc<AtomicBool>,
+    metrics: Arc<metrics::EngineMetrics>,
     mcp_runtime_rx: mpsc::Receiver<mpsc::Sender<McpDispatch>>,
     mode: WorldMode,
 ) {
@@ -1087,6 +1163,7 @@ fn start_health_server(
                     respond_http(
                         &mut stream,
                         healthy.load(Ordering::Relaxed),
+                        &metrics,
                         Path::new(&sdk_output_dir),
                         mcp_state.as_mut(),
                         mode,
@@ -1202,6 +1279,7 @@ fn restore_deployments_from_redb(
 fn respond_http(
     stream: &mut TcpStream,
     healthy: bool,
+    metrics: &metrics::EngineMetrics,
     sdk_output_dir: &Path,
     mcp_state: Option<&mut McpHttpState>,
     mode: WorldMode,
@@ -1221,6 +1299,17 @@ fn respond_http(
 
     if request.path == "/" || request.path == "/healthz" {
         respond_health(stream, healthy);
+    } else if request.path == "/metrics" {
+        if request.method.eq_ignore_ascii_case("GET") {
+            respond_metrics(stream, metrics);
+        } else {
+            respond_bytes(
+                stream,
+                "HTTP/1.1 405 Method Not Allowed",
+                "text/plain; charset=utf-8",
+                b"method not allowed\n",
+            );
+        }
     } else if request.path == "/mcp" {
         respond_mcp(stream, request, mcp_state, mode);
     } else if let Some(sdk_path) = request.path.strip_prefix("/sdk/") {
@@ -1949,6 +2038,16 @@ fn respond_health(stream: &mut TcpStream, healthy: bool) {
     let _ = stream.write_all(response.as_bytes());
 }
 
+fn respond_metrics(stream: &mut TcpStream, metrics: &metrics::EngineMetrics) {
+    let body = metrics.render();
+    respond_bytes(
+        stream,
+        "HTTP/1.1 200 OK",
+        metrics::PROMETHEUS_CONTENT_TYPE,
+        body.as_bytes(),
+    );
+}
+
 fn respond_sdk_file(stream: &mut TcpStream, sdk_output_dir: &Path, sdk_path: &str) {
     let Some(relative_path) = clean_relative_path(sdk_path) else {
         respond_not_found(stream);
@@ -2165,6 +2264,28 @@ mod tests {
     }
 
     #[test]
+    fn mode_arg_accepts_novice_and_preserves_remaining_args() {
+        let (mode, remaining) = parse_mode_arg(vec![
+            "--mode".to_string(),
+            "novice".to_string(),
+            "sim".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(mode, WorldMode::Novice);
+        assert_eq!(remaining, vec!["sim"]);
+    }
+
+    #[test]
+    fn world_mode_parser_accepts_all_runtime_modes() {
+        assert_eq!(parse_world_mode("default").unwrap(), WorldMode::Default);
+        assert_eq!(parse_world_mode("tutorial").unwrap(), WorldMode::Tutorial);
+        assert_eq!(parse_world_mode("novice").unwrap(), WorldMode::Novice);
+        assert_eq!(parse_world_mode("arena").unwrap(), WorldMode::Arena);
+        assert!(parse_world_mode("standard").is_err());
+    }
+
+    #[test]
     fn default_health_addr_is_loopback_only() {
         assert_eq!(DEFAULT_HEALTH_ADDR, "127.0.0.1:8080");
     }
@@ -2187,6 +2308,136 @@ mod tests {
         .unwrap();
 
         assert!(handle.join().unwrap());
+    }
+
+    #[test]
+    fn metrics_endpoint_returns_prometheus_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let metrics = Arc::new(metrics::EngineMetrics::default());
+        metrics.set_authoritative_tick(9);
+        metrics.set_dependencies(true, true);
+        let server_metrics = Arc::clone(&metrics);
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            respond_http(
+                &mut stream,
+                true,
+                &server_metrics,
+                Path::new("/tmp"),
+                None,
+                WorldMode::Default,
+            );
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        write!(client, "GET /metrics HTTP/1.1\r\nhost: localhost\r\n\r\n").unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+
+        handle.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains(metrics::PROMETHEUS_CONTENT_TYPE));
+        assert!(response.contains("swarm_engine_up 1\n"));
+        assert!(response.contains("swarm_engine_authoritative_tick 9\n"));
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "mod_combat_core",
+        feature = "mod_depot_storage",
+        feature = "mod_empire_upkeep",
+        feature = "mod_fog_of_war",
+        feature = "mod_pve_spawning",
+        feature = "mod_resource_decay",
+        feature = "mod_special_attacks",
+        feature = "mod_vanilla_boss"
+    ))]
+    fn feature_gated_mod_resources_are_preinserted_from_lock() {
+        let mut world = create_world_with_mode(WorldMode::Default);
+
+        add_feature_gated_mod_plugins(&mut world.app).unwrap();
+
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<swarm_mod_combat_core::CombatConfig>()
+                .damage_multiplier_bp,
+            10_000
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<swarm_mod_depot_storage::DepotStorageConfig>()
+                .depot_capacity,
+            10_000
+        );
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<swarm_mod_fog_of_war::VisibilityConfig>()
+                .fog_of_war
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<swarm_mod_pve_spawning::PveSpawningConfig>()
+                .spawn_interval,
+            300
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<swarm_mod_resource_decay::ResourceDecayConfig>()
+                .decay_rate_ppm,
+            1_000
+        );
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<swarm_mod_special_attacks::SpecialAttacksConfig>()
+                .enabled
+                .contains(&swarm_engine::systems::SpecialAttackKind::Hack)
+        );
+        let boss_config = world
+            .app
+            .world()
+            .resource::<swarm_mod_vanilla_boss::VanillaBossConfig>();
+        assert!(boss_config.world_bosses_enabled);
+        assert_eq!(boss_config.boss_templates.len(), 2);
+    }
+
+    #[test]
+    fn metrics_endpoint_rejects_non_get_methods() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let metrics = Arc::new(metrics::EngineMetrics::default());
+        let server_metrics = Arc::clone(&metrics);
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            respond_http(
+                &mut stream,
+                false,
+                &server_metrics,
+                Path::new("/tmp"),
+                None,
+                WorldMode::Default,
+            );
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        write!(client, "POST /metrics HTTP/1.1\r\nhost: localhost\r\n\r\n").unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+
+        handle.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
     }
 
     fn signed_request(timestamp: i64, nonce: &str, body: &[u8]) -> HttpRequest {
@@ -2740,6 +2991,7 @@ mod tests {
 
         let short_path = temp_nonce_path("issuer-short-seed");
         fs::write(&short_path, [3_u8; 31]).unwrap();
+        fs::set_permissions(&short_path, fs::Permissions::from_mode(0o600)).unwrap();
         let short_file = certificate_issuer_from_values_for_mode(
             ENGINE_MODE_PRODUCTION,
             Some(short_path.clone()),
@@ -2761,6 +3013,7 @@ mod tests {
             [4_u8; swarm_engine::CertificateIssuer::ED25519_SEED_LEN],
         )
         .unwrap();
+        fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o600)).unwrap();
         let file_issuer = certificate_issuer_from_values_for_mode(
             ENGINE_MODE_PRODUCTION,
             Some(seed_path.clone()),
@@ -2803,6 +3056,72 @@ mod tests {
         assert_eq!(error, "SWARM_ENGINE_ISSUER_KEY_FILE must not be a symlink");
         let _ = fs::remove_file(link);
         let _ = fs::remove_file(target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_certificate_issuer_rejects_group_or_world_readable_seed_file() {
+        let seed_path = temp_nonce_path("issuer-seed-readable");
+        fs::write(
+            &seed_path,
+            [6_u8; swarm_engine::CertificateIssuer::ED25519_SEED_LEN],
+        )
+        .unwrap();
+        fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let error = certificate_issuer_from_values_for_mode(
+            ENGINE_MODE_PRODUCTION,
+            Some(seed_path.clone()),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "SWARM_ENGINE_ISSUER_KEY_FILE must be owner-only");
+        let _ = fs::remove_file(seed_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_certificate_issuer_accepts_owner_only_seed_file() {
+        let seed_path = temp_nonce_path("issuer-seed-owner-only");
+        fs::write(
+            &seed_path,
+            [7_u8; swarm_engine::CertificateIssuer::ED25519_SEED_LEN],
+        )
+        .unwrap();
+        fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let issuer = certificate_issuer_from_values_for_mode(
+            ENGINE_MODE_PRODUCTION,
+            Some(seed_path.clone()),
+            None,
+        )
+        .unwrap();
+
+        assert!(!issuer.public_key().is_empty());
+        let _ = fs::remove_file(seed_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issuer_seed_file_metadata_rejects_wrong_owner() {
+        let seed_path = temp_nonce_path("issuer-seed-wrong-owner");
+        fs::write(
+            &seed_path,
+            [8_u8; swarm_engine::CertificateIssuer::ED25519_SEED_LEN],
+        )
+        .unwrap();
+        fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let metadata = fs::symlink_metadata(&seed_path).unwrap();
+        let error = validate_issuer_seed_file_metadata(&metadata, effective_uid().wrapping_add(1))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "SWARM_ENGINE_ISSUER_KEY_FILE must be owned by the current user"
+        );
+        let _ = fs::remove_file(seed_path);
     }
 
     #[test]

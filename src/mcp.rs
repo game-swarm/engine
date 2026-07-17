@@ -6,8 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
 use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use ts_rs::TS;
 
 use crate::arena::{
     ArenaReplay, ReplayPrivacy, TournamentBracket, TournamentElimination, TournamentMatchSchedule,
@@ -18,13 +20,14 @@ use crate::auth::{
     public_key_from_csr, validate_pow, verify_csr_signature, verify_renewal_signature,
 };
 use crate::command::{
-    CORE_COMMAND_ACTIONS, CommandAuth, CommandIntent, CommandSource, ObjectId, RawCommand,
-    RejectionReason, SPECIAL_COMMAND_ACTIONS, Tick, canonical_rejection_reason, object_id,
-    validate_command,
+    CORE_COMMAND_ACTIONS, CommandAuth, CommandIntent, CommandSchemaBranch, CommandSchemaField,
+    CommandSource, ObjectId, RawCommand, RejectionReason, SPECIAL_COMMAND_ACTIONS, Tick,
+    canonical_rejection_reason, command_schema_branches, object_id, validate_command,
 };
 use crate::components::*;
 use crate::economy::*;
 use crate::hot_cache::{SnapshotKey, read_through_snapshot_cache};
+use crate::realtime::{RealtimeDelta, RealtimeEnvelope};
 use crate::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use crate::sandbox_transport::{
     ActiveDeployment, ActiveDeployments, SandboxBackend, deploy_module_remote, hmac_sha256_hex,
@@ -37,6 +40,11 @@ use crate::visibility::{
     visible_entity_ids_with_positions, visible_positions,
 };
 use crate::world::{SwarmWorld, WorldConfig};
+
+#[path = "mcp_statistics.rs"]
+mod mcp_statistics;
+
+use self::mcp_statistics::{WorldStatsParams, swarm_get_world_stats, world_stats_tool_info};
 
 const MAX_WASM_BYTES: usize = 5 * 1024 * 1024;
 const CERTIFICATE_TTL_SECONDS: u64 = 24 * 60 * 60;
@@ -55,6 +63,9 @@ const AUTH_CODE_SIGNING_AUDIENCE: &str = "swarm-wasm-deploy";
 const DEPLOY_PAYLOAD_SCHEMA: &str = "SWARM-DEPLOY-V1";
 const DEPLOY_VALIDATION_POLICY_VERSION: &str = "raw-wasm-v1";
 const ENGINE_ABI_VERSION: u32 = 1;
+const MAX_TOURNAMENT_ID_LEN: usize = 128;
+const MAX_TOURNAMENT_PLAYERS: usize = 128;
+const MAX_TOURNAMENT_FIXED_TICKS: Tick = 1_000_000;
 const WASM_TARGET_MANIFEST_SECTION: &str = "swarm.target_manifest";
 const DEPLOY_SIGNATURE_TTL_SECONDS: u64 = 5 * 60;
 const DEPLOY_SIGNATURE_FUTURE_SKEW_SECONDS: u64 = 30;
@@ -397,13 +408,6 @@ impl McpError {
             message: format!("rate limited, retry after {retry_after_seconds} seconds"),
         }
     }
-
-    fn feature_gated(feature: impl Into<String>) -> Self {
-        Self {
-            code: -32000,
-            message: format!("ERR_FEATURE_GATED: {}", feature.into()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,11 +496,13 @@ pub struct JsonRpcResponse {
     pub error: Option<McpError>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VisibleWorldSnapshot {
     pub tick: Tick,
     pub player_id: PlayerId,
     pub room_id: u32,
+    pub state_checksum: u64,
+    pub recovery_envelope: RealtimeEnvelope,
     pub visibility_radius: i32,
     pub visible_tiles: Vec<VisibleTile>,
     pub entities: Vec<VisibleEntity>,
@@ -505,7 +511,7 @@ pub struct VisibleWorldSnapshot {
     pub pending_global_transfers: Vec<VisiblePendingGlobalTransfer>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VisiblePendingGlobalTransfer {
     pub player_id: PlayerId,
     pub direction: String,
@@ -515,7 +521,7 @@ pub struct VisiblePendingGlobalTransfer {
     pub remaining_ticks: Tick,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VisibleTile {
     pub x: i32,
     pub y: i32,
@@ -523,8 +529,10 @@ pub struct VisibleTile {
     pub terrain: TerrainType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "type")]
+#[schemars(tag = "type")]
+#[ts(tag = "type")]
 pub enum VisibleEntity {
     Drone(VisibleDrone),
     Structure(VisibleStructure),
@@ -533,14 +541,14 @@ pub enum VisibleEntity {
     Controller(VisibleController),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VisiblePosition {
     pub x: i32,
     pub y: i32,
     pub room_id: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VisibleDrone {
     pub id: ObjectId,
     pub owner: PlayerId,
@@ -554,9 +562,11 @@ pub struct VisibleDrone {
     pub spawning: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VisibleStructure {
     pub id: ObjectId,
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
     pub structure_type: StructureType,
     pub owner: Option<PlayerId>,
     pub position: VisiblePosition,
@@ -567,7 +577,7 @@ pub struct VisibleStructure {
     pub cooldown: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VisibleSource {
     pub id: ObjectId,
     pub position: VisiblePosition,
@@ -576,14 +586,14 @@ pub struct VisibleSource {
     pub ticks_to_regeneration: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VisibleResource {
     pub id: ObjectId,
     pub position: VisiblePosition,
     pub amounts: BTreeMap<String, u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VisibleController {
     pub id: ObjectId,
     pub owner: Option<PlayerId>,
@@ -960,6 +970,10 @@ pub struct TournamentCreateResult {
     pub players: Vec<PlayerId>,
     pub scheduled: Vec<TournamentMatchSchedule>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TournamentStatusParams {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1789,9 +1803,28 @@ impl McpServer {
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_get_world_config" => Ok(swarm_get_world_config()),
-            "swarm_tournament_precommit"
-            | "swarm_tournament_create"
-            | "swarm_tournament_status" => Err(McpError::feature_gated(tool)),
+            "swarm_get_world_statistics" => {
+                let params: WorldStatsParams = parse_empty_params(params)?;
+                serde_json::to_value(swarm_get_world_stats(world, context, params))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_tournament_precommit" => {
+                let params: TournamentPrecommitParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_tournament_precommit(context, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_tournament_create" => {
+                let params: TournamentCreateParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_tournament_create(params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            "swarm_tournament_status" => {
+                let _params: TournamentStatusParams = parse_empty_params(params)?;
+                serde_json::to_value(self.swarm_tournament_status(context))
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
             "swarm_match_result" => {
                 let params: MatchResultParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -2705,7 +2738,13 @@ impl McpServer {
         context: McpContext,
         params: TournamentPrecommitParams,
     ) -> Result<TournamentPrecommitResult, McpError> {
-        if self.tournament_locks.contains_key(&context.player_id) {
+        if let Some(locked_module) = self.tournament_locks.get(&context.player_id) {
+            if locked_module.module_id == params.module_id {
+                return Ok(TournamentPrecommitResult {
+                    status: "locked_for_tournament".to_string(),
+                    locked_module: locked_module.clone(),
+                });
+            }
             return Err(McpError::invalid_params(
                 "player already has a locked tournament precommit",
             ));
@@ -2758,10 +2797,28 @@ impl McpServer {
         &mut self,
         params: TournamentCreateParams,
     ) -> Result<TournamentCreateResult, McpError> {
-        if params.tournament_id.trim().is_empty() {
-            return Err(McpError::invalid_params("tournament_id is required"));
+        let tournament_id = normalized_tournament_id(&params.tournament_id)?;
+        if params.players.len() > MAX_TOURNAMENT_PLAYERS {
+            return Err(McpError::invalid_params("too many tournament players"));
         }
-        if self.tournaments.contains_key(&params.tournament_id) {
+        if params.fixed_ticks > MAX_TOURNAMENT_FIXED_TICKS {
+            return Err(McpError::invalid_params("fixed_ticks exceeds maximum"));
+        }
+        if let Some(bracket) = self.tournaments.get(&tournament_id) {
+            if tournament_create_matches_existing(&params, bracket) {
+                return Ok(TournamentCreateResult {
+                    tournament_id,
+                    status: "scheduled".to_string(),
+                    elimination: bracket.elimination,
+                    fixed_ticks: bracket.fixed_ticks,
+                    players: bracket
+                        .seeds
+                        .iter()
+                        .map(|seed| seed.code.player_id)
+                        .collect(),
+                    scheduled: bracket.scheduled.clone(),
+                });
+            }
             return Err(McpError::invalid_params("tournament_id already exists"));
         }
 
@@ -2786,11 +2843,10 @@ impl McpServer {
             .iter()
             .map(|seed| seed.code.player_id)
             .collect::<Vec<_>>();
-        self.tournaments
-            .insert(params.tournament_id.clone(), bracket);
+        self.tournaments.insert(tournament_id.clone(), bracket);
 
         Ok(TournamentCreateResult {
-            tournament_id: params.tournament_id,
+            tournament_id,
             status: "scheduled".to_string(),
             elimination: params.elimination,
             fixed_ticks: params.fixed_ticks,
@@ -3189,6 +3245,7 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             "swarm_get_world_rules",
             "Get the world rules and mods configuration",
         ),
+        world_stats_tool_info(),
         tool_info("swarm_get_schema", "Get the CommandIntent JSON Schema"),
         tool_info(
             "swarm_get_available_actions",
@@ -3344,10 +3401,9 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
 
 fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
     match tool {
-        "swarm_deploy"
-        | "swarm_validate_module"
-        | "swarm_tournament_precommit"
-        | "swarm_tournament_create" => Some(CommandSource::McpDeploy),
+        "swarm_deploy" | "swarm_validate_module" | "swarm_tournament_precommit" => {
+            Some(CommandSource::McpDeploy)
+        }
         "swarm_get_snapshot"
         | "swarm_get_drone"
         | "swarm_get_room"
@@ -3365,6 +3421,7 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_get_events"
         | "swarm_get_messages"
         | "swarm_get_world_rules"
+        | "swarm_get_world_statistics"
         | "swarm_get_schema"
         | "swarm_get_available_actions"
         | "swarm_explain_last_tick"
@@ -3390,12 +3447,12 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_get_server_trust"
         | "swarm_get_world_config"
         | "swarm_tournament_status"
-        | "swarm_match_result"
         | "swarm_list_modules"
         | "swarm_get_deploy_status"
         | "swarm_list_deployments"
         | "swarm_get_replay"
         | "swarm_get_terrain" => Some(CommandSource::McpQuery),
+        "swarm_tournament_create" | "swarm_match_result" => Some(CommandSource::Admin),
         "swarm_dry_run" => Some(CommandSource::DryRun),
         "swarm_simulate" => Some(CommandSource::Simulate),
         _ => None,
@@ -3462,6 +3519,42 @@ fn tournament_bracket_status(id: &str, bracket: &TournamentBracket) -> Tournamen
         champion: bracket.champion,
         losses: bracket.losses.iter().map(|(k, v)| (*k, *v)).collect(),
     }
+}
+
+fn normalized_tournament_id(tournament_id: &str) -> Result<String, McpError> {
+    let normalized = tournament_id.trim();
+    if normalized.is_empty() {
+        return Err(McpError::invalid_params("tournament_id is required"));
+    }
+    if normalized.len() > MAX_TOURNAMENT_ID_LEN {
+        return Err(McpError::invalid_params("tournament_id is too long"));
+    }
+    if !normalized
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(McpError::invalid_params(
+            "tournament_id contains invalid characters",
+        ));
+    }
+    Ok(normalized.to_string())
+}
+
+fn tournament_create_matches_existing(
+    params: &TournamentCreateParams,
+    bracket: &TournamentBracket,
+) -> bool {
+    if params.elimination != bracket.elimination || params.fixed_ticks != bracket.fixed_ticks {
+        return false;
+    }
+    let mut requested = params.players.clone();
+    requested.sort_unstable();
+    requested
+        == bracket
+            .seeds
+            .iter()
+            .map(|seed| seed.code.player_id)
+            .collect::<Vec<_>>()
 }
 
 fn empty_tournament_replay() -> ArenaReplay {
@@ -3564,93 +3657,53 @@ pub fn swarm_get_schema() -> Value {
 }
 
 fn command_action_schemas() -> Vec<Value> {
-    let mut schemas = vec![
-        command_action_schema(
-            "Move",
-            &["object_id", "direction"],
-            json!({"object_id": object_id_schema(), "direction": direction_schema()}),
-        ),
-        command_action_schema(
-            "Harvest",
-            &["object_id", "target_id"],
-            json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}}),
-        ),
-        command_action_schema(
-            "Transfer",
-            &["object_id", "target_id", "resource", "amount"],
-            json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema()}),
-        ),
-        command_action_schema(
-            "Withdraw",
-            &["object_id", "target_id", "resource", "amount"],
-            json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema()}),
-        ),
-        command_action_schema(
-            "ClaimController",
-            &["object_id", "target_id"],
-            json!({"object_id": object_id_schema(), "target_id": object_id_schema()}),
-        ),
-        command_action_schema(
-            "Spawn",
-            &["object_id", "spawn_id", "body_parts"],
-            json!({"object_id": object_id_schema(), "spawn_id": object_id_schema(), "body_parts": {"type": "array", "items": body_part_schema(), "minItems": 1, "maxItems": crate::command::MAX_BODY_PARTS}}),
-        ),
-        command_action_schema(
-            "Recycle",
-            &["object_id"],
-            json!({"object_id": object_id_schema()}),
-        ),
-        command_action_schema(
-            "Build",
-            &["object_id", "x", "y", "structure"],
-            json!({"object_id": object_id_schema(), "x": coord_schema(), "y": coord_schema(), "structure": structure_type_schema()}),
-        ),
-        command_action_schema(
-            "Repair",
-            &["object_id", "target_id"],
-            json!({"object_id": object_id_schema(), "target_id": object_id_schema()}),
-        ),
-        command_action_schema(
-            "UpgradeController",
-            &["object_id", "target_id"],
-            json!({"object_id": object_id_schema(), "target_id": object_id_schema()}),
-        ),
-        command_action_schema(
-            "TransferToGlobal",
-            &["resource", "amount"],
-            json!({"resource": {"type": "string"}, "amount": amount_schema()}),
-        ),
-        command_action_schema(
-            "TransferFromGlobal",
-            &["resource", "amount"],
-            json!({"resource": {"type": "string"}, "amount": amount_schema()}),
-        ),
-        command_action_schema(
-            "AlliedTransfer",
-            &["target_player", "resource", "amount"],
-            json!({"target_player": player_id_schema(), "resource": {"type": "string"}, "amount": amount_schema()}),
-        ),
-    ];
-
-    schemas.extend(
-        SPECIAL_COMMAND_ACTIONS
-            .iter()
-            .map(|action_type| special_command_action_schema(action_type)),
-    );
-    schemas.push(custom_command_action_schema());
+    let schemas = command_schema_branches()
+        .iter()
+        .map(command_schema_branch_schema)
+        .collect::<Vec<_>>();
     debug_assert_eq!(
         schemas.len(),
-        CORE_COMMAND_ACTIONS.len() + SPECIAL_COMMAND_ACTIONS.len()
+        CORE_COMMAND_ACTIONS.len() + SPECIAL_COMMAND_ACTIONS.len() + 1
     );
     schemas
 }
 
-fn special_command_action_schema(action_type: &str) -> Value {
-    command_action_schema(
-        action_type,
-        &["object_id", "target_id"],
-        json!({"object_id": object_id_schema(), "target_id": object_id_schema(), "resource": {"type": "string"}, "amount": amount_schema(), "range": uint32_schema(), "structure": structure_type_schema(), "damage_type": {"type": "string"}, "cooldown": uint32_schema()}),
-    )
+fn command_schema_branch_schema(branch: &CommandSchemaBranch) -> Value {
+    if branch.custom_wildcard {
+        return custom_command_action_schema();
+    }
+    let required = branch
+        .fields
+        .iter()
+        .filter(|field| field.required)
+        .map(|field| field.name)
+        .collect::<Vec<_>>();
+    let properties = branch
+        .fields
+        .iter()
+        .map(|field| (field.name.to_string(), command_schema_field_schema(field)))
+        .collect::<serde_json::Map<_, _>>();
+    command_action_schema(branch.name, &required, Value::Object(properties))
+}
+
+fn command_schema_field_schema(field: &CommandSchemaField) -> Value {
+    match field.type_name {
+        "ObjectId" => object_id_schema(),
+        "PlayerId" => player_id_schema(),
+        "Direction" => direction_schema(),
+        "ResourceName" => json!({"type": "string"}),
+        "ResourceAmount" => amount_schema(),
+        "u32" => uint32_schema(),
+        "u64" => json!({"type": "integer", "minimum": 0}),
+        "i32" => coord_schema(),
+        "StructureType" => structure_type_schema(),
+        "BodyPart[]" => {
+            json!({"type": "array", "items": body_part_schema(), "minItems": 1, "maxItems": crate::command::MAX_BODY_PARTS})
+        }
+        "DamageType" => json!({"type": "string"}),
+        "JsonValue" => json!(true),
+        _ => json!({"type": "string"}),
+    }
 }
 
 fn custom_command_action_schema() -> Value {
@@ -3658,11 +3711,13 @@ fn custom_command_action_schema() -> Value {
 }
 
 fn reserved_command_action_names() -> Vec<&'static str> {
-    CORE_COMMAND_ACTIONS
+    let mut names = CORE_COMMAND_ACTIONS
         .iter()
         .chain(SPECIAL_COMMAND_ACTIONS.iter())
         .copied()
-        .collect()
+        .collect::<Vec<_>>();
+    names.push("Action");
+    names
 }
 
 fn command_action_schema(action_type: &str, required: &[&str], properties: Value) -> Value {
@@ -4766,10 +4821,26 @@ fn build_visible_snapshot(world: &mut SwarmWorld, context: McpContext) -> Visibl
     let mut entities = visible_entities(world.app.world_mut(), &visible_positions, &visible_ids);
     entities.sort_by_key(entity_sort_key);
 
+    let state_checksum = world.state_checksum();
+    let recovery_envelope = RealtimeEnvelope {
+        schema: "swarm.realtime.v1".to_string(),
+        payload: RealtimeDelta {
+            tick: context.tick,
+            last_tick: context.tick.saturating_sub(1),
+            player_id: context.player_id,
+            full_snapshot: true,
+            changed_entities: entities.clone(),
+            removed_entities: Vec::new(),
+            state_checksum,
+        },
+    };
+
     VisibleWorldSnapshot {
         tick: context.tick,
         player_id: context.player_id,
         room_id: room_id.0,
+        state_checksum,
+        recovery_envelope,
         visibility_radius: VISIBILITY_RADIUS,
         visible_tiles,
         entities,
@@ -5419,16 +5490,36 @@ fn deploy_target_manifest_hash(world: &SwarmWorld) -> String {
     blake3_label(hasher.finalize().as_bytes())
 }
 
-fn deploy_metadata_value(metadata: &str, expected_key: &str) -> Option<String> {
-    for line in metadata.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() == expected_key {
-            return Some(value.trim().trim_matches('"').to_string());
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeployMetadataToml {
+    #[serde(rename = "name")]
+    _name: Option<String>,
+    version: Option<String>,
+    language: Option<String>,
+    target_manifest_hash: String,
+    engine_abi_version: DeployMetadataAbiVersion,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum DeployMetadataAbiVersion {
+    Integer(u32),
+    String(String),
+}
+
+impl DeployMetadataAbiVersion {
+    fn as_u32(&self) -> Option<u32> {
+        match self {
+            Self::Integer(value) => Some(*value),
+            Self::String(value) => value.parse::<u32>().ok(),
         }
     }
-    None
+}
+
+fn parse_deploy_metadata(metadata: &str) -> Result<DeployMetadataToml, McpError> {
+    toml::from_str(metadata)
+        .map_err(|error| McpError::invalid_params(format!("metadata must be valid TOML: {error}")))
 }
 
 fn validate_deploy_metadata(
@@ -5436,16 +5527,13 @@ fn validate_deploy_metadata(
     expected_target_manifest_hash: &str,
     expected_engine_abi_version: u32,
 ) -> Result<(), McpError> {
-    let target_manifest_hash = deploy_metadata_value(metadata, "target_manifest_hash")
-        .ok_or_else(|| McpError::invalid_params("metadata target_manifest_hash is required"))?;
-    if target_manifest_hash != expected_target_manifest_hash {
+    let metadata = parse_deploy_metadata(metadata)?;
+    if metadata.target_manifest_hash != expected_target_manifest_hash {
         return Err(McpError::invalid_params(
             "metadata target_manifest_hash is invalid",
         ));
     }
-    let engine_abi_version = deploy_metadata_value(metadata, "engine_abi_version")
-        .ok_or_else(|| McpError::invalid_params("metadata engine_abi_version is required"))?;
-    if engine_abi_version.parse::<u32>().ok() != Some(expected_engine_abi_version) {
+    if metadata.engine_abi_version.as_u32() != Some(expected_engine_abi_version) {
         return Err(McpError::invalid_params(
             "metadata engine_abi_version is invalid",
         ));
@@ -5498,20 +5586,14 @@ fn blake3_label(bytes: &[u8; 32]) -> String {
 }
 
 fn metadata_language_version(metadata: &str) -> (String, String) {
-    let mut language = "wasm".to_string();
-    let mut version = "unknown".to_string();
-    for line in metadata.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = value.trim().trim_matches('"').to_string();
-        match key.trim() {
-            "language" if !value.is_empty() => language = value,
-            "version" if !value.is_empty() => version = value,
-            _ => {}
-        }
-    }
-    (language, version)
+    parse_deploy_metadata(metadata)
+        .map(|metadata| {
+            (
+                metadata.language.unwrap_or_else(|| "wasm".to_string()),
+                metadata.version.unwrap_or_else(|| "unknown".to_string()),
+            )
+        })
+        .unwrap_or_else(|_| ("wasm".to_string(), "unknown".to_string()))
 }
 
 fn canonical_scope_string<I, S>(scopes: I) -> String
@@ -6130,6 +6212,7 @@ mod tests {
         "swarm_get_tick_trace",
         "swarm_get_visibility",
         "swarm_get_world_config",
+        "swarm_get_world_statistics",
         "swarm_get_world_rules",
         "swarm_list_controllers",
         "swarm_list_deployments",
@@ -6307,6 +6390,38 @@ mod tests {
         let drone_id = object_id(world.spawn_drone(player_id, 10, 10, vec![BodyPart::Move]));
         store_code_signing_certificate(&mut world, certificate);
         (world, drone_id)
+    }
+
+    fn fake_stored_module(
+        server: &McpServer,
+        player_id: PlayerId,
+        module_id: &str,
+    ) -> StoredModule {
+        let key = test_signing_key(player_id as u8 + 80);
+        let certificate = code_signing_certificate(server, player_id, &key);
+        StoredModule {
+            module_id: module_id.to_string(),
+            deploy_id: format!("deploy-{module_id}"),
+            world_id: "test-world".to_string(),
+            module_slot: format!("room-{}", player_id),
+            drone_id: u64::from(player_id),
+            metadata: "target_manifest_hash=test".to_string(),
+            metadata_hash: format!("metadata-{module_id}"),
+            signed_payload_hash: format!("payload-{module_id}"),
+            certificate_id: certificate.payload.cert_id.clone(),
+            player_id,
+            room_id: RoomId(player_id),
+            wasm_bytes: vec![player_id as u8],
+            wasm_hash: format!("blake3:{module_id}"),
+            code_signing_certificate: certificate,
+            code_signature: "test-signature".to_string(),
+            version_counter: 1,
+            transport: TRANSPORT_MCP.to_string(),
+            language: "wasm".to_string(),
+            version_tag: format!("v-{module_id}"),
+            deployed_at: "1970-01-01T00:00:00Z".to_string(),
+            load_after_tick: 0,
+        }
     }
 
     fn signed_deploy_params(
@@ -6645,6 +6760,49 @@ mod tests {
 
         validate_wasm_target_manifest_section(&wasm, &expected_hash, ENGINE_ABI_VERSION)
             .expect("frontend standard custom section bytes should parse");
+    }
+
+    #[test]
+    fn deploy_metadata_parser_accepts_frontend_toml_and_rejects_malformed_duplicates() {
+        let world = create_world();
+        let expected_hash = deploy_target_manifest_hash(&world);
+        let frontend_style = format!(
+            "name = \"bot\"\nversion = \"v1\"\nlanguage = \"typescript\"\ntarget_manifest_hash = \"{expected_hash}\"\nengine_abi_version = \"{ENGINE_ABI_VERSION}\"\n"
+        );
+        validate_deploy_metadata(&frontend_style, &expected_hash, ENGINE_ABI_VERSION)
+            .expect("frontend-style metadata remains compatible");
+        assert_eq!(
+            metadata_language_version(&frontend_style),
+            ("typescript".to_string(), "v1".to_string())
+        );
+
+        let duplicate = format!(
+            "target_manifest_hash = \"{expected_hash}\"\ntarget_manifest_hash = \"{expected_hash}\"\nengine_abi_version = {ENGINE_ABI_VERSION}\n"
+        );
+        assert!(
+            validate_deploy_metadata(&duplicate, &expected_hash, ENGINE_ABI_VERSION)
+                .unwrap_err()
+                .message
+                .contains("valid TOML")
+        );
+
+        let injected = format!(
+            "name = \"bot\"\nversion = \"v1\"\nlanguage = \"rust\"\ntarget_manifest_hash = \"bad\"\nengine_abi_version = {ENGINE_ABI_VERSION}\n#"
+        );
+        assert_eq!(
+            validate_deploy_metadata(&injected, &expected_hash, ENGINE_ABI_VERSION)
+                .unwrap_err()
+                .message,
+            "metadata target_manifest_hash is invalid"
+        );
+
+        let malformed = "target_manifest_hash = \"unterminated\nengine_abi_version = 1\n";
+        assert!(
+            validate_deploy_metadata(malformed, &expected_hash, ENGINE_ABI_VERSION)
+                .unwrap_err()
+                .message
+                .contains("valid TOML")
+        );
     }
 
     #[test]
@@ -7135,6 +7293,19 @@ mod tests {
             tick: 5,
             player_id: 1,
             room_id: 0,
+            state_checksum: 0,
+            recovery_envelope: RealtimeEnvelope {
+                schema: "swarm.realtime.v1".to_string(),
+                payload: RealtimeDelta {
+                    tick: 5,
+                    last_tick: 4,
+                    player_id: 1,
+                    full_snapshot: true,
+                    changed_entities: Vec::new(),
+                    removed_entities: Vec::new(),
+                    state_checksum: 0,
+                },
+            },
             visibility_radius: VISIBILITY_RADIUS,
             visible_tiles: Vec::new(),
             entities: vec![
@@ -7239,7 +7410,7 @@ mod tests {
             .copied()
             .collect::<BTreeSet<_>>();
 
-        assert_eq!(tools.len(), 54);
+        assert_eq!(tools.len(), 55);
         assert_eq!(tool_names.len(), tools.len());
         assert_eq!(tool_names, expected);
         assert!(tool_names.contains("swarm_get_drone_efficiency"));
@@ -7287,7 +7458,7 @@ mod tests {
         ];
 
         let tools = mcp_tool_infos();
-        assert_eq!(tools.len(), 54);
+        assert_eq!(tools.len(), 55);
         let tool_names = tools
             .iter()
             .map(|tool| tool.name.as_str())
@@ -7477,6 +7648,40 @@ mod tests {
             "AlliedTransfer" => {
                 json!({"type": "AlliedTransfer", "target_player": 2, "resource": "Energy", "amount": 0})
             }
+            "CreateContractSettlement" => {
+                json!({"type": "CreateContractSettlement", "settlement_id": 1, "nonce": 1, "input_resource": "Energy", "input_amount": 1, "output_resource": "Energy", "output_amount": 1})
+            }
+            "SettleContract" => json!({"type": "SettleContract", "settlement_id": 1}),
+            "CancelContract" => json!({"type": "CancelContract", "settlement_id": 1}),
+            "CreateMerchantQuote" => {
+                json!({"type": "CreateMerchantQuote", "quote_id": 1, "player_id": 1, "pay_resource": "Energy", "pay_amount": 1, "receive_resource": "Ore", "receive_amount": 1, "expires_at": 10})
+            }
+            "AcceptMerchantTrade" => {
+                json!({"type": "AcceptMerchantTrade", "quote_id": 1, "min_receive": 1})
+            }
+            "CreateP2POffer" => {
+                json!({"type": "CreateP2POffer", "offer_id": 1, "nonce": 1, "give_resource": "Energy", "give_amount": 1, "want_resource": "Ore", "want_amount": 1, "expires_at": 10})
+            }
+            "AcceptP2POffer" => json!({"type": "AcceptP2POffer", "offer_id": 1}),
+            "CancelP2POffer" => json!({"type": "CancelP2POffer", "offer_id": 1}),
+            "RefundP2POffer" => json!({"type": "RefundP2POffer", "offer_id": 1}),
+            "CreateAuction" => {
+                json!({"type": "CreateAuction", "auction_id": 1, "nonce": 1, "lot_resource": "Energy", "lot_amount": 1, "bid_resource": "Ore", "min_bid": 1, "ends_at": 10})
+            }
+            "BidAuction" => json!({"type": "BidAuction", "auction_id": 1, "bid_amount": 1}),
+            "SettleAuction" => json!({"type": "SettleAuction", "auction_id": 1}),
+            "CancelAuction" => json!({"type": "CancelAuction", "auction_id": 1}),
+            "CreateEscrow" => {
+                json!({"type": "CreateEscrow", "escrow_id": 1, "nonce": 1, "payee": 2, "arbiter": 3, "resource": "Energy", "amount": 1})
+            }
+            "ReleaseEscrow" => json!({"type": "ReleaseEscrow", "escrow_id": 1}),
+            "RefundEscrow" => json!({"type": "RefundEscrow", "escrow_id": 1}),
+            "CreateLoanOffer" => {
+                json!({"type": "CreateLoanOffer", "loan_id": 1, "nonce": 1, "borrower": 2, "resource": "Energy", "principal": 1, "repay_amount": 1, "due_at": 10})
+            }
+            "AcceptLoan" => json!({"type": "AcceptLoan", "loan_id": 1}),
+            "RepayLoan" => json!({"type": "RepayLoan", "loan_id": 1}),
+            "DefaultLoan" => json!({"type": "DefaultLoan", "loan_id": 1}),
             special if SPECIAL_COMMAND_ACTIONS.contains(&special) => {
                 json!({"type": special, "object_id": 1, "target_id": 2})
             }
@@ -7656,8 +7861,8 @@ mod tests {
     }
 
     #[test]
-    fn action_wrapper_is_rejected_for_all_dispatch_names() {
-        for rejected in ["Move", "Spawn", "Hack", "CustomHarvest"] {
+    fn action_wrapper_schema_rejects_all_dispatch_names_and_decoder_normalizes_legacy_specials() {
+        for rejected in ["Move", "Spawn"] {
             let action = json!({"type": "Action", "action_type": rejected, "object_id": 1});
             assert_eq!(
                 matching_action_schema_count(&action),
@@ -7666,9 +7871,11 @@ mod tests {
             );
             let error =
                 serde_json::from_value::<CommandIntent>(json!({"sequence": 0, "action": action}))
-                    .expect_err("internal Action wrapper must not be accepted on the wire");
+                    .expect_err("core action name must not be accepted as legacy special action");
             assert!(
-                error.to_string().contains("wire type Action is internal"),
+                error
+                    .to_string()
+                    .contains("legacy Action wrapper uses reserved non-special action_type"),
                 "unexpected error for {rejected}: {error}"
             );
 
@@ -7676,7 +7883,30 @@ mod tests {
                 "sequence": 0,
                 "action": {"type": "Action", "action_name": rejected, "object_id": 1}
             }))
-            .expect_err("legacy action_name wrapper must be rejected too");
+            .expect_err("legacy action_name wrapper must be rejected");
+        }
+
+        for normalized in ["Hack", "Attack"] {
+            let action = json!({"type": "Action", "action_type": normalized, "object_id": 1, "target_id": 2});
+            assert_eq!(
+                matching_action_schema_count(&action),
+                0,
+                "literal Action wrapper must remain absent from generated schema"
+            );
+
+            let decoded =
+                serde_json::from_value::<CommandIntent>(json!({"sequence": 0, "action": action}))
+                    .expect("legacy action_type wrapper should decode for recognized specials");
+            assert_eq!(
+                serde_json::to_value(decoded.action).unwrap(),
+                json!({"type": normalized, "object_id": 1, "target_id": 2})
+            );
+
+            serde_json::from_value::<CommandIntent>(json!({
+                "sequence": 0,
+                "action": {"type": "Action", "action_name": normalized, "object_id": 1}
+            }))
+            .expect_err("legacy action_name wrapper must be rejected");
         }
 
         let special = json!({"type": "Hack", "object_id": 1, "target_id": 2});
@@ -7699,7 +7929,7 @@ mod tests {
         .expect_err("supplying action_type and action_name should be rejected");
 
         assert!(
-            error.to_string().contains("wire type Action is internal"),
+            error.to_string().contains("unknown field `action_name`"),
             "unexpected error: {error}"
         );
     }
@@ -8099,6 +8329,19 @@ mod tests {
         };
 
         let first = swarm_get_snapshot(&mut world, context.clone());
+        assert_eq!(first.recovery_envelope.schema, "swarm.realtime.v1");
+        assert!(first.recovery_envelope.payload.full_snapshot);
+        assert_eq!(first.recovery_envelope.payload.tick, first.tick);
+        assert_eq!(first.recovery_envelope.payload.last_tick, first.tick - 1);
+        assert_eq!(
+            first.recovery_envelope.payload.changed_entities,
+            first.entities
+        );
+        assert!(first.recovery_envelope.payload.removed_entities.is_empty());
+        assert_eq!(
+            first.recovery_envelope.payload.state_checksum,
+            first.state_checksum
+        );
         let stats = world
             .app
             .world()
@@ -8896,6 +9139,315 @@ mod tests {
         assert!(text.contains("swarm_tournament_create"));
         assert!(text.contains("swarm_match_result"));
         assert!(text.contains("No swarm_move"));
+    }
+
+    #[test]
+    fn tournament_tools_dispatch_with_auth_replay_and_idempotency() {
+        let mut world = create_world();
+        let mut server = McpServer::with_issuer_for_tests(test_signing_key(70), 50_000);
+        let module_one = fake_stored_module(&server, 1, "module-one");
+        let module_two = fake_stored_module(&server, 2, "module-two");
+        server.modules.push(module_one);
+        server.modules.push(module_two);
+        let player_one = McpContext {
+            player_id: 1,
+            tick: 11,
+        };
+        let deploy_principal =
+            McpPrincipal::client_cert(1, "app-cert", [SCOPE_DEPLOY, TRANSPORT_MCP], TRANSPORT_MCP);
+        let admin_principal =
+            McpPrincipal::admin_cert(1, "admin-cert", [SCOPE_ADMIN, TRANSPORT_MCP], TRANSPORT_MCP);
+        assert_eq!(
+            mcp_tool_auth_mode("swarm_tournament_create"),
+            Some(AuthMode::AdminCertRequired)
+        );
+        assert_eq!(
+            mcp_tool_auth_mode("swarm_tournament_precommit"),
+            Some(AuthMode::AppCertRequired)
+        );
+        assert_eq!(
+            mcp_tool_auth_mode("swarm_tournament_status"),
+            Some(AuthMode::WebSessionOk)
+        );
+        assert_eq!(
+            mcp_tool_auth_mode("swarm_match_result"),
+            Some(AuthMode::AdminCertRequired)
+        );
+
+        let denied = server
+            .call_tool(
+                &mut world,
+                player_one.clone(),
+                "swarm_tournament_precommit",
+                json!({ "module_id": "module-one" }),
+            )
+            .expect_err("web session cannot call deploy-scoped tournament precommit");
+        assert_eq!(denied.message, "swarm:deploy scope is required");
+
+        let first = server
+            .call_tool_as(
+                &mut world,
+                player_one.clone(),
+                &deploy_principal,
+                "swarm_tournament_precommit",
+                json!({ "module_id": "module-one" }),
+            )
+            .expect("precommit should dispatch");
+        let replay = server
+            .call_tool_as(
+                &mut world,
+                player_one.clone(),
+                &deploy_principal,
+                "swarm_tournament_precommit",
+                json!({ "module_id": "module-one" }),
+            )
+            .expect("same precommit replay should be idempotent");
+        assert_eq!(first, replay);
+
+        let player_two_principal = McpPrincipal::client_cert(
+            2,
+            "app-cert-two",
+            [SCOPE_DEPLOY, TRANSPORT_MCP],
+            TRANSPORT_MCP,
+        );
+        server
+            .call_tool_as(
+                &mut world,
+                McpContext {
+                    player_id: 2,
+                    tick: 11,
+                },
+                &player_two_principal,
+                "swarm_tournament_precommit",
+                json!({ "module_id": "module-two" }),
+            )
+            .expect("second player precommit should dispatch");
+
+        let create_params = json!({
+            "tournament_id": "arena.replay-1",
+            "elimination": "Single",
+            "fixed_ticks": 20,
+            "players": [2, 1]
+        });
+        let create_denied = server
+            .call_tool_as(
+                &mut world,
+                player_one.clone(),
+                &deploy_principal,
+                "swarm_tournament_create",
+                create_params.clone(),
+            )
+            .expect_err("deploy-scoped clients cannot create tournaments");
+        assert_eq!(create_denied.message, "swarm:admin scope is required");
+        let created = server
+            .call_tool_as(
+                &mut world,
+                player_one.clone(),
+                &admin_principal,
+                "swarm_tournament_create",
+                create_params.clone(),
+            )
+            .expect("tournament create should dispatch");
+        let replayed = server
+            .call_tool_as(
+                &mut world,
+                player_one.clone(),
+                &admin_principal,
+                "swarm_tournament_create",
+                create_params,
+            )
+            .expect("same tournament create replay should be idempotent");
+        assert_eq!(created, replayed);
+        assert_eq!(created["players"], json!([1, 2]));
+
+        let conflict = server
+            .call_tool_as(
+                &mut world,
+                player_one.clone(),
+                &admin_principal,
+                "swarm_tournament_create",
+                json!({
+                    "tournament_id": "arena.replay-1",
+                    "elimination": "Single",
+                    "fixed_ticks": 30,
+                    "players": [1, 2]
+                }),
+            )
+            .expect_err("conflicting create replay must be rejected");
+        assert_eq!(conflict.message, "tournament_id already exists");
+
+        let status = server
+            .call_tool(
+                &mut world,
+                player_one,
+                "swarm_tournament_status",
+                Value::Null,
+            )
+            .expect("status should dispatch for read callers");
+        assert_eq!(status["mode"], json!("precommit_locked"));
+        assert_eq!(
+            status["tournaments"][0]["tournament_id"],
+            json!("arena.replay-1")
+        );
+
+        let read_denied = server
+            .call_tool(
+                &mut world,
+                McpContext {
+                    player_id: 1,
+                    tick: 12,
+                },
+                "swarm_match_result",
+                json!({
+                    "tournament_id": "arena.replay-1",
+                    "match_id": 1,
+                    "winner": 1
+                }),
+            )
+            .expect_err("web session cannot record tournament match results");
+        assert_eq!(read_denied.message, "swarm:admin scope is required");
+
+        let deploy_denied = server
+            .call_tool_as(
+                &mut world,
+                McpContext {
+                    player_id: 1,
+                    tick: 12,
+                },
+                &deploy_principal,
+                "swarm_match_result",
+                json!({
+                    "tournament_id": "arena.replay-1",
+                    "match_id": 1,
+                    "winner": 1
+                }),
+            )
+            .expect_err("deploy certificate cannot record tournament match results");
+        assert_eq!(deploy_denied.message, "swarm:admin scope is required");
+
+        let admin =
+            McpPrincipal::admin_cert(1, "admin-cert", [SCOPE_ADMIN, TRANSPORT_MCP], TRANSPORT_MCP);
+        let result = server
+            .call_tool_as(
+                &mut world,
+                McpContext {
+                    player_id: 1,
+                    tick: 12,
+                },
+                &admin,
+                "swarm_match_result",
+                json!({
+                    "tournament_id": "arena.replay-1",
+                    "match_id": 1,
+                    "winner": 1
+                }),
+            )
+            .expect("admin certificate can record tournament match results");
+        assert_eq!(result["winner"], json!(1));
+    }
+
+    #[test]
+    fn public_world_statistics_are_aggregate_and_visibility_safe() {
+        let mut world = create_world();
+        let baseline = swarm_get_world_stats(
+            &mut world,
+            McpContext {
+                player_id: 99,
+                tick: 43,
+            },
+            WorldStatsParams::default(),
+        );
+        world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        world.spawn_drone_in_room(2, RoomId(702), 20, 20, vec![BodyPart::Work]);
+        world.app.world_mut().spawn((
+            Position {
+                x: 25,
+                y: 25,
+                room: RoomId(701),
+            },
+            Controller {
+                owner: Some(1),
+                level: 3,
+                progress: 0,
+                progress_total: 100,
+                downgrade_timer: 0,
+                safe_mode: 0,
+                safe_mode_available: 0,
+                safe_mode_cooldown: 0,
+                repair_capacity: 0,
+                repair_range: 0,
+                repair_per_drone: 0,
+            },
+        ));
+        world.app.world_mut().spawn((
+            Position {
+                x: 5,
+                y: 5,
+                room: RoomId(702),
+            },
+            Controller {
+                owner: Some(2),
+                level: 2,
+                progress: 0,
+                progress_total: 100,
+                downgrade_timer: 0,
+                safe_mode: 0,
+                safe_mode_available: 0,
+                safe_mode_cooldown: 0,
+                repair_capacity: 0,
+                repair_range: 0,
+                repair_per_drone: 0,
+            },
+        ));
+
+        let mut server = McpServer::new();
+        let context = McpContext {
+            player_id: 99,
+            tick: 44,
+        };
+        let result = server
+            .call_tool(
+                &mut world,
+                context,
+                "swarm_get_world_statistics",
+                Value::Null,
+            )
+            .expect("public statistics should dispatch for read callers");
+
+        assert_eq!(result["tick"], json!(44));
+        assert_eq!(result["scope"], json!("public_world"));
+        assert_eq!(result["gcl_total"], json!(baseline.gcl_total + 5));
+        assert_eq!(result["room_count"], json!(baseline.room_count + 2));
+        assert_eq!(result["drone_count"], json!(baseline.drone_count + 2));
+
+        let keys = result
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "drone_count".to_string(),
+                "gcl_total".to_string(),
+                "room_count".to_string(),
+                "scope".to_string(),
+                "tick".to_string(),
+            ])
+        );
+        assert!(!result.to_string().contains("player"));
+        assert!(!result.to_string().contains("entity"));
+
+        let tool = mcp_tool_infos()
+            .into_iter()
+            .find(|tool| tool.name == "swarm_get_world_statistics")
+            .expect("statistics tool is advertised");
+        assert_eq!(tool.auth_mode, AuthMode::WebSessionOk);
+        assert_eq!(tool.input_schema["additionalProperties"], json!(false));
+        assert_eq!(tool.output_schema["additionalProperties"], json!(false));
+        assert!(tool.output_schema["properties"].get("player_id").is_none());
+        assert!(tool.output_schema["properties"].get("entity_id").is_none());
     }
 
     #[test]

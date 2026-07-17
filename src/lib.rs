@@ -3,6 +3,7 @@ pub mod arena_admin;
 pub mod auth;
 pub mod command;
 pub mod components;
+pub mod contract_exports;
 pub mod economy;
 pub mod hot_cache;
 pub mod idl;
@@ -22,6 +23,8 @@ pub mod scheduler;
 pub mod sdk_gen;
 pub mod security;
 pub mod sim;
+pub mod swarm_cli;
+pub mod swarm_deploy;
 pub mod systems;
 pub mod tick;
 pub mod tutorial;
@@ -712,7 +715,7 @@ mod tests {
 
     #[test]
     fn command_action_and_rejection_registries_match_api_surface() {
-        assert_eq!(CORE_COMMAND_ACTIONS.len(), 14);
+        assert_eq!(CORE_COMMAND_ACTIONS.len(), 33);
         assert_eq!(CANONICAL_REJECTION_REASONS.len(), 37);
         assert_eq!(CANONICAL_REJECTION_REASONS[0], "InvalidJson");
         assert_eq!(CANONICAL_REJECTION_REASONS[2], "ObjectNotFound");
@@ -723,14 +726,46 @@ mod tests {
             serde_json::from_str(r#"{"type":"Hack","object_id":1,"target_id":2}"#).unwrap();
         assert_eq!(
             action,
-            CommandAction::Action {
-                action_type: "Hack".to_string(),
+            CommandAction::Hack {
                 object_id: 1,
-                target_id: Some(2),
-                payload: serde_json::Value::Object(serde_json::Map::new()),
+                target_id: 2,
+                resource: None,
+                amount: None,
+                range: None,
+                structure: None,
+                damage_type: None,
+                cooldown: None,
             }
         );
         assert!(serde_json::from_str::<CommandAction>(r#"{"type":"Hack","object_id":1}"#).is_err());
+
+        let legacy: CommandAction = serde_json::from_str(
+            r#"{"type":"Action","action_type":"Hack","object_id":1,"target_id":2,"payload":{"damage_type":"EMP"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy,
+            CommandAction::Hack {
+                object_id: 1,
+                target_id: 2,
+                resource: None,
+                amount: None,
+                range: None,
+                structure: None,
+                damage_type: Some("EMP".to_string()),
+                cooldown: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap()["type"],
+            serde_json::json!("Hack")
+        );
+        assert!(
+            serde_json::from_str::<CommandAction>(
+                r#"{"type":"Action","action_type":"Unknown","object_id":1,"target_id":2}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -743,12 +778,21 @@ mod tests {
             &CustomActionRegistry::default(),
         );
 
-        assert_eq!(idl.core.commands.len(), 14);
+        assert_eq!(
+            idl.core.commands.len(),
+            CORE_COMMAND_ACTIONS.len() + SPECIAL_COMMAND_ACTIONS.len()
+        );
         assert!(
             idl.core
                 .commands
                 .iter()
-                .any(|command| command.name == "Action")
+                .all(|command| command.name != "Action")
+        );
+        assert!(
+            idl.core
+                .commands
+                .iter()
+                .any(|command| command.name == "Hack")
         );
         let spawn = idl
             .core
@@ -840,11 +884,15 @@ mod tests {
         };
         let attack_intent = CommandIntent {
             sequence: 1,
-            action: CommandAction::Action {
-                action_type: "Attack".to_string(),
+            action: CommandAction::Attack {
                 object_id: 1,
-                target_id: Some(2),
-                payload: serde_json::Value::Object(serde_json::Map::new()),
+                target_id: 2,
+                resource: None,
+                amount: None,
+                range: None,
+                structure: None,
+                damage_type: None,
+                cooldown: None,
             },
         };
 
@@ -1646,7 +1694,7 @@ mod tests {
     }
 
     #[test]
-    fn transfer_from_global_delivers_after_five_ticks() {
+    fn transfer_from_global_delivers_after_default_delay() {
         let mut world = create_world();
         world
             .app
@@ -1668,7 +1716,9 @@ mod tests {
         )
         .unwrap();
 
-        for _ in 0..4 {
+        assert_eq!(TRANSFER_FROM_GLOBAL_TICKS, 100);
+
+        for _ in 0..(TRANSFER_FROM_GLOBAL_TICKS - 1) {
             world.run_tick();
         }
         assert_eq!(
@@ -1857,7 +1907,7 @@ mod tests {
             .0
             .entry(1)
             .or_default()
-            .insert("Energy".to_string(), 100_000);
+            .insert("Energy".to_string(), 750_000);
 
         world.run_tick();
 
@@ -1869,7 +1919,7 @@ mod tests {
                 .0
                 .get(&1)
                 .and_then(|storage| storage.get("Energy")),
-            Some(&99_976)
+            Some(&749_976)
         );
     }
 
@@ -1921,11 +1971,15 @@ mod tests {
                 &mut world,
                 1,
                 1,
-                CommandAction::Action {
-                    action_type: "Attack".to_string(),
+                CommandAction::Attack {
                     object_id: object_id(attacker),
-                    target_id: Some(object_id(target)),
-                    payload: serde_json::Value::Object(serde_json::Map::new()),
+                    target_id: object_id(target),
+                    resource: None,
+                    amount: None,
+                    range: None,
+                    structure: None,
+                    damage_type: None,
+                    cooldown: None,
                 }
             ),
             Ok(())
@@ -1961,11 +2015,15 @@ mod tests {
                 &mut world,
                 2,
                 2,
-                CommandAction::Action {
-                    action_type: "Heal".to_string(),
+                CommandAction::Heal {
                     object_id: object_id(healer),
-                    target_id: Some(object_id(target)),
-                    payload: serde_json::Value::Object(serde_json::Map::new()),
+                    target_id: object_id(target),
+                    resource: None,
+                    amount: None,
+                    range: None,
+                    structure: None,
+                    damage_type: None,
+                    cooldown: None,
                 }
             ),
             Ok(())
@@ -2001,11 +2059,15 @@ mod tests {
                 &mut world,
                 1,
                 1,
-                CommandAction::Action {
-                    action_type: "Attack".to_string(),
+                CommandAction::Attack {
                     object_id: object_id(attacker),
-                    target_id: Some(object_id(friendly)),
-                    payload: serde_json::Value::Object(serde_json::Map::new()),
+                    target_id: object_id(friendly),
+                    resource: None,
+                    amount: None,
+                    range: None,
+                    structure: None,
+                    damage_type: None,
+                    cooldown: None,
                 }
             ),
             Err(RejectionReason::FriendlyTarget)
@@ -2017,11 +2079,15 @@ mod tests {
                 &mut world,
                 1,
                 2,
-                CommandAction::Action {
-                    action_type: "Heal".to_string(),
+                CommandAction::Heal {
                     object_id: object_id(healer),
-                    target_id: Some(object_id(friendly)),
-                    payload: serde_json::Value::Object(serde_json::Map::new()),
+                    target_id: object_id(friendly),
+                    resource: None,
+                    amount: None,
+                    range: None,
+                    structure: None,
+                    damage_type: None,
+                    cooldown: None,
                 }
             ),
             Err(RejectionReason::AlreadyFullHealth)
@@ -2040,11 +2106,15 @@ mod tests {
                 &mut world,
                 1,
                 3,
-                CommandAction::Action {
-                    action_type: "Heal".to_string(),
+                CommandAction::Heal {
                     object_id: object_id(healer),
-                    target_id: Some(object_id(enemy)),
-                    payload: serde_json::Value::Object(serde_json::Map::new()),
+                    target_id: object_id(enemy),
+                    resource: None,
+                    amount: None,
+                    range: None,
+                    structure: None,
+                    damage_type: None,
+                    cooldown: None,
                 }
             ),
             Err(RejectionReason::NotFriendly)
@@ -2436,15 +2506,15 @@ mod tests {
     #[test]
     fn standard_empire_upkeep_uses_superlinear_formula() {
         let upkeep = crate::world::EmpireUpkeepConfig::standard();
-        assert_eq!(upkeep.upkeep_cost(1), 31);
-        assert_eq!(upkeep.upkeep_cost(20), 1_200);
+        assert_eq!(upkeep.upkeep_cost(1), 55);
+        assert_eq!(upkeep.upkeep_cost(20), 3_000);
     }
 
     #[test]
     fn vanilla_empire_upkeep_uses_vanilla_defaults() {
         let upkeep = crate::world::EmpireUpkeepConfig::vanilla();
-        assert_eq!(upkeep.upkeep_cost(1), 20);
-        assert_eq!(upkeep.upkeep_cost(25), 1_000);
+        assert_eq!(upkeep.upkeep_cost(1), 32);
+        assert_eq!(upkeep.upkeep_cost(25), 2_000);
     }
 
     #[test]
