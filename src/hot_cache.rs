@@ -117,6 +117,7 @@ mod tests {
     use super::*;
     use crate::hot_cache::InMemorySnapshotCache;
     use crate::mcp::VisibleWorldSnapshot;
+    use crate::realtime::{RealtimeDelta, RealtimeEnvelope};
     use crate::redb_store::RedbStore;
 
     fn snapshot(tick: Tick, player_id: PlayerId, room_id: u32) -> VisibleWorldSnapshot {
@@ -124,6 +125,19 @@ mod tests {
             tick,
             player_id,
             room_id,
+            state_checksum: 0,
+            recovery_envelope: RealtimeEnvelope {
+                schema: "swarm.realtime.v1".to_string(),
+                payload: RealtimeDelta {
+                    tick,
+                    last_tick: tick.saturating_sub(1),
+                    player_id,
+                    full_snapshot: true,
+                    changed_entities: Vec::new(),
+                    removed_entities: Vec::new(),
+                    state_checksum: 0,
+                },
+            },
             visibility_radius: 5,
             visible_tiles: Vec::new(),
             entities: Vec::new(),

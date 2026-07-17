@@ -285,6 +285,13 @@ pub struct RecoveryPoint {
     pub rich_terminal_state: TickTerminalState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationalInspect {
+    pub latest_tick: Option<Tick>,
+    pub verified_ticks: u64,
+    pub keyframes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TickArchiveWalEntry {
     tick: Tick,
@@ -356,7 +363,7 @@ impl RedbStore {
         )
     }
 
-    fn open_with_artifact_paths(
+    pub fn open_with_artifact_paths(
         path: &str,
         object_store_root: PathBuf,
         wal_root: PathBuf,
@@ -419,6 +426,91 @@ impl RedbStore {
         };
         store.recover_archive_wal()?;
         Ok(store)
+    }
+
+    pub fn validate_keyframe_backup_root_isolated(
+        primary: &Path,
+        backup: &Path,
+    ) -> Result<(), RedbError> {
+        validate_backup_root_isolated(primary, backup)
+    }
+
+    pub fn snapshot_content_hash_for_state(state: &TickState) -> Result<[u8; 32], RedbError> {
+        snapshot_content_hash(state)
+    }
+
+    pub fn export_verified_keyframe(
+        &self,
+        tick: Tick,
+        destination: &Path,
+    ) -> Result<(), RedbError> {
+        let Some(bytes) = self.read_key(&snapshot_state_key(tick))? else {
+            return Err(RedbError::NotFound(format!("keyframe pointer tick {tick}")));
+        };
+        let pointer: KeyframePointerRow = decode(&bytes, "keyframe pointer")?;
+        let row = self.read_keyframe_from_pointer(&pointer)?;
+        let file = KeyframeFile {
+            header: pointer.header,
+            state: row.state,
+        };
+        write_new_file(
+            destination,
+            &encode(&file, "keyframe export")?,
+            "keyframe export",
+        )
+    }
+
+    pub fn restore_verified_keyframe(&self, tick: Tick, source: &Path) -> Result<(), RedbError> {
+        let Some(bytes) = self.read_key(&snapshot_state_key(tick))? else {
+            return Err(RedbError::NotFound(format!("keyframe pointer tick {tick}")));
+        };
+        let pointer: KeyframePointerRow = decode(&bytes, "keyframe pointer")?;
+        let (primary, backup) = self.expected_keyframe_paths(tick);
+        self.validate_keyframe_pointer_for_restore(tick, &pointer, &primary, &backup)?;
+        let source_bytes = fs::read(source).map_err(|error| {
+            RedbError::Unavailable(format!(
+                "read keyframe restore source {}: {error}",
+                source.display()
+            ))
+        })?;
+        let file: KeyframeFile = decode(&source_bytes, "keyframe restore")?;
+        verify_keyframe_header(&file.header, &pointer, &file.state)?;
+        verify_snapshot_row(&SnapshotRow {
+            tick,
+            state_checksum: file.header.state_checksum,
+            content_hash: snapshot_content_hash(&file.state)?,
+            state: file.state,
+        })?;
+        validate_keyframe_restore_destination(&primary, "primary keyframe restore")?;
+        validate_keyframe_restore_destination(&backup, "backup keyframe restore")?;
+        write_new_file(&primary, &source_bytes, "primary keyframe restore")?;
+        write_new_file(&backup, &source_bytes, "backup keyframe restore")
+    }
+
+    pub fn operational_inspect(&self) -> Result<OperationalInspect, RedbError> {
+        let mut ticks = BTreeSet::new();
+        for key in self.scan_keys_prefix(b"/tick/")? {
+            if let Some(tick) = parse_tick_from_key(&key) {
+                ticks.insert(tick);
+            }
+        }
+        let mut verified_ticks = 0_u64;
+        let mut keyframes = 0_u64;
+        let mut latest_tick = None;
+        for tick in ticks {
+            latest_tick = Some(tick);
+            if self.verify_tick(tick).is_ok() {
+                verified_ticks += 1;
+            }
+            if self.read_verified_snapshot(tick).is_ok() {
+                keyframes += 1;
+            }
+        }
+        Ok(OperationalInspect {
+            latest_tick,
+            verified_ticks,
+            keyframes,
+        })
     }
 
     pub fn unavailable(reason: impl Into<String>) -> Self {
@@ -1083,12 +1175,7 @@ impl RedbStore {
             header_crc32c: 0,
         };
         header.header_crc32c = keyframe_header_crc32c(&header)?;
-        let primary = self.keyframe_root.join(keyframe_file_name(row.tick));
-        let backup = self
-            .keyframe_backup_root
-            .join(&*self.world_id)
-            .join(&*self.shard_id)
-            .join(keyframe_file_name(row.tick));
+        let (primary, backup) = self.expected_keyframe_paths(row.tick);
         Ok(KeyframePointerRow {
             tick: row.tick,
             world_id: (*self.world_id).clone(),
@@ -1098,6 +1185,68 @@ impl RedbStore {
             header,
             status: UploadStatus::Pending,
         })
+    }
+
+    fn expected_keyframe_paths(&self, tick: Tick) -> (PathBuf, PathBuf) {
+        let file_name = keyframe_file_name(tick);
+        let primary = self.keyframe_root.join(&file_name);
+        let backup = self
+            .keyframe_backup_root
+            .join(&*self.world_id)
+            .join(&*self.shard_id)
+            .join(file_name);
+        (primary, backup)
+    }
+
+    fn validate_keyframe_pointer_for_restore(
+        &self,
+        tick: Tick,
+        pointer: &KeyframePointerRow,
+        primary: &Path,
+        backup: &Path,
+    ) -> Result<(), RedbError> {
+        if pointer.tick != tick {
+            return Err(RedbError::Integrity(format!(
+                "keyframe pointer tick mismatch: requested {tick}, row {}",
+                pointer.tick
+            )));
+        }
+        if pointer.status != UploadStatus::Complete {
+            return Err(RedbError::Integrity(format!(
+                "keyframe restore pointer tick {tick} is not complete: {:?}",
+                pointer.status
+            )));
+        }
+        let world_id = self.world_id.as_str();
+        let shard_id = self.shard_id.as_str();
+        if pointer.world_id.as_str() != world_id || pointer.shard_id.as_str() != shard_id {
+            return Err(RedbError::Integrity(format!(
+                "keyframe pointer identity mismatch at tick {tick}"
+            )));
+        }
+        if pointer.header.magic != KEYFRAME_MAGIC
+            || pointer.header.format_version != KEYFRAME_FORMAT_VERSION
+            || pointer.header.tick != tick
+            || pointer.header.world_id.as_str() != world_id
+            || pointer.header.shard_id.as_str() != shard_id
+        {
+            return Err(RedbError::Integrity(format!(
+                "keyframe pointer header identity mismatch at tick {tick}"
+            )));
+        }
+        if keyframe_header_crc32c(&pointer.header)? != pointer.header.header_crc32c {
+            return Err(RedbError::Integrity(format!(
+                "keyframe pointer header crc mismatch at tick {tick}"
+            )));
+        }
+        if pointer.primary_path.as_str() != primary.to_string_lossy().as_ref()
+            || pointer.backup_path.as_str() != backup.to_string_lossy().as_ref()
+        {
+            return Err(RedbError::Integrity(format!(
+                "keyframe pointer path mismatch at tick {tick}"
+            )));
+        }
+        Ok(())
     }
 
     fn write_keyframe_files(
@@ -1696,6 +1845,43 @@ impl RedbStore {
         }
     }
 
+    pub fn scan_keys_prefix(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>, RedbError> {
+        if let Some(db) = &self.db {
+            let txn = db
+                .begin_read()
+                .map_err(|error| RedbError::Commit(error.to_string()))?;
+            let table = txn
+                .open_table(KV_TABLE)
+                .map_err(|error| RedbError::Commit(error.to_string()))?;
+            let mut keys = Vec::new();
+            for entry in table
+                .range(prefix..)
+                .map_err(|error| RedbError::Commit(error.to_string()))?
+            {
+                let (key, _) = entry.map_err(|error| RedbError::Commit(error.to_string()))?;
+                let key = key.value().to_vec();
+                if !key.starts_with(prefix) {
+                    break;
+                }
+                keys.push(key);
+            }
+            return Ok(keys);
+        }
+        match self.backend.as_ref() {
+            RedbBackend::Unavailable(reason) => Err(RedbError::Unavailable(format!(
+                "{reason}; cannot scan prefix"
+            ))),
+            RedbBackend::InMemory(backend) => Ok(backend
+                .lock()
+                .map_err(|_| RedbError::Commit("in-memory redb lock poisoned".to_string()))?
+                .data
+                .range(prefix.to_vec()..)
+                .take_while(|(key, _)| key.starts_with(prefix))
+                .map(|(key, _)| key.clone())
+                .collect()),
+        }
+    }
+
     fn read_json<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>, RedbError> {
         self.read_key(key)?
             .map(|value| decode(&value, std::str::from_utf8(key).unwrap_or("key")))
@@ -2261,6 +2447,77 @@ fn write_keyframe_path(path: &Path, bytes: &[u8], label: &str) -> Result<(), Red
     durable_atomic_write(&temp, path, bytes, label)
 }
 
+fn write_new_file(path: &Path, bytes: &[u8], label: &str) -> Result<(), RedbError> {
+    let parent = path.parent().ok_or_else(|| {
+        RedbError::Unavailable(format!("{label} path has no parent: {}", path.display()))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        RedbError::Unavailable(format!(
+            "create {label} directory {}: {error}",
+            parent.display()
+        ))
+    })?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            RedbError::Unavailable(format!("create {label} {}: {error}", path.display()))
+        })?;
+    file.write_all(bytes).map_err(|error| {
+        RedbError::Unavailable(format!("write {label} {}: {error}", path.display()))
+    })?;
+    file.sync_all().map_err(|error| {
+        RedbError::Unavailable(format!("sync {label} {}: {error}", path.display()))
+    })
+}
+
+fn validate_keyframe_restore_destination(path: &Path, label: &str) -> Result<(), RedbError> {
+    let parent = path.parent().ok_or_else(|| {
+        RedbError::Unavailable(format!("{label} path has no parent: {}", path.display()))
+    })?;
+    for ancestor in parent.ancestors() {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(RedbError::Unavailable(format!(
+                        "{label} parent must not be a symlink: {}",
+                        ancestor.display()
+                    )));
+                }
+                if !metadata.file_type().is_dir() {
+                    return Err(RedbError::Unavailable(format!(
+                        "{label} parent must be a directory: {}",
+                        ancestor.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(RedbError::Unavailable(format!(
+                    "inspect {label} parent {}: {error}",
+                    ancestor.display()
+                )));
+            }
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(RedbError::Unavailable(format!(
+            "{label} target must not be a symlink: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RedbError::Unavailable(format!(
+            "inspect {label} target {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
 fn validate_backup_root_isolated(primary: &Path, backup: &Path) -> Result<(), RedbError> {
     if backup == primary || backup.starts_with(primary) || primary.starts_with(backup) {
         return Err(RedbError::Unavailable(format!(
@@ -2270,6 +2527,13 @@ fn validate_backup_root_isolated(primary: &Path, backup: &Path) -> Result<(), Re
         )));
     }
     Ok(())
+}
+
+fn parse_tick_from_key(key: &[u8]) -> Option<Tick> {
+    let text = std::str::from_utf8(key).ok()?;
+    let rest = text.strip_prefix("/tick/")?;
+    let tick = rest.split('/').next()?;
+    tick.parse().ok()
 }
 
 fn verify_non_empty_hash(
@@ -2378,6 +2642,7 @@ mod tests {
     use super::*;
     use crate::command::{CommandAction, CommandAuth, CommandSource, RawCommand};
     use crate::components::PlayerId;
+    use crate::realtime::{RealtimeDelta, RealtimeEnvelope};
     use crate::tick::{
         TickCommitRecord, TickFuelLedger, TickMetrics, TickTrace, WorldSnapshot, commands_hash,
         tick_trace_writes,
@@ -2389,6 +2654,19 @@ mod tests {
             tick,
             player_id,
             room_id,
+            state_checksum: 0,
+            recovery_envelope: RealtimeEnvelope {
+                schema: "swarm.realtime.v1".to_string(),
+                payload: RealtimeDelta {
+                    tick,
+                    last_tick: tick.saturating_sub(1),
+                    player_id,
+                    full_snapshot: true,
+                    changed_entities: Vec::new(),
+                    removed_entities: Vec::new(),
+                    state_checksum: 0,
+                },
+            },
             visibility_radius: 5,
             visible_tiles: Vec::new(),
             entities: Vec::new(),
@@ -2537,6 +2815,52 @@ mod tests {
             directory.path().join(format!("{db_name}.keyframe-backup")),
         )
         .unwrap()
+    }
+
+    fn stored_keyframe_pointer(store: &RedbStore, tick: Tick) -> KeyframePointerRow {
+        let pointer_bytes = store.read_key(&snapshot_state_key(tick)).unwrap().unwrap();
+        decode(&pointer_bytes, "keyframe pointer").unwrap()
+    }
+
+    fn persist_keyframe_pointer(store: &RedbStore, tick: Tick, pointer: &KeyframePointerRow) {
+        store
+            .commit_tick_writes(vec![(
+                snapshot_state_key(tick),
+                encode(pointer, "keyframe pointer").unwrap(),
+            )])
+            .unwrap();
+    }
+
+    fn prepare_keyframe_restore_source(
+        store: &mut RedbStore,
+        tick: Tick,
+        checksum: u64,
+        scratch: &Path,
+    ) -> (SnapshotRow, KeyframePointerRow, PathBuf) {
+        let snapshot = snapshot_row(tick, checksum);
+        store.write_snapshot(snapshot.clone()).unwrap();
+        let pointer = stored_keyframe_pointer(store, tick);
+        let source = scratch.join(format!("{tick}.restore.snap"));
+        fs::write(&source, fs::read(&pointer.primary_path).unwrap()).unwrap();
+        fs::remove_file(&pointer.primary_path).unwrap();
+        fs::remove_file(&pointer.backup_path).unwrap();
+        (snapshot, pointer, source)
+    }
+
+    fn assert_restore_rejected_without_trusted_write(
+        store: &RedbStore,
+        tick: Tick,
+        source: &Path,
+        pointer: &KeyframePointerRow,
+        expected_message: &str,
+    ) {
+        let error = store.restore_verified_keyframe(tick, source).unwrap_err();
+        assert!(
+            error.to_string().contains(expected_message),
+            "unexpected error: {error}"
+        );
+        assert!(!Path::new(&pointer.primary_path).exists());
+        assert!(!Path::new(&pointer.backup_path).exists());
     }
 
     #[test]
@@ -3174,6 +3498,189 @@ mod tests {
     }
 
     #[test]
+    fn restore_verified_keyframe_writes_trusted_destinations() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut store = RedbStore::in_memory();
+        let (snapshot, pointer, source) =
+            prepare_keyframe_restore_source(&mut store, 10, 110, scratch.path());
+        let source_bytes = fs::read(&source).unwrap();
+
+        store.restore_verified_keyframe(10, &source).unwrap();
+
+        assert_eq!(fs::read(&pointer.primary_path).unwrap(), source_bytes);
+        assert_eq!(fs::read(&pointer.backup_path).unwrap(), source_bytes);
+        assert_eq!(store.read_verified_snapshot(10).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn restore_verified_keyframe_rejects_arbitrary_pointer_paths() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut store = RedbStore::in_memory();
+        let (_snapshot, pointer, source) =
+            prepare_keyframe_restore_source(&mut store, 11, 111, scratch.path());
+        let forged_primary = scratch.path().join("attacker-primary.snap");
+        let forged_backup = scratch.path().join("attacker-backup.snap");
+        let mut forged = pointer.clone();
+        forged.primary_path = forged_primary.to_string_lossy().into_owned();
+        forged.backup_path = forged_backup.to_string_lossy().into_owned();
+        persist_keyframe_pointer(&store, 11, &forged);
+
+        assert_restore_rejected_without_trusted_write(
+            &store,
+            11,
+            &source,
+            &pointer,
+            "path mismatch",
+        );
+        assert!(!forged_primary.exists());
+        assert!(!forged_backup.exists());
+    }
+
+    #[test]
+    fn restore_verified_keyframe_rejects_traversal_equivalent_pointer_paths() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut store = RedbStore::in_memory();
+        let (_snapshot, pointer, source) =
+            prepare_keyframe_restore_source(&mut store, 12, 112, scratch.path());
+        let trusted_primary = PathBuf::from(&pointer.primary_path);
+        let trusted_backup = PathBuf::from(&pointer.backup_path);
+        let primary_parent = trusted_primary.parent().unwrap();
+        let backup_parent = trusted_backup.parent().unwrap();
+        fs::create_dir_all(primary_parent.join("equivalent")).unwrap();
+        fs::create_dir_all(backup_parent.join("equivalent")).unwrap();
+        let mut forged = pointer.clone();
+        forged.primary_path = primary_parent
+            .join("equivalent")
+            .join("..")
+            .join(trusted_primary.file_name().unwrap())
+            .to_string_lossy()
+            .into_owned();
+        forged.backup_path = backup_parent
+            .join("equivalent")
+            .join("..")
+            .join(trusted_backup.file_name().unwrap())
+            .to_string_lossy()
+            .into_owned();
+        persist_keyframe_pointer(&store, 12, &forged);
+
+        assert_restore_rejected_without_trusted_write(
+            &store,
+            12,
+            &source,
+            &pointer,
+            "path mismatch",
+        );
+    }
+
+    #[test]
+    fn restore_verified_keyframe_rejects_wrong_pointer_metadata() {
+        let scratch = tempfile::tempdir().unwrap();
+
+        let mut tick_store = RedbStore::in_memory();
+        let (_snapshot, pointer, source) =
+            prepare_keyframe_restore_source(&mut tick_store, 13, 113, scratch.path());
+        let mut forged = pointer.clone();
+        forged.tick = 14;
+        persist_keyframe_pointer(&tick_store, 13, &forged);
+        assert_restore_rejected_without_trusted_write(
+            &tick_store,
+            13,
+            &source,
+            &pointer,
+            "tick mismatch",
+        );
+
+        let mut identity_store = RedbStore::in_memory();
+        let (_snapshot, pointer, source) =
+            prepare_keyframe_restore_source(&mut identity_store, 14, 114, scratch.path());
+        let mut forged = pointer.clone();
+        forged.world_id = "forged-world".to_string();
+        persist_keyframe_pointer(&identity_store, 14, &forged);
+        assert_restore_rejected_without_trusted_write(
+            &identity_store,
+            14,
+            &source,
+            &pointer,
+            "identity mismatch",
+        );
+
+        let mut header_store = RedbStore::in_memory();
+        let (_snapshot, pointer, source) =
+            prepare_keyframe_restore_source(&mut header_store, 15, 115, scratch.path());
+        let mut forged = pointer.clone();
+        forged.header.shard_id = "forged-shard".to_string();
+        forged.header.header_crc32c = keyframe_header_crc32c(&forged.header).unwrap();
+        persist_keyframe_pointer(&header_store, 15, &forged);
+        assert_restore_rejected_without_trusted_write(
+            &header_store,
+            15,
+            &source,
+            &pointer,
+            "header identity mismatch",
+        );
+
+        let mut status_store = RedbStore::in_memory();
+        let (_snapshot, pointer, source) =
+            prepare_keyframe_restore_source(&mut status_store, 16, 116, scratch.path());
+        let mut forged = pointer.clone();
+        forged.status = UploadStatus::Pending;
+        persist_keyframe_pointer(&status_store, 16, &forged);
+        assert_restore_rejected_without_trusted_write(
+            &status_store,
+            16,
+            &source,
+            &pointer,
+            "not complete",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_verified_keyframe_rejects_symlinked_destination_parent_before_writing() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = tempfile::tempdir().unwrap();
+        let mut store = RedbStore::in_memory();
+        let (_snapshot, pointer, source) =
+            prepare_keyframe_restore_source(&mut store, 17, 117, scratch.path());
+        let primary = PathBuf::from(&pointer.primary_path);
+        let backup = PathBuf::from(&pointer.backup_path);
+        let backup_parent = backup.parent().unwrap();
+        fs::remove_dir(backup_parent).unwrap();
+        let outside_parent = scratch.path().join("outside-backup-parent");
+        fs::create_dir_all(&outside_parent).unwrap();
+        symlink(&outside_parent, backup_parent).unwrap();
+
+        let error = store.restore_verified_keyframe(17, &source).unwrap_err();
+
+        assert!(error.to_string().contains("parent must not be a symlink"));
+        assert!(!primary.exists());
+        assert!(!outside_parent.join(backup.file_name().unwrap()).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_verified_keyframe_rejects_symlinked_destination_target_before_writing() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = tempfile::tempdir().unwrap();
+        let mut store = RedbStore::in_memory();
+        let (_snapshot, pointer, source) =
+            prepare_keyframe_restore_source(&mut store, 18, 118, scratch.path());
+        let primary = PathBuf::from(&pointer.primary_path);
+        let backup = PathBuf::from(&pointer.backup_path);
+        let outside_target = scratch.path().join("outside-target.snap");
+        fs::write(&outside_target, b"outside").unwrap();
+        symlink(&outside_target, &primary).unwrap();
+
+        let error = store.restore_verified_keyframe(18, &source).unwrap_err();
+
+        assert!(error.to_string().contains("target must not be a symlink"));
+        assert_eq!(fs::read(&outside_target).unwrap(), b"outside");
+        assert!(!backup.exists());
+    }
+
+    #[test]
     fn legacy_persisted_action_codec_migrates_without_live_wire_reopen() {
         let auth = CommandAuth::server_injected(CommandSource::Wasm, 7, 1, 1);
         let legacy = serde_json::json!({
@@ -3206,7 +3713,11 @@ mod tests {
 
         assert!(matches!(
             record.commands[0].action,
-            CommandAction::Action { ref action_type, .. } if action_type == "Hack"
+            CommandAction::Hack {
+                object_id: 10,
+                target_id: 11,
+                ..
+            }
         ));
         let live_wire = serde_json::json!({
             "player_id": 7,
