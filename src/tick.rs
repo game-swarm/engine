@@ -11,12 +11,12 @@ use crate::command::{
 };
 use crate::components::*;
 use crate::mcp::{VisibleEntity, visible_entities_for_player};
-use crate::realtime::{RealtimeDelta, RealtimeEnvelope, compute_realtime_delta};
+use crate::realtime::{RealtimeDelta, RealtimeEnvelope};
 use crate::resource_ledger::{ResourceLedger, ResourceLedgerTraceSnapshot};
 use crate::resources::{
     AlliedTransferCooldowns, AlliedTransferDailyTick, AlliedTransferDailyUsage, CurrentTick,
     PendingAlliedTransfers, PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage,
-    ResourceCost,
+    ResourceCost, SettlementState,
 };
 use crate::sandbox_transport::{ActiveDeployment, ActiveDeployments};
 use crate::scheduler::{SYSTEM_MANIFEST, manifest_hash};
@@ -1118,6 +1118,11 @@ pub enum ReplayError {
         expected_checksum: u64,
         actual_checksum: u64,
     },
+    ResourceLedgerMismatch {
+        tick: Tick,
+        expected_checksum: u64,
+        actual_checksum: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1394,18 +1399,6 @@ where
         let mut tick_loop = TickLoop::new(tick);
         let started_at = Instant::now();
         let state_checksum = self.world.state_checksum();
-        let mut realtime_before = self
-            .executors
-            .keys()
-            .copied()
-            .map(|player_id| {
-                (
-                    player_id,
-                    visible_entities_for_player(self.world.app.world_mut(), player_id),
-                )
-            })
-            .collect::<Vec<_>>();
-        realtime_before.sort_by_key(|(player_id, _)| *player_id);
         let world_seed = world_seed_for_world(self.world.app.world());
         let active_players = canonical_active_players(self.executors.keys().copied().collect());
 
@@ -1564,11 +1557,11 @@ where
             last_rejections = rejections;
             last_security_alerts = trace.security_alerts.clone();
             tick_loop.enter(TickPhase::Persist);
-            if self
-                .committer
-                .commit_with_environment(trace.clone(), environment)
-                .is_ok()
-            {
+            let commit_result = validate_resource_ledger_for_commit(&trace).and_then(|_| {
+                self.committer
+                    .commit_with_environment(trace.clone(), environment)
+            });
+            if commit_result.is_ok() {
                 consume_deploy_activations_for_tick(self.world.app.world(), tick);
                 committed_trace = Some(trace);
                 break;
@@ -1600,24 +1593,18 @@ where
         self.collect_cache = None;
         self.degraded_mode.record_committed_tick();
         let mut broadcasted = true;
-        for (player_id, before) in realtime_before {
-            let delta = compute_realtime_delta(
-                &mut self.world,
-                player_id,
-                tick,
-                tick.saturating_sub(1),
-                &before,
-            );
-            let after = visible_entities_for_player(self.world.app.world_mut(), player_id);
+        for player_id in active_players {
+            let changed_entities =
+                visible_entities_for_player(self.world.app.world_mut(), player_id);
             let broadcast = TickBroadcast {
                 tick,
-                last_tick: delta.last_tick,
+                last_tick: tick.saturating_sub(1),
                 player_id,
                 full_snapshot: true,
                 accepted: trace.commands.clone(),
                 rejections: trace.rejections.clone(),
-                changed_entities: after,
-                removed_entities: delta.removed_entities,
+                changed_entities,
+                removed_entities: Vec::new(),
                 state_checksum: trace.state_checksum,
             };
             if self.broadcaster.broadcast(broadcast).is_err() {
@@ -1682,8 +1669,6 @@ where
         let tick = self.tick_counter;
         let mut tick_loop = TickLoop::new(tick);
         let started_at = Instant::now();
-        let realtime_before =
-            visible_entities_for_player(self.world.app.world_mut(), self.player_id);
         let state_checksum = self.world.state_checksum();
         let world_seed = world_seed_for_world(self.world.app.world());
         let active_players = vec![self.player_id];
@@ -1805,11 +1790,11 @@ where
             last_rejections = rejections;
             last_security_alerts = trace.security_alerts.clone();
             tick_loop.enter(TickPhase::Persist);
-            if self
-                .committer
-                .commit_with_environment(trace.clone(), environment)
-                .is_ok()
-            {
+            let commit_result = validate_resource_ledger_for_commit(&trace).and_then(|_| {
+                self.committer
+                    .commit_with_environment(trace.clone(), environment)
+            });
+            if commit_result.is_ok() {
                 consume_deploy_activations_for_tick(self.world.app.world(), tick);
                 committed_trace = Some(trace);
                 break;
@@ -1839,25 +1824,17 @@ where
         self.tick_counter += 1;
         tick_loop.finish();
         self.degraded_mode.record_committed_tick();
-        let delta = compute_realtime_delta(
-            &mut self.world,
-            self.player_id,
-            tick,
-            tick.saturating_sub(1),
-            &realtime_before,
-        );
+        let changed_entities =
+            visible_entities_for_player(self.world.app.world_mut(), self.player_id);
         let broadcast = TickBroadcast {
             tick,
-            last_tick: delta.last_tick,
+            last_tick: tick.saturating_sub(1),
             player_id: self.player_id,
             full_snapshot: true,
             accepted: trace.commands.clone(),
             rejections: trace.rejections.clone(),
-            changed_entities: visible_entities_for_player(
-                self.world.app.world_mut(),
-                self.player_id,
-            ),
-            removed_entities: delta.removed_entities,
+            changed_entities,
+            removed_entities: Vec::new(),
             state_checksum: trace.state_checksum,
         };
         let broadcasted = if self.broadcaster.broadcast(broadcast).is_ok() {
@@ -1891,6 +1868,7 @@ pub struct InMemoryTickCommitter {
 
 impl TickCommitter for InMemoryTickCommitter {
     fn commit(&mut self, trace: TickTrace) -> Result<(), CommitError> {
+        validate_resource_ledger_for_commit(&trace)?;
         if self.fail_next {
             self.fail_next = false;
             return Err(CommitError::Failed("in-memory commit failed".to_string()));
@@ -1956,6 +1934,13 @@ where
     }
 }
 
+fn validate_resource_ledger_for_commit(trace: &TickTrace) -> Result<(), CommitError> {
+    trace
+        .resource_ledger
+        .validate_for_commit()
+        .map_err(|error| CommitError::Failed(format!("resource ledger validation failed: {error}")))
+}
+
 pub fn tick_trace_writes(trace: &TickTrace) -> Result<Vec<TickTraceWrite>, CommitError> {
     let environment = ReplayEnvironment {
         mods_lock: ModsLock::default(),
@@ -1975,6 +1960,8 @@ pub fn tick_trace_writes_with_environment(
     trace: &TickTrace,
     environment: &ReplayEnvironment,
 ) -> Result<Vec<TickTraceWrite>, CommitError> {
+    validate_resource_ledger_for_commit(trace)?;
+
     fn encode<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, CommitError> {
         serde_json::to_vec(value)
             .map_err(|error| CommitError::Failed(format!("encode {label}: {error}")))
@@ -2114,23 +2101,15 @@ fn execute_deterministic_with_loop(
         }
     }
 
-    let ledger_before_apply = world
-        .app
-        .world()
-        .resource::<ResourceLedger>()
-        .trace_snapshot();
     tick_loop.enter(TickPhase::Apply);
     world.run_tick_for(tick_loop.tick);
     let state_checksum = world.state_checksum();
     let state = TickState::capture(world.app.world_mut());
-    let mut resource_ledger = world
+    let resource_ledger = world
         .app
         .world()
         .resource::<ResourceLedger>()
         .trace_snapshot();
-    if resource_ledger.operations.is_empty() {
-        resource_ledger.operations = ledger_before_apply.operations;
-    }
     DeterministicExecution {
         commands: accepted,
         rejections,
@@ -2169,6 +2148,18 @@ pub(crate) fn replay_tick(
             tick: trace.tick,
             expected_checksum: trace.state_checksum,
             actual_checksum: replayed.state_checksum,
+        });
+    }
+    if trace.resource_ledger.validate_for_replay().is_err()
+        || replayed.resource_ledger.validate_for_commit().is_err()
+        || !trace
+            .resource_ledger
+            .replay_equivalent(&replayed.resource_ledger)
+    {
+        return Err(ReplayError::ResourceLedgerMismatch {
+            tick: trace.tick,
+            expected_checksum: trace.resource_ledger.ledger_checksum,
+            actual_checksum: replayed.resource_ledger.ledger_checksum,
         });
     }
 
@@ -2238,6 +2229,61 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
         | CommandAction::UpgradeController {
             object_id,
             target_id: controller_id,
+        }
+        | CommandAction::Attack {
+            object_id,
+            target_id: controller_id,
+            ..
+        }
+        | CommandAction::RangedAttack {
+            object_id,
+            target_id: controller_id,
+            ..
+        }
+        | CommandAction::Heal {
+            object_id,
+            target_id: controller_id,
+            ..
+        }
+        | CommandAction::Hack {
+            object_id,
+            target_id: controller_id,
+            ..
+        }
+        | CommandAction::Drain {
+            object_id,
+            target_id: controller_id,
+            ..
+        }
+        | CommandAction::Overload {
+            object_id,
+            target_id: controller_id,
+            ..
+        }
+        | CommandAction::Debilitate {
+            object_id,
+            target_id: controller_id,
+            ..
+        }
+        | CommandAction::Disrupt {
+            object_id,
+            target_id: controller_id,
+            ..
+        }
+        | CommandAction::Fortify {
+            object_id,
+            target_id: controller_id,
+            ..
+        }
+        | CommandAction::Leech {
+            object_id,
+            target_id: controller_id,
+            ..
+        }
+        | CommandAction::Fabricate {
+            object_id,
+            target_id: controller_id,
+            ..
         } => {
             remap_object_id(object_id, entity_map);
             remap_object_id(controller_id, entity_map);
@@ -2263,7 +2309,27 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
         }
         CommandAction::TransferToGlobal { .. }
         | CommandAction::TransferFromGlobal { .. }
-        | CommandAction::AlliedTransfer { .. } => {}
+        | CommandAction::AlliedTransfer { .. }
+        | CommandAction::CreateContractSettlement { .. }
+        | CommandAction::SettleContract { .. }
+        | CommandAction::CancelContract { .. }
+        | CommandAction::CreateMerchantQuote { .. }
+        | CommandAction::AcceptMerchantTrade { .. }
+        | CommandAction::CreateP2POffer { .. }
+        | CommandAction::AcceptP2POffer { .. }
+        | CommandAction::CancelP2POffer { .. }
+        | CommandAction::RefundP2POffer { .. }
+        | CommandAction::CreateAuction { .. }
+        | CommandAction::BidAuction { .. }
+        | CommandAction::SettleAuction { .. }
+        | CommandAction::CancelAuction { .. }
+        | CommandAction::CreateEscrow { .. }
+        | CommandAction::ReleaseEscrow { .. }
+        | CommandAction::RefundEscrow { .. }
+        | CommandAction::CreateLoanOffer { .. }
+        | CommandAction::AcceptLoan { .. }
+        | CommandAction::RepayLoan { .. }
+        | CommandAction::DefaultLoan { .. } => {}
     }
 }
 
@@ -2406,6 +2472,9 @@ pub struct WorldSnapshot {
     allied_transfer_cooldowns: AlliedTransferCooldowns,
     allied_transfer_daily_usage: AlliedTransferDailyUsage,
     allied_transfer_daily_tick: AlliedTransferDailyTick,
+    #[serde(default)]
+    settlement_state: SettlementState,
+    #[serde(default)]
     resource_ledger: ResourceLedger,
     starting_resources_granted: crate::systems::StartingResourcesGranted,
     player_first_spawn_tick: crate::systems::PlayerFirstSpawnTick,
@@ -2594,6 +2663,10 @@ impl WorldSnapshot {
                 .get_resource::<AlliedTransferDailyTick>()
                 .cloned()
                 .unwrap_or_default(),
+            settlement_state: world
+                .get_resource::<SettlementState>()
+                .cloned()
+                .unwrap_or_default(),
             resource_ledger: world.resource::<ResourceLedger>().clone(),
             starting_resources_granted: world
                 .resource::<crate::systems::StartingResourcesGranted>()
@@ -2668,6 +2741,7 @@ impl WorldSnapshot {
         world.insert_resource(self.allied_transfer_cooldowns);
         world.insert_resource(self.allied_transfer_daily_usage);
         world.insert_resource(self.allied_transfer_daily_tick);
+        world.insert_resource(self.settlement_state);
         *world.resource_mut::<ResourceLedger>() = self.resource_ledger;
         *world.resource_mut::<crate::systems::StartingResourcesGranted>() =
             self.starting_resources_granted;
@@ -2958,6 +3032,9 @@ mod tests {
         }
     }
 
+    #[derive(Resource, Debug, Default)]
+    struct LedgerValidationAttempts(u32);
+
     #[derive(Debug, Clone, Default)]
     struct FakeAtomicStore {
         writes: HashMap<Vec<u8>, Vec<u8>>,
@@ -2998,6 +3075,42 @@ mod tests {
             trace_events: Vec::new(),
             resource_ledger: ResourceLedgerTraceSnapshot::default(),
         }
+    }
+
+    fn transfer_to_global_trace() -> (TickState, TickTrace) {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerLocalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 20);
+        let previous_state = TickState::capture(world.app.world_mut());
+        let executor = StaticExecutor {
+            result: Ok(vec![CommandIntent {
+                sequence: 1,
+                action: CommandAction::TransferToGlobal {
+                    resource: "Energy".to_string(),
+                    amount: 10,
+                },
+            }]),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+        assert!(report.committed);
+        let trace = scheduler.committer.records[0].clone();
+        assert!(!trace.resource_ledger.operations.is_empty());
+        assert_ne!(trace.resource_ledger.ledger_digest, [0; 32]);
+        (previous_state, trace)
     }
 
     #[test]
@@ -3208,7 +3321,80 @@ mod tests {
                 .unwrap(),
             98
         );
-        assert_eq!(persisted_ledger.ledger_checksum, 442);
+        assert_ne!(persisted_ledger.ledger_checksum, 0);
+        assert!(persisted_ledger.conservation_imbalance.is_empty());
+    }
+
+    #[test]
+    fn tick_trace_resource_ledger_contains_command_and_system_phase_ops() {
+        fn test_system_phase_ledger_op(
+            mut ledger: ResMut<ResourceLedger>,
+            current_tick: Res<CurrentTick>,
+        ) {
+            ledger.record_account_transfer(
+                current_tick.0,
+                crate::resource_ledger::LedgerAccount::system("test_system_award"),
+                crate::resource_ledger::LedgerAccount::player(1),
+                "Energy",
+                3,
+                crate::resource_ledger::ResourceOperation::PvEAward,
+            );
+        }
+
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<PlayerLocalStorage>()
+            .0
+            .entry(1)
+            .or_default()
+            .insert("Energy".to_string(), 20);
+        world.app.add_systems(
+            Update,
+            test_system_phase_ledger_op.before(crate::resource_ledger::resource_ledger_system),
+        );
+        let executor = MetricsExecutor {
+            intents: vec![CommandIntent {
+                sequence: 1,
+                action: CommandAction::TransferToGlobal {
+                    resource: "Energy".to_string(),
+                    amount: 10,
+                },
+            }],
+            metrics: PlayerCollectMetrics::default(),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            EnvironmentRecordingCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(report.committed);
+        let trace = scheduler
+            .committer
+            .records
+            .first()
+            .expect("tick trace should be committed");
+        let operations = trace
+            .resource_ledger
+            .operations
+            .iter()
+            .map(|entry| entry.operation)
+            .collect::<Vec<_>>();
+        assert!(operations.contains(&crate::resource_ledger::ResourceOperation::GlobalDeposit));
+        assert!(operations.contains(&crate::resource_ledger::ResourceOperation::PvEAward));
+        assert!(trace.resource_ledger.conservation_imbalance.is_empty());
+        let ledger = scheduler.world.app.world().resource::<ResourceLedger>();
+        assert!(ledger.ops.is_empty());
+        assert!(ledger.balance_delta.is_empty());
+        assert!(ledger.account_delta.is_empty());
+        assert_ne!(ledger.ledger_checksum, 0);
+        assert_eq!(ledger.last_tick, trace.resource_ledger);
     }
 
     #[test]
@@ -3245,6 +3431,59 @@ mod tests {
         assert_eq!(record.fuel.entries[0].consumed, 777);
         assert_eq!(record.fuel.entries[0].refund_events, 2);
         assert_eq!(record.fuel.entries[0].refunded, 33);
+    }
+
+    #[test]
+    fn world_snapshot_without_resource_ledger_defaults_on_deserialize() {
+        let mut world = create_world();
+        world
+            .app
+            .world_mut()
+            .resource_mut::<ResourceLedger>()
+            .record(
+                0,
+                Some(1),
+                Some(2),
+                "Energy",
+                7,
+                crate::resource_ledger::ResourceOperation::AlliedTransfer,
+            );
+        let snapshot = WorldSnapshot::capture(world.app.world_mut());
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        value
+            .as_object_mut()
+            .expect("WorldSnapshot should serialize as object")
+            .remove("resource_ledger");
+
+        let restored: WorldSnapshot = serde_json::from_value(value).unwrap();
+
+        assert_eq!(restored.resource_ledger, ResourceLedger::default());
+        restored.restore(world.app.world_mut());
+        assert_eq!(
+            world.app.world().resource::<ResourceLedger>(),
+            &ResourceLedger::default()
+        );
+    }
+
+    #[test]
+    fn state_checksum_changes_for_ledger_only_mutation() {
+        let mut world = create_world();
+        let before = world.state_checksum();
+
+        world
+            .app
+            .world_mut()
+            .resource_mut::<ResourceLedger>()
+            .record(
+                0,
+                Some(1),
+                Some(2),
+                "Energy",
+                7,
+                crate::resource_ledger::ResourceOperation::AlliedTransfer,
+            );
+
+        assert_ne!(before, world.state_checksum());
     }
 
     #[test]
@@ -3349,6 +3588,24 @@ mod tests {
         assert_eq!(scheduler.broadcaster.broadcasts[1].player_id, 2);
         assert!(scheduler.broadcaster.broadcasts[0].full_snapshot);
         assert!(scheduler.broadcaster.broadcasts[1].full_snapshot);
+        assert!(
+            scheduler.broadcaster.broadcasts[0]
+                .removed_entities
+                .is_empty()
+        );
+        assert!(
+            scheduler.broadcaster.broadcasts[1]
+                .removed_entities
+                .is_empty()
+        );
+        assert_eq!(
+            scheduler.broadcaster.broadcasts[0].state_checksum,
+            scheduler.committer.records[0].state_checksum
+        );
+        assert_eq!(
+            scheduler.broadcaster.broadcasts[1].state_checksum,
+            scheduler.committer.records[0].state_checksum
+        );
         assert!(
             scheduler.broadcaster.broadcasts[0]
                 .changed_entities
@@ -3795,7 +4052,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_tick_broadcast_includes_removed_visible_entities() {
+    fn normal_tick_full_snapshot_replaces_visible_state_with_empty_removals() {
         let mut world = create_world();
         let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
         let drone_id = object_id(drone);
@@ -3828,7 +4085,7 @@ mod tests {
                 |entity| matches!(entity, VisibleEntity::Drone(drone) if drone.id == drone_id)
             )
         );
-        assert_eq!(broadcast.removed_entities, vec![drone_id]);
+        assert!(broadcast.removed_entities.is_empty());
     }
 
     #[test]
@@ -4064,6 +4321,73 @@ mod tests {
     }
 
     #[test]
+    fn replay_tick_fails_when_resource_ledger_trace_is_tampered() {
+        let (previous_state, mut trace) = transfer_to_global_trace();
+        trace.resource_ledger.ledger_checksum =
+            trace.resource_ledger.ledger_checksum.wrapping_add(1);
+
+        let error =
+            replay_tick(&previous_state, &trace).expect_err("replay should detect ledger tamper");
+
+        assert!(matches!(
+            error,
+            ReplayError::ResourceLedgerMismatch { tick: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn replay_tick_fails_when_resource_ledger_digest_is_tampered() {
+        let (previous_state, mut trace) = transfer_to_global_trace();
+        trace.resource_ledger.ledger_digest[0] ^= 0x01;
+
+        let error =
+            replay_tick(&previous_state, &trace).expect_err("replay should detect digest tamper");
+
+        assert!(matches!(
+            error,
+            ReplayError::ResourceLedgerMismatch { tick: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn replay_tick_fails_when_resource_ledger_resource_is_tampered() {
+        let (previous_state, mut trace) = transfer_to_global_trace();
+        trace.resource_ledger.operations[0].resource = "Mineral".to_string();
+
+        let error = replay_tick(&previous_state, &trace)
+            .expect_err("replay should detect ledger resource tamper");
+
+        assert!(matches!(
+            error,
+            ReplayError::ResourceLedgerMismatch { tick: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn replay_tick_fails_when_resource_ledger_operation_is_tampered() {
+        let (previous_state, mut trace) = transfer_to_global_trace();
+        trace.resource_ledger.operations[0].operation =
+            crate::resource_ledger::ResourceOperation::PvEAward;
+
+        let error = replay_tick(&previous_state, &trace)
+            .expect_err("replay should detect ledger operation tamper");
+
+        assert!(matches!(
+            error,
+            ReplayError::ResourceLedgerMismatch { tick: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn replay_tick_accepts_legacy_zero_resource_ledger_digest() {
+        let (previous_state, mut trace) = transfer_to_global_trace();
+        trace.resource_ledger.previous_ledger_digest = [0; 32];
+        trace.resource_ledger.ledger_digest = [0; 32];
+
+        replay_tick(&previous_state, &trace).expect("legacy zero-digest trace should replay");
+    }
+
+    #[test]
     fn replay_replays_multiple_traces_in_order() {
         let mut world = create_world();
         let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
@@ -4209,6 +4533,137 @@ mod tests {
             q.single(world).unwrap().y
         };
         assert_eq!(drone_y, 10);
+    }
+
+    #[test]
+    fn conservation_imbalance_prevents_commit_and_broadcast() {
+        fn imbalanced_ledger_system(
+            mut ledger: ResMut<ResourceLedger>,
+            current_tick: Res<CurrentTick>,
+        ) {
+            ledger.record_transfer_amounts(
+                current_tick.0,
+                Some(1),
+                Some(2),
+                "Energy",
+                10,
+                9,
+                crate::resource_ledger::ResourceOperation::LocalTransfer,
+                0,
+                0,
+            );
+        }
+
+        let mut world = create_world();
+        let before = world.state_checksum();
+        world.app.add_systems(
+            Update,
+            imbalanced_ledger_system.before(crate::resource_ledger::resource_ledger_system),
+        );
+        let executor = StaticExecutor {
+            result: Ok(Vec::new()),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(!report.committed);
+        assert!(!report.broadcasted);
+        assert_eq!(report.metrics.commit_failures, MAX_COMMIT_ATTEMPTS as u64);
+        assert_eq!(scheduler.tick_counter, 0);
+        assert_eq!(scheduler.world.tick_head(), 0);
+        assert_eq!(scheduler.committer.records.len(), 0);
+        assert_eq!(scheduler.broadcaster.broadcasts.len(), 0);
+        assert_eq!(before, scheduler.world.state_checksum());
+    }
+
+    #[test]
+    fn conservation_validation_retry_restores_world_snapshot() {
+        fn flaky_ledger_system(
+            mut attempts: ResMut<LedgerValidationAttempts>,
+            mut local_storage: ResMut<PlayerLocalStorage>,
+            mut ledger: ResMut<ResourceLedger>,
+            current_tick: Res<CurrentTick>,
+        ) {
+            attempts.0 += 1;
+            *local_storage
+                .0
+                .entry(1)
+                .or_default()
+                .entry("Energy".to_string())
+                .or_default() += 10;
+            let delivered = if attempts.0 == 1 { 9 } else { 10 };
+            ledger.record_transfer_amounts(
+                current_tick.0,
+                Some(1),
+                Some(2),
+                "Energy",
+                10,
+                delivered,
+                crate::resource_ledger::ResourceOperation::LocalTransfer,
+                0,
+                0,
+            );
+        }
+
+        let mut world = create_world();
+        world
+            .app
+            .insert_resource(LedgerValidationAttempts::default());
+        world.app.add_systems(
+            Update,
+            flaky_ledger_system.before(crate::resource_ledger::resource_ledger_system),
+        );
+        let executor = StaticExecutor {
+            result: Ok(Vec::new()),
+        };
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            executor,
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(report.committed);
+        assert_eq!(report.metrics.commit_failures, 1);
+        assert_eq!(scheduler.tick_counter, 1);
+        assert_eq!(scheduler.committer.records.len(), 1);
+        assert_eq!(
+            scheduler
+                .world
+                .app
+                .world()
+                .resource::<LedgerValidationAttempts>()
+                .0,
+            2
+        );
+        assert_eq!(
+            scheduler
+                .world
+                .app
+                .world()
+                .resource::<PlayerLocalStorage>()
+                .0
+                .get(&1)
+                .unwrap()
+                .get("Energy"),
+            Some(&10)
+        );
+        assert!(
+            scheduler.committer.records[0]
+                .resource_ledger
+                .conservation_imbalance
+                .is_empty()
+        );
     }
 
     #[test]

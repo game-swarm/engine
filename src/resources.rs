@@ -10,7 +10,7 @@ pub type ResourceAmount = u32;
 pub type ResourceCost = IndexMap<ResourceName, ResourceAmount>;
 
 pub const TRANSFER_TO_GLOBAL_TICKS: Tick = 10;
-pub const TRANSFER_FROM_GLOBAL_TICKS: Tick = 5;
+pub const TRANSFER_FROM_GLOBAL_TICKS: Tick = 100;
 pub const TRANSFER_TO_GLOBAL_FEE_PER_10_000: u32 = 100;
 pub const TRANSFER_FROM_GLOBAL_FEE_PER_10_000: u32 = 500;
 pub const GLOBAL_STORAGE_INTERCEPT_RANGE: u32 = 3;
@@ -91,6 +91,146 @@ pub struct PlayerLocalStorage(pub IndexMap<PlayerId, ResourceCost>);
 #[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerGlobalStorage(pub IndexMap<PlayerId, ResourceCost>);
 
+pub type SettlementId = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum SettlementKind {
+    Contract,
+    MerchantTrade,
+    P2POffer,
+    Auction,
+    Escrow,
+    Lending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum SettlementPhase {
+    Reserve,
+    Accept,
+    Settle,
+    Cancel,
+    Refund,
+    Repay,
+    Default,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SettlementKey {
+    pub kind: SettlementKind,
+    pub id: SettlementId,
+    pub phase: SettlementPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SettlementStatus {
+    Open,
+    Accepted,
+    Settled,
+    Cancelled,
+    Refunded,
+    Repaid,
+    Defaulted,
+}
+
+impl SettlementStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Settled | Self::Cancelled | Self::Refunded | Self::Repaid | Self::Defaulted
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementIdNonce {
+    pub owner: PlayerId,
+    pub nonce: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContractSettlement {
+    pub owner: PlayerId,
+    pub counterparty: Option<PlayerId>,
+    pub input_resource: ResourceName,
+    pub input_amount: ResourceAmount,
+    pub output_resource: ResourceName,
+    pub output_amount: ResourceAmount,
+    pub expires_at: Option<Tick>,
+    pub status: SettlementStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MerchantQuote {
+    pub player_id: PlayerId,
+    pub pay_resource: ResourceName,
+    pub pay_amount: ResourceAmount,
+    pub receive_resource: ResourceName,
+    pub receive_amount: ResourceAmount,
+    pub expires_at: Tick,
+    pub status: SettlementStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct P2POffer {
+    pub maker: PlayerId,
+    pub taker: Option<PlayerId>,
+    pub give_resource: ResourceName,
+    pub give_amount: ResourceAmount,
+    pub want_resource: ResourceName,
+    pub want_amount: ResourceAmount,
+    pub expires_at: Tick,
+    pub status: SettlementStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuctionSettlement {
+    pub seller: PlayerId,
+    pub lot_resource: ResourceName,
+    pub lot_amount: ResourceAmount,
+    pub bid_resource: ResourceName,
+    pub min_bid: ResourceAmount,
+    pub ends_at: Tick,
+    pub high_bidder: Option<PlayerId>,
+    pub high_bid: ResourceAmount,
+    pub status: SettlementStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EscrowSettlement {
+    pub payer: PlayerId,
+    pub payee: PlayerId,
+    pub arbiter: PlayerId,
+    pub resource: ResourceName,
+    pub amount: ResourceAmount,
+    pub status: SettlementStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LendingSettlement {
+    pub lender: PlayerId,
+    pub borrower: PlayerId,
+    pub resource: ResourceName,
+    pub principal: ResourceAmount,
+    pub repay_amount: ResourceAmount,
+    pub due_at: Tick,
+    pub accepted: bool,
+    pub status: SettlementStatus,
+}
+
+#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SettlementState {
+    pub id_nonces: IndexMap<SettlementId, SettlementIdNonce>,
+    pub reserves: IndexMap<(SettlementKind, SettlementId), ResourceCost>,
+    pub receipts: IndexMap<SettlementKey, bool>,
+    pub contracts: IndexMap<SettlementId, ContractSettlement>,
+    pub merchant_quotes: IndexMap<SettlementId, MerchantQuote>,
+    pub p2p_offers: IndexMap<SettlementId, P2POffer>,
+    pub auctions: IndexMap<SettlementId, AuctionSettlement>,
+    pub escrows: IndexMap<SettlementId, EscrowSettlement>,
+    pub loans: IndexMap<SettlementId, LendingSettlement>,
+}
+
 #[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingGlobalTransfers(pub Vec<PendingGlobalTransfer>);
 
@@ -146,7 +286,7 @@ impl Default for GlobalStorageConfig {
             namespace: "default".to_string(),
             intercept_enabled: true,
             intercept_range: GLOBAL_STORAGE_INTERCEPT_RANGE,
-            capacity: 100_000,
+            capacity: 1_000_000,
             transfer_to_global_ticks: TRANSFER_TO_GLOBAL_TICKS,
             transfer_from_global_ticks: TRANSFER_FROM_GLOBAL_TICKS,
             transfer_to_global_fee_per_10_000: TRANSFER_TO_GLOBAL_FEE_PER_10_000,
@@ -349,6 +489,17 @@ fn add_cost(total: &mut ResourceCost, cost: &ResourceCost) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_storage_defaults_match_resource_ledger() {
+        let config = GlobalStorageConfig::default();
+
+        assert_eq!(config.capacity, 1_000_000);
+        assert_eq!(config.transfer_to_global_ticks, 10);
+        assert_eq!(config.transfer_from_global_ticks, 100);
+        assert_eq!(config.transfer_to_global_fee_per_10_000, 100);
+        assert_eq!(config.transfer_from_global_fee_per_10_000, 500);
+    }
 
     #[test]
     fn pve_output_tracker_caps_energy_and_crystal_per_tick() {

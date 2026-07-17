@@ -1,19 +1,23 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
+use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeSet, HashSet};
+use ts_rs::TS;
 
 use crate::components::*;
 use crate::onboarding::{OnboardingEvent, send_onboarding_event};
-use crate::resource_ledger::{ResourceLedger, ResourceOperation};
+use crate::resource_ledger::{LedgerAccount, ResourceLedger, ResourceOperation};
 use crate::resources::{
     ALLIED_DAILY_CAP, ALLIED_TRANSFER_COOLDOWN, ALLIED_TRANSFER_DELAY, ALLIED_TRANSFER_FEE_BP,
-    AlliedTransferCooldowns, AlliedTransferDailyUsage, CurrentTick, GlobalStorageConfig,
-    GlobalTransferDirection, PendingAlliedTransfer, PendingAlliedTransfers, PendingGlobalTransfer,
+    AlliedTransferCooldowns, AlliedTransferDailyUsage, AuctionSettlement, ContractSettlement,
+    CurrentTick, EscrowSettlement, GlobalStorageConfig, GlobalTransferDirection, LendingSettlement,
+    MerchantQuote, P2POffer, PendingAlliedTransfer, PendingAlliedTransfers, PendingGlobalTransfer,
     PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage, ResourceCost,
-    ResourceRegistry,
+    ResourceRegistry, SettlementId, SettlementIdNonce, SettlementKey, SettlementKind,
+    SettlementPhase, SettlementState, SettlementStatus,
 };
 use crate::systems::{
     PendingControllerUpgrade, PendingDamage, PendingHeal, PendingSpawn, PendingSpawnQueue,
@@ -39,7 +43,7 @@ const ADMIN_SCOPE: &str = "swarm:admin";
 #[derive(Resource, Debug, Clone, Default)]
 pub struct CustomActionCooldowns(pub(crate) IndexMap<(ObjectId, String), Tick>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 pub enum CommandSource {
     Wasm,
     McpDeploy,
@@ -55,7 +59,7 @@ pub enum CommandSource {
     DryRun,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 pub enum Direction {
     Top,
     TopRight,
@@ -65,7 +69,10 @@ pub enum Direction {
     TopLeft,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[schemars(tag = "type")]
+#[schemars(deny_unknown_fields)]
+#[ts(tag = "type")]
 pub enum CommandAction {
     // --- Phase 1 commands ---
     Move {
@@ -91,6 +98,140 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
+    Attack {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    RangedAttack {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    Heal {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    Hack {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    Drain {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    Overload {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    Debilitate {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    Disrupt {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    Fortify {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    Leech {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    Fabricate {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        #[schemars(with = "Option<String>")]
+        #[ts(type = "string | null")]
+        structure: Option<StructureType>,
+        damage_type: Option<String>,
+        cooldown: Option<u32>,
+    },
+    #[schemars(skip)]
+    #[ts(skip)]
     Action {
         action_type: String,
         object_id: ObjectId,
@@ -113,6 +254,8 @@ pub enum CommandAction {
         object_id: ObjectId,
         x: i32,
         y: i32,
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
         structure: StructureType,
     },
     Repair {
@@ -136,6 +279,104 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
+    CreateContractSettlement {
+        settlement_id: SettlementId,
+        nonce: u64,
+        input_resource: String,
+        input_amount: u32,
+        output_resource: String,
+        output_amount: u32,
+        counterparty: Option<PlayerId>,
+        expires_at: Option<Tick>,
+    },
+    SettleContract {
+        settlement_id: SettlementId,
+    },
+    CancelContract {
+        settlement_id: SettlementId,
+    },
+    CreateMerchantQuote {
+        quote_id: SettlementId,
+        player_id: PlayerId,
+        pay_resource: String,
+        pay_amount: u32,
+        receive_resource: String,
+        receive_amount: u32,
+        expires_at: Tick,
+    },
+    AcceptMerchantTrade {
+        quote_id: SettlementId,
+        min_receive: u32,
+    },
+    CreateP2POffer {
+        offer_id: SettlementId,
+        nonce: u64,
+        give_resource: String,
+        give_amount: u32,
+        want_resource: String,
+        want_amount: u32,
+        expires_at: Tick,
+    },
+    AcceptP2POffer {
+        offer_id: SettlementId,
+    },
+    CancelP2POffer {
+        offer_id: SettlementId,
+    },
+    RefundP2POffer {
+        offer_id: SettlementId,
+    },
+    CreateAuction {
+        auction_id: SettlementId,
+        nonce: u64,
+        lot_resource: String,
+        lot_amount: u32,
+        bid_resource: String,
+        min_bid: u32,
+        ends_at: Tick,
+    },
+    BidAuction {
+        auction_id: SettlementId,
+        bid_amount: u32,
+    },
+    SettleAuction {
+        auction_id: SettlementId,
+    },
+    CancelAuction {
+        auction_id: SettlementId,
+    },
+    CreateEscrow {
+        escrow_id: SettlementId,
+        nonce: u64,
+        payee: PlayerId,
+        arbiter: PlayerId,
+        resource: String,
+        amount: u32,
+    },
+    ReleaseEscrow {
+        escrow_id: SettlementId,
+    },
+    RefundEscrow {
+        escrow_id: SettlementId,
+    },
+    CreateLoanOffer {
+        loan_id: SettlementId,
+        nonce: u64,
+        borrower: PlayerId,
+        resource: String,
+        principal: u32,
+        repay_amount: u32,
+        due_at: Tick,
+    },
+    AcceptLoan {
+        loan_id: SettlementId,
+    },
+    RepayLoan {
+        loan_id: SettlementId,
+    },
+    DefaultLoan {
+        loan_id: SettlementId,
+    },
 }
 
 pub const CORE_COMMAND_ACTIONS: &[&str] = &[
@@ -143,7 +384,6 @@ pub const CORE_COMMAND_ACTIONS: &[&str] = &[
     "Harvest",
     "Transfer",
     "Withdraw",
-    "Action",
     "ClaimController",
     "Spawn",
     "Recycle",
@@ -153,6 +393,26 @@ pub const CORE_COMMAND_ACTIONS: &[&str] = &[
     "TransferToGlobal",
     "TransferFromGlobal",
     "AlliedTransfer",
+    "CreateContractSettlement",
+    "SettleContract",
+    "CancelContract",
+    "CreateMerchantQuote",
+    "AcceptMerchantTrade",
+    "CreateP2POffer",
+    "AcceptP2POffer",
+    "CancelP2POffer",
+    "RefundP2POffer",
+    "CreateAuction",
+    "BidAuction",
+    "SettleAuction",
+    "CancelAuction",
+    "CreateEscrow",
+    "ReleaseEscrow",
+    "RefundEscrow",
+    "CreateLoanOffer",
+    "AcceptLoan",
+    "RepayLoan",
+    "DefaultLoan",
 ];
 
 pub const SPECIAL_COMMAND_ACTIONS: &[&str] = &[
@@ -168,6 +428,377 @@ pub const SPECIAL_COMMAND_ACTIONS: &[&str] = &[
     "Leech",
     "Fabricate",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandSchemaField {
+    pub name: &'static str,
+    pub type_name: &'static str,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommandSchemaMetadata {
+    pub settlement_kind: Option<&'static str>,
+    pub settlement_phase: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSchemaBranch {
+    pub name: &'static str,
+    pub fields: Vec<CommandSchemaField>,
+    pub metadata: CommandSchemaMetadata,
+    pub custom_wildcard: bool,
+}
+
+const fn schema_field(name: &'static str, type_name: &'static str) -> CommandSchemaField {
+    CommandSchemaField {
+        name,
+        type_name,
+        required: true,
+    }
+}
+
+const fn optional_schema_field(name: &'static str, type_name: &'static str) -> CommandSchemaField {
+    CommandSchemaField {
+        name,
+        type_name,
+        required: false,
+    }
+}
+
+fn schema_branch(name: &'static str, fields: &[CommandSchemaField]) -> CommandSchemaBranch {
+    CommandSchemaBranch {
+        name,
+        fields: fields.to_vec(),
+        metadata: CommandSchemaMetadata::default(),
+        custom_wildcard: false,
+    }
+}
+
+fn settlement_schema_branch(
+    name: &'static str,
+    kind: &'static str,
+    phase: &'static str,
+    fields: &[CommandSchemaField],
+) -> CommandSchemaBranch {
+    CommandSchemaBranch {
+        name,
+        fields: fields.to_vec(),
+        metadata: CommandSchemaMetadata {
+            settlement_kind: Some(kind),
+            settlement_phase: Some(phase),
+        },
+        custom_wildcard: false,
+    }
+}
+
+pub fn core_command_schema_branches() -> Vec<CommandSchemaBranch> {
+    vec![
+        schema_branch(
+            "Move",
+            &[
+                schema_field("object_id", "ObjectId"),
+                schema_field("direction", "Direction"),
+            ],
+        ),
+        schema_branch(
+            "Harvest",
+            &[
+                schema_field("object_id", "ObjectId"),
+                schema_field("target_id", "ObjectId"),
+                optional_schema_field("resource", "ResourceName"),
+            ],
+        ),
+        schema_branch(
+            "Transfer",
+            &[
+                schema_field("object_id", "ObjectId"),
+                schema_field("target_id", "ObjectId"),
+                schema_field("resource", "ResourceName"),
+                schema_field("amount", "ResourceAmount"),
+            ],
+        ),
+        schema_branch(
+            "Withdraw",
+            &[
+                schema_field("object_id", "ObjectId"),
+                schema_field("target_id", "ObjectId"),
+                schema_field("resource", "ResourceName"),
+                schema_field("amount", "ResourceAmount"),
+            ],
+        ),
+        schema_branch(
+            "ClaimController",
+            &[
+                schema_field("object_id", "ObjectId"),
+                schema_field("target_id", "ObjectId"),
+            ],
+        ),
+        schema_branch(
+            "Spawn",
+            &[
+                schema_field("object_id", "ObjectId"),
+                schema_field("spawn_id", "ObjectId"),
+                schema_field("body_parts", "BodyPart[]"),
+            ],
+        ),
+        schema_branch("Recycle", &[schema_field("object_id", "ObjectId")]),
+        schema_branch(
+            "Build",
+            &[
+                schema_field("object_id", "ObjectId"),
+                schema_field("x", "i32"),
+                schema_field("y", "i32"),
+                schema_field("structure", "StructureType"),
+            ],
+        ),
+        schema_branch(
+            "Repair",
+            &[
+                schema_field("object_id", "ObjectId"),
+                schema_field("target_id", "ObjectId"),
+            ],
+        ),
+        schema_branch(
+            "UpgradeController",
+            &[
+                schema_field("object_id", "ObjectId"),
+                schema_field("target_id", "ObjectId"),
+            ],
+        ),
+        schema_branch(
+            "TransferToGlobal",
+            &[
+                schema_field("resource", "ResourceName"),
+                schema_field("amount", "ResourceAmount"),
+            ],
+        ),
+        schema_branch(
+            "TransferFromGlobal",
+            &[
+                schema_field("resource", "ResourceName"),
+                schema_field("amount", "ResourceAmount"),
+            ],
+        ),
+        schema_branch(
+            "AlliedTransfer",
+            &[
+                schema_field("target_player", "PlayerId"),
+                schema_field("resource", "ResourceName"),
+                schema_field("amount", "ResourceAmount"),
+            ],
+        ),
+        settlement_schema_branch(
+            "CreateContractSettlement",
+            "Contract",
+            "Reserve",
+            &[
+                schema_field("settlement_id", "u64"),
+                schema_field("nonce", "u64"),
+                schema_field("input_resource", "ResourceName"),
+                schema_field("input_amount", "ResourceAmount"),
+                schema_field("output_resource", "ResourceName"),
+                schema_field("output_amount", "ResourceAmount"),
+                optional_schema_field("counterparty", "PlayerId"),
+                optional_schema_field("expires_at", "u64"),
+            ],
+        ),
+        settlement_schema_branch(
+            "SettleContract",
+            "Contract",
+            "Settle",
+            &[schema_field("settlement_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "CancelContract",
+            "Contract",
+            "Cancel",
+            &[schema_field("settlement_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "CreateMerchantQuote",
+            "MerchantTrade",
+            "Reserve",
+            &[
+                schema_field("quote_id", "u64"),
+                schema_field("player_id", "PlayerId"),
+                schema_field("pay_resource", "ResourceName"),
+                schema_field("pay_amount", "ResourceAmount"),
+                schema_field("receive_resource", "ResourceName"),
+                schema_field("receive_amount", "ResourceAmount"),
+                schema_field("expires_at", "u64"),
+            ],
+        ),
+        settlement_schema_branch(
+            "AcceptMerchantTrade",
+            "MerchantTrade",
+            "Settle",
+            &[
+                schema_field("quote_id", "u64"),
+                schema_field("min_receive", "ResourceAmount"),
+            ],
+        ),
+        settlement_schema_branch(
+            "CreateP2POffer",
+            "P2POffer",
+            "Reserve",
+            &[
+                schema_field("offer_id", "u64"),
+                schema_field("nonce", "u64"),
+                schema_field("give_resource", "ResourceName"),
+                schema_field("give_amount", "ResourceAmount"),
+                schema_field("want_resource", "ResourceName"),
+                schema_field("want_amount", "ResourceAmount"),
+                schema_field("expires_at", "u64"),
+            ],
+        ),
+        settlement_schema_branch(
+            "AcceptP2POffer",
+            "P2POffer",
+            "Accept",
+            &[schema_field("offer_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "CancelP2POffer",
+            "P2POffer",
+            "Cancel",
+            &[schema_field("offer_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "RefundP2POffer",
+            "P2POffer",
+            "Refund",
+            &[schema_field("offer_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "CreateAuction",
+            "Auction",
+            "Reserve",
+            &[
+                schema_field("auction_id", "u64"),
+                schema_field("nonce", "u64"),
+                schema_field("lot_resource", "ResourceName"),
+                schema_field("lot_amount", "ResourceAmount"),
+                schema_field("bid_resource", "ResourceName"),
+                schema_field("min_bid", "ResourceAmount"),
+                schema_field("ends_at", "u64"),
+            ],
+        ),
+        settlement_schema_branch(
+            "BidAuction",
+            "Auction",
+            "Accept",
+            &[
+                schema_field("auction_id", "u64"),
+                schema_field("bid_amount", "ResourceAmount"),
+            ],
+        ),
+        settlement_schema_branch(
+            "SettleAuction",
+            "Auction",
+            "Settle",
+            &[schema_field("auction_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "CancelAuction",
+            "Auction",
+            "Cancel",
+            &[schema_field("auction_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "CreateEscrow",
+            "Escrow",
+            "Reserve",
+            &[
+                schema_field("escrow_id", "u64"),
+                schema_field("nonce", "u64"),
+                schema_field("payee", "PlayerId"),
+                schema_field("arbiter", "PlayerId"),
+                schema_field("resource", "ResourceName"),
+                schema_field("amount", "ResourceAmount"),
+            ],
+        ),
+        settlement_schema_branch(
+            "ReleaseEscrow",
+            "Escrow",
+            "Settle",
+            &[schema_field("escrow_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "RefundEscrow",
+            "Escrow",
+            "Refund",
+            &[schema_field("escrow_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "CreateLoanOffer",
+            "Lending",
+            "Reserve",
+            &[
+                schema_field("loan_id", "u64"),
+                schema_field("nonce", "u64"),
+                schema_field("borrower", "PlayerId"),
+                schema_field("resource", "ResourceName"),
+                schema_field("principal", "ResourceAmount"),
+                schema_field("repay_amount", "ResourceAmount"),
+                schema_field("due_at", "u64"),
+            ],
+        ),
+        settlement_schema_branch(
+            "AcceptLoan",
+            "Lending",
+            "Accept",
+            &[schema_field("loan_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "RepayLoan",
+            "Lending",
+            "Repay",
+            &[schema_field("loan_id", "u64")],
+        ),
+        settlement_schema_branch(
+            "DefaultLoan",
+            "Lending",
+            "Default",
+            &[schema_field("loan_id", "u64")],
+        ),
+    ]
+}
+
+pub fn command_schema_branches() -> Vec<CommandSchemaBranch> {
+    let mut branches = core_command_schema_branches();
+    for name in SPECIAL_COMMAND_ACTIONS {
+        branches.push(schema_branch(
+            name,
+            &[
+                schema_field("object_id", "ObjectId"),
+                schema_field("target_id", "ObjectId"),
+                optional_schema_field("resource", "ResourceName"),
+                optional_schema_field("amount", "ResourceAmount"),
+                optional_schema_field("range", "u32"),
+                optional_schema_field("structure", "StructureType"),
+                optional_schema_field("damage_type", "DamageType"),
+                optional_schema_field("cooldown", "u32"),
+            ],
+        ));
+    }
+    branches.push(CommandSchemaBranch {
+        name: "CustomAction",
+        fields: vec![
+            schema_field("object_id", "ObjectId"),
+            optional_schema_field("target_id", "ObjectId"),
+            optional_schema_field("resource", "ResourceName"),
+            optional_schema_field("amount", "ResourceAmount"),
+            optional_schema_field("range", "u32"),
+            optional_schema_field("structure", "StructureType"),
+            optional_schema_field("damage_type", "DamageType"),
+            optional_schema_field("cooldown", "u32"),
+        ],
+        metadata: CommandSchemaMetadata::default(),
+        custom_wildcard: true,
+    });
+    branches
+}
 
 impl<'de> Deserialize<'de> for CommandAction {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -210,11 +841,7 @@ impl<'de> Deserialize<'de> for CommandAction {
                 resource: required_action_field(fields, "resource")?,
                 amount: required_action_field(fields, "amount")?,
             },
-            "Action" => {
-                return Err(serde::de::Error::custom(
-                    "wire type Action is internal; use the concrete registered action name",
-                ));
-            }
+            "Action" => legacy_action_wrapper(fields)?,
             "ClaimController" => Self::ClaimController {
                 object_id: required_exact_action_field(
                     fields,
@@ -282,12 +909,159 @@ impl<'de> Deserialize<'de> for CommandAction {
                 resource: required_action_field(fields, "resource")?,
                 amount: required_action_field(fields, "amount")?,
             },
-            action if SPECIAL_COMMAND_ACTIONS.contains(&action) => Self::Action {
-                action_type: action.to_string(),
-                object_id: required_action_field(fields, "object_id")?,
-                target_id: Some(required_action_field(fields, "target_id")?),
-                payload: command_action_payload(fields)?,
+            "CreateContractSettlement" => Self::CreateContractSettlement {
+                settlement_id: required_exact_action_field(
+                    fields,
+                    CREATE_CONTRACT_ACTION_FIELDS,
+                    "settlement_id",
+                )?,
+                nonce: required_action_field(fields, "nonce")?,
+                input_resource: required_action_field(fields, "input_resource")?,
+                input_amount: required_action_field(fields, "input_amount")?,
+                output_resource: required_action_field(fields, "output_resource")?,
+                output_amount: required_action_field(fields, "output_amount")?,
+                counterparty: optional_action_field(fields, "counterparty")?,
+                expires_at: optional_action_field(fields, "expires_at")?,
             },
+            "SettleContract" => Self::SettleContract {
+                settlement_id: required_exact_action_field(
+                    fields,
+                    SETTLEMENT_ID_ACTION_FIELDS,
+                    "settlement_id",
+                )?,
+            },
+            "CancelContract" => Self::CancelContract {
+                settlement_id: required_exact_action_field(
+                    fields,
+                    SETTLEMENT_ID_ACTION_FIELDS,
+                    "settlement_id",
+                )?,
+            },
+            "CreateMerchantQuote" => Self::CreateMerchantQuote {
+                quote_id: required_exact_action_field(
+                    fields,
+                    CREATE_MERCHANT_QUOTE_ACTION_FIELDS,
+                    "quote_id",
+                )?,
+                player_id: required_action_field(fields, "player_id")?,
+                pay_resource: required_action_field(fields, "pay_resource")?,
+                pay_amount: required_action_field(fields, "pay_amount")?,
+                receive_resource: required_action_field(fields, "receive_resource")?,
+                receive_amount: required_action_field(fields, "receive_amount")?,
+                expires_at: required_action_field(fields, "expires_at")?,
+            },
+            "AcceptMerchantTrade" => Self::AcceptMerchantTrade {
+                quote_id: required_exact_action_field(
+                    fields,
+                    MERCHANT_ACCEPT_ACTION_FIELDS,
+                    "quote_id",
+                )?,
+                min_receive: required_action_field(fields, "min_receive")?,
+            },
+            "CreateP2POffer" => Self::CreateP2POffer {
+                offer_id: required_exact_action_field(
+                    fields,
+                    CREATE_P2P_OFFER_ACTION_FIELDS,
+                    "offer_id",
+                )?,
+                nonce: required_action_field(fields, "nonce")?,
+                give_resource: required_action_field(fields, "give_resource")?,
+                give_amount: required_action_field(fields, "give_amount")?,
+                want_resource: required_action_field(fields, "want_resource")?,
+                want_amount: required_action_field(fields, "want_amount")?,
+                expires_at: required_action_field(fields, "expires_at")?,
+            },
+            "AcceptP2POffer" => Self::AcceptP2POffer {
+                offer_id: required_exact_action_field(fields, OFFER_ID_ACTION_FIELDS, "offer_id")?,
+            },
+            "CancelP2POffer" => Self::CancelP2POffer {
+                offer_id: required_exact_action_field(fields, OFFER_ID_ACTION_FIELDS, "offer_id")?,
+            },
+            "RefundP2POffer" => Self::RefundP2POffer {
+                offer_id: required_exact_action_field(fields, OFFER_ID_ACTION_FIELDS, "offer_id")?,
+            },
+            "CreateAuction" => Self::CreateAuction {
+                auction_id: required_exact_action_field(
+                    fields,
+                    CREATE_AUCTION_ACTION_FIELDS,
+                    "auction_id",
+                )?,
+                nonce: required_action_field(fields, "nonce")?,
+                lot_resource: required_action_field(fields, "lot_resource")?,
+                lot_amount: required_action_field(fields, "lot_amount")?,
+                bid_resource: required_action_field(fields, "bid_resource")?,
+                min_bid: required_action_field(fields, "min_bid")?,
+                ends_at: required_action_field(fields, "ends_at")?,
+            },
+            "BidAuction" => Self::BidAuction {
+                auction_id: required_exact_action_field(
+                    fields,
+                    BID_AUCTION_ACTION_FIELDS,
+                    "auction_id",
+                )?,
+                bid_amount: required_action_field(fields, "bid_amount")?,
+            },
+            "SettleAuction" => Self::SettleAuction {
+                auction_id: required_exact_action_field(
+                    fields,
+                    AUCTION_ID_ACTION_FIELDS,
+                    "auction_id",
+                )?,
+            },
+            "CancelAuction" => Self::CancelAuction {
+                auction_id: required_exact_action_field(
+                    fields,
+                    AUCTION_ID_ACTION_FIELDS,
+                    "auction_id",
+                )?,
+            },
+            "CreateEscrow" => Self::CreateEscrow {
+                escrow_id: required_exact_action_field(
+                    fields,
+                    CREATE_ESCROW_ACTION_FIELDS,
+                    "escrow_id",
+                )?,
+                nonce: required_action_field(fields, "nonce")?,
+                payee: required_action_field(fields, "payee")?,
+                arbiter: required_action_field(fields, "arbiter")?,
+                resource: required_action_field(fields, "resource")?,
+                amount: required_action_field(fields, "amount")?,
+            },
+            "ReleaseEscrow" => Self::ReleaseEscrow {
+                escrow_id: required_exact_action_field(
+                    fields,
+                    ESCROW_ID_ACTION_FIELDS,
+                    "escrow_id",
+                )?,
+            },
+            "RefundEscrow" => Self::RefundEscrow {
+                escrow_id: required_exact_action_field(
+                    fields,
+                    ESCROW_ID_ACTION_FIELDS,
+                    "escrow_id",
+                )?,
+            },
+            "CreateLoanOffer" => Self::CreateLoanOffer {
+                loan_id: required_exact_action_field(fields, CREATE_LOAN_ACTION_FIELDS, "loan_id")?,
+                nonce: required_action_field(fields, "nonce")?,
+                borrower: required_action_field(fields, "borrower")?,
+                resource: required_action_field(fields, "resource")?,
+                principal: required_action_field(fields, "principal")?,
+                repay_amount: required_action_field(fields, "repay_amount")?,
+                due_at: required_action_field(fields, "due_at")?,
+            },
+            "AcceptLoan" => Self::AcceptLoan {
+                loan_id: required_exact_action_field(fields, LOAN_ID_ACTION_FIELDS, "loan_id")?,
+            },
+            "RepayLoan" => Self::RepayLoan {
+                loan_id: required_exact_action_field(fields, LOAN_ID_ACTION_FIELDS, "loan_id")?,
+            },
+            "DefaultLoan" => Self::DefaultLoan {
+                loan_id: required_exact_action_field(fields, LOAN_ID_ACTION_FIELDS, "loan_id")?,
+            },
+            action if SPECIAL_COMMAND_ACTIONS.contains(&action) => {
+                special_action_from_fields(action, fields)?
+            }
             custom => Self::Action {
                 action_type: custom.to_string(),
                 object_id: required_action_field(fields, "object_id")?,
@@ -296,6 +1070,33 @@ impl<'de> Deserialize<'de> for CommandAction {
             },
         })
     }
+}
+
+fn legacy_action_wrapper<E>(
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Result<CommandAction, E>
+where
+    E: serde::de::Error,
+{
+    const LEGACY_ACTION_FIELDS: &[&str] =
+        &["type", "action_type", "object_id", "target_id", "payload"];
+    ensure_exact_action_fields(fields, LEGACY_ACTION_FIELDS)?;
+    let action_type: String = required_action_field(fields, "action_type")?;
+    if CORE_COMMAND_ACTIONS.contains(&action_type.as_str()) || action_type == "Action" {
+        return Err(E::custom(format!(
+            "legacy Action wrapper uses reserved non-special action_type {action_type}"
+        )));
+    }
+    if !SPECIAL_COMMAND_ACTIONS.contains(&action_type.as_str()) {
+        return Err(E::custom(format!(
+            "legacy Action wrapper uses unknown action_type {action_type}"
+        )));
+    }
+    let object_id = required_action_field(fields, "object_id")?;
+    let target_id = required_action_field(fields, "target_id")?;
+    let special_fields =
+        SpecialActionFields::from_legacy_payload(object_id, target_id, fields.get("payload"))?;
+    special_action_from_name(&action_type, special_fields)
 }
 
 const MOVE_ACTION_FIELDS: &[&str] = &["type", "object_id", "direction"];
@@ -308,7 +1109,588 @@ const BUILD_ACTION_FIELDS: &[&str] = &["type", "object_id", "x", "y", "structure
 const TARGET_ACTION_FIELDS: &[&str] = &["type", "object_id", "target_id"];
 const GLOBAL_TRANSFER_ACTION_FIELDS: &[&str] = &["type", "resource", "amount"];
 const ALLIED_TRANSFER_ACTION_FIELDS: &[&str] = &["type", "target_player", "resource", "amount"];
+const SETTLEMENT_ID_ACTION_FIELDS: &[&str] = &["type", "settlement_id"];
+const OFFER_ID_ACTION_FIELDS: &[&str] = &["type", "offer_id"];
+const AUCTION_ID_ACTION_FIELDS: &[&str] = &["type", "auction_id"];
+const ESCROW_ID_ACTION_FIELDS: &[&str] = &["type", "escrow_id"];
+const LOAN_ID_ACTION_FIELDS: &[&str] = &["type", "loan_id"];
+const CREATE_CONTRACT_ACTION_FIELDS: &[&str] = &[
+    "type",
+    "settlement_id",
+    "nonce",
+    "input_resource",
+    "input_amount",
+    "output_resource",
+    "output_amount",
+    "counterparty",
+    "expires_at",
+];
+const CREATE_MERCHANT_QUOTE_ACTION_FIELDS: &[&str] = &[
+    "type",
+    "quote_id",
+    "player_id",
+    "pay_resource",
+    "pay_amount",
+    "receive_resource",
+    "receive_amount",
+    "expires_at",
+];
+const MERCHANT_ACCEPT_ACTION_FIELDS: &[&str] = &["type", "quote_id", "min_receive"];
+const CREATE_P2P_OFFER_ACTION_FIELDS: &[&str] = &[
+    "type",
+    "offer_id",
+    "nonce",
+    "give_resource",
+    "give_amount",
+    "want_resource",
+    "want_amount",
+    "expires_at",
+];
+const CREATE_AUCTION_ACTION_FIELDS: &[&str] = &[
+    "type",
+    "auction_id",
+    "nonce",
+    "lot_resource",
+    "lot_amount",
+    "bid_resource",
+    "min_bid",
+    "ends_at",
+];
+const BID_AUCTION_ACTION_FIELDS: &[&str] = &["type", "auction_id", "bid_amount"];
+const CREATE_ESCROW_ACTION_FIELDS: &[&str] = &[
+    "type",
+    "escrow_id",
+    "nonce",
+    "payee",
+    "arbiter",
+    "resource",
+    "amount",
+];
+const CREATE_LOAN_ACTION_FIELDS: &[&str] = &[
+    "type",
+    "loan_id",
+    "nonce",
+    "borrower",
+    "resource",
+    "principal",
+    "repay_amount",
+    "due_at",
+];
+const SPECIAL_ACTION_FIELDS: &[&str] = &[
+    "type",
+    "object_id",
+    "target_id",
+    "resource",
+    "amount",
+    "range",
+    "structure",
+    "damage_type",
+    "cooldown",
+];
 const CONCRETE_ACTION_RESERVED_FIELDS: &[&str] = &["type", "object_id", "target_id"];
+const ACTION_PAYLOAD_RESERVED_FIELDS: &[&str] = &[
+    "type",
+    "object_id",
+    "target_id",
+    "payload",
+    "action_type",
+    "action_name",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpecialActionFields {
+    object_id: ObjectId,
+    target_id: ObjectId,
+    resource: Option<String>,
+    amount: Option<u32>,
+    range: Option<u32>,
+    structure: Option<StructureType>,
+    damage_type: Option<String>,
+    cooldown: Option<u32>,
+}
+
+impl SpecialActionFields {
+    fn from_flat_fields<E>(fields: &serde_json::Map<String, serde_json::Value>) -> Result<Self, E>
+    where
+        E: serde::de::Error,
+    {
+        ensure_exact_action_fields(fields, SPECIAL_ACTION_FIELDS)?;
+        Self::from_payload_fields(
+            required_action_field(fields, "object_id")?,
+            required_action_field(fields, "target_id")?,
+            fields,
+        )
+    }
+
+    fn from_legacy_payload<E>(
+        object_id: ObjectId,
+        target_id: ObjectId,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<Self, E>
+    where
+        E: serde::de::Error,
+    {
+        let empty = serde_json::Map::new();
+        let payload_fields = match payload {
+            None | Some(serde_json::Value::Null) => &empty,
+            Some(serde_json::Value::Object(fields)) => fields,
+            Some(_) => return Err(E::custom("legacy Action payload must be an object")),
+        };
+        ensure_special_payload_fields(payload_fields)?;
+        Self::from_payload_fields(object_id, target_id, payload_fields)
+    }
+
+    fn from_payload_fields<E>(
+        object_id: ObjectId,
+        target_id: ObjectId,
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Self {
+            object_id,
+            target_id,
+            resource: optional_action_field(fields, "resource")?,
+            amount: optional_action_field(fields, "amount")?,
+            range: optional_action_field(fields, "range")?,
+            structure: optional_action_field(fields, "structure")?,
+            damage_type: optional_action_field(fields, "damage_type")?,
+            cooldown: optional_action_field(fields, "cooldown")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SpecialActionInput<'a> {
+    action_type: &'static str,
+    object_id: ObjectId,
+    target_id: ObjectId,
+    resource: Option<&'a str>,
+    amount: Option<u32>,
+    range: Option<u32>,
+    structure: Option<StructureType>,
+    damage_type: Option<&'a str>,
+    cooldown: Option<u32>,
+}
+
+fn special_action_from_fields<E>(
+    action_type: &str,
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Result<CommandAction, E>
+where
+    E: serde::de::Error,
+{
+    special_action_from_name(action_type, SpecialActionFields::from_flat_fields(fields)?)
+}
+
+fn special_action_from_name<E>(
+    action_type: &str,
+    fields: SpecialActionFields,
+) -> Result<CommandAction, E>
+where
+    E: serde::de::Error,
+{
+    macro_rules! special_action_variant {
+        ($variant:ident) => {
+            CommandAction::$variant {
+                object_id: fields.object_id,
+                target_id: fields.target_id,
+                resource: fields.resource,
+                amount: fields.amount,
+                range: fields.range,
+                structure: fields.structure,
+                damage_type: fields.damage_type,
+                cooldown: fields.cooldown,
+            }
+        };
+    }
+
+    Ok(match action_type {
+        "Attack" => special_action_variant!(Attack),
+        "RangedAttack" => special_action_variant!(RangedAttack),
+        "Heal" => special_action_variant!(Heal),
+        "Hack" => special_action_variant!(Hack),
+        "Drain" => special_action_variant!(Drain),
+        "Overload" => special_action_variant!(Overload),
+        "Debilitate" => special_action_variant!(Debilitate),
+        "Disrupt" => special_action_variant!(Disrupt),
+        "Fortify" => special_action_variant!(Fortify),
+        "Leech" => special_action_variant!(Leech),
+        "Fabricate" => special_action_variant!(Fabricate),
+        unknown => {
+            return Err(E::custom(format!(
+                "unknown special command action {unknown}"
+            )));
+        }
+    })
+}
+
+fn ensure_special_payload_fields<E>(
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), E>
+where
+    E: serde::de::Error,
+{
+    for key in fields.keys() {
+        if ACTION_PAYLOAD_RESERVED_FIELDS.contains(&key.as_str()) {
+            return Err(E::custom(format!(
+                "legacy Action payload must not contain reserved field {key}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+impl CommandAction {
+    fn special_action(&self) -> Option<SpecialActionInput<'_>> {
+        macro_rules! special_action_input {
+            ($action_type:literal, $object_id:expr, $target_id:expr, $resource:expr, $amount:expr, $range:expr, $structure:expr, $damage_type:expr, $cooldown:expr) => {
+                Some(SpecialActionInput {
+                    action_type: $action_type,
+                    object_id: *$object_id,
+                    target_id: *$target_id,
+                    resource: $resource.as_deref(),
+                    amount: *$amount,
+                    range: *$range,
+                    structure: *$structure,
+                    damage_type: $damage_type.as_deref(),
+                    cooldown: *$cooldown,
+                })
+            };
+        }
+
+        match self {
+            Self::Attack {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "Attack",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            Self::RangedAttack {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "RangedAttack",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            Self::Heal {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "Heal",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            Self::Hack {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "Hack",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            Self::Drain {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "Drain",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            Self::Overload {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "Overload",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            Self::Debilitate {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "Debilitate",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            Self::Disrupt {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "Disrupt",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            Self::Fortify {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "Fortify",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            Self::Leech {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "Leech",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            Self::Fabricate {
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown,
+            } => special_action_input!(
+                "Fabricate",
+                object_id,
+                target_id,
+                resource,
+                amount,
+                range,
+                structure,
+                damage_type,
+                cooldown
+            ),
+            _ => None,
+        }
+    }
+
+    fn wire_type(&self) -> &str {
+        if let Some(special) = self.special_action() {
+            return special.action_type;
+        }
+        match self {
+            Self::Move { .. } => "Move",
+            Self::Harvest { .. } => "Harvest",
+            Self::Transfer { .. } => "Transfer",
+            Self::Withdraw { .. } => "Withdraw",
+            Self::Action { action_type, .. } => action_type,
+            Self::ClaimController { .. } => "ClaimController",
+            Self::Spawn { .. } => "Spawn",
+            Self::Recycle { .. } => "Recycle",
+            Self::Build { .. } => "Build",
+            Self::Repair { .. } => "Repair",
+            Self::UpgradeController { .. } => "UpgradeController",
+            Self::TransferToGlobal { .. } => "TransferToGlobal",
+            Self::TransferFromGlobal { .. } => "TransferFromGlobal",
+            Self::AlliedTransfer { .. } => "AlliedTransfer",
+            Self::CreateContractSettlement { .. } => "CreateContractSettlement",
+            Self::SettleContract { .. } => "SettleContract",
+            Self::CancelContract { .. } => "CancelContract",
+            Self::CreateMerchantQuote { .. } => "CreateMerchantQuote",
+            Self::AcceptMerchantTrade { .. } => "AcceptMerchantTrade",
+            Self::CreateP2POffer { .. } => "CreateP2POffer",
+            Self::AcceptP2POffer { .. } => "AcceptP2POffer",
+            Self::CancelP2POffer { .. } => "CancelP2POffer",
+            Self::RefundP2POffer { .. } => "RefundP2POffer",
+            Self::CreateAuction { .. } => "CreateAuction",
+            Self::BidAuction { .. } => "BidAuction",
+            Self::SettleAuction { .. } => "SettleAuction",
+            Self::CancelAuction { .. } => "CancelAuction",
+            Self::CreateEscrow { .. } => "CreateEscrow",
+            Self::ReleaseEscrow { .. } => "ReleaseEscrow",
+            Self::RefundEscrow { .. } => "RefundEscrow",
+            Self::CreateLoanOffer { .. } => "CreateLoanOffer",
+            Self::AcceptLoan { .. } => "AcceptLoan",
+            Self::RepayLoan { .. } => "RepayLoan",
+            Self::DefaultLoan { .. } => "DefaultLoan",
+            Self::Attack { .. }
+            | Self::RangedAttack { .. }
+            | Self::Heal { .. }
+            | Self::Hack { .. }
+            | Self::Drain { .. }
+            | Self::Overload { .. }
+            | Self::Debilitate { .. }
+            | Self::Disrupt { .. }
+            | Self::Fortify { .. }
+            | Self::Leech { .. }
+            | Self::Fabricate { .. } => unreachable!("special actions return above"),
+        }
+    }
+
+    fn actor_object_id(&self) -> Option<ObjectId> {
+        if let Some(special) = self.special_action() {
+            return Some(special.object_id);
+        }
+        match self {
+            Self::Move { object_id, .. }
+            | Self::Harvest { object_id, .. }
+            | Self::Transfer { object_id, .. }
+            | Self::Withdraw { object_id, .. }
+            | Self::Action { object_id, .. }
+            | Self::ClaimController { object_id, .. }
+            | Self::Spawn { object_id, .. }
+            | Self::Recycle { object_id }
+            | Self::Build { object_id, .. }
+            | Self::Repair { object_id, .. }
+            | Self::UpgradeController { object_id, .. } => Some(*object_id),
+            Self::TransferToGlobal { .. }
+            | Self::TransferFromGlobal { .. }
+            | Self::AlliedTransfer { .. }
+            | Self::CreateContractSettlement { .. }
+            | Self::SettleContract { .. }
+            | Self::CancelContract { .. }
+            | Self::CreateMerchantQuote { .. }
+            | Self::AcceptMerchantTrade { .. }
+            | Self::CreateP2POffer { .. }
+            | Self::AcceptP2POffer { .. }
+            | Self::CancelP2POffer { .. }
+            | Self::RefundP2POffer { .. }
+            | Self::CreateAuction { .. }
+            | Self::BidAuction { .. }
+            | Self::SettleAuction { .. }
+            | Self::CancelAuction { .. }
+            | Self::CreateEscrow { .. }
+            | Self::ReleaseEscrow { .. }
+            | Self::RefundEscrow { .. }
+            | Self::CreateLoanOffer { .. }
+            | Self::AcceptLoan { .. }
+            | Self::RepayLoan { .. }
+            | Self::DefaultLoan { .. } => None,
+            Self::Attack { .. }
+            | Self::RangedAttack { .. }
+            | Self::Heal { .. }
+            | Self::Hack { .. }
+            | Self::Drain { .. }
+            | Self::Overload { .. }
+            | Self::Debilitate { .. }
+            | Self::Disrupt { .. }
+            | Self::Fortify { .. }
+            | Self::Leech { .. }
+            | Self::Fabricate { .. } => unreachable!("special actions return above"),
+        }
+    }
+}
 
 fn required_exact_action_field<T, E>(
     fields: &serde_json::Map<String, serde_json::Value>,
@@ -391,6 +1773,10 @@ impl Serialize for CommandAction {
         S: Serializer,
     {
         let mut map = serializer.serialize_map(None)?;
+        if let Some(special) = self.special_action() {
+            serialize_special_action(&mut map, special)?;
+            return map.end();
+        }
         match self {
             Self::Move {
                 object_id,
@@ -434,6 +1820,14 @@ impl Serialize for CommandAction {
                 target_id,
                 payload,
             } => {
+                if CORE_COMMAND_ACTIONS.contains(&action_type.as_str())
+                    || SPECIAL_COMMAND_ACTIONS.contains(&action_type.as_str())
+                    || action_type == "Action"
+                {
+                    return Err(serde::ser::Error::custom(format!(
+                        "generic Action cannot serialize reserved action_type {action_type}"
+                    )));
+                }
                 map.serialize_entry("type", action_type)?;
                 map.serialize_entry("object_id", object_id)?;
                 if let Some(target_id) = target_id {
@@ -507,9 +1901,212 @@ impl Serialize for CommandAction {
                 map.serialize_entry("resource", resource)?;
                 map.serialize_entry("amount", amount)?;
             }
+            Self::CreateContractSettlement {
+                settlement_id,
+                nonce,
+                input_resource,
+                input_amount,
+                output_resource,
+                output_amount,
+                counterparty,
+                expires_at,
+            } => {
+                map.serialize_entry("type", "CreateContractSettlement")?;
+                map.serialize_entry("settlement_id", settlement_id)?;
+                map.serialize_entry("nonce", nonce)?;
+                map.serialize_entry("input_resource", input_resource)?;
+                map.serialize_entry("input_amount", input_amount)?;
+                map.serialize_entry("output_resource", output_resource)?;
+                map.serialize_entry("output_amount", output_amount)?;
+                if let Some(counterparty) = counterparty {
+                    map.serialize_entry("counterparty", counterparty)?;
+                }
+                if let Some(expires_at) = expires_at {
+                    map.serialize_entry("expires_at", expires_at)?;
+                }
+            }
+            Self::SettleContract { settlement_id } => {
+                serialize_id_action(&mut map, "SettleContract", "settlement_id", settlement_id)?
+            }
+            Self::CancelContract { settlement_id } => {
+                serialize_id_action(&mut map, "CancelContract", "settlement_id", settlement_id)?
+            }
+            Self::CreateMerchantQuote {
+                quote_id,
+                player_id,
+                pay_resource,
+                pay_amount,
+                receive_resource,
+                receive_amount,
+                expires_at,
+            } => {
+                map.serialize_entry("type", "CreateMerchantQuote")?;
+                map.serialize_entry("quote_id", quote_id)?;
+                map.serialize_entry("player_id", player_id)?;
+                map.serialize_entry("pay_resource", pay_resource)?;
+                map.serialize_entry("pay_amount", pay_amount)?;
+                map.serialize_entry("receive_resource", receive_resource)?;
+                map.serialize_entry("receive_amount", receive_amount)?;
+                map.serialize_entry("expires_at", expires_at)?;
+            }
+            Self::AcceptMerchantTrade {
+                quote_id,
+                min_receive,
+            } => {
+                map.serialize_entry("type", "AcceptMerchantTrade")?;
+                map.serialize_entry("quote_id", quote_id)?;
+                map.serialize_entry("min_receive", min_receive)?;
+            }
+            Self::CreateP2POffer {
+                offer_id,
+                nonce,
+                give_resource,
+                give_amount,
+                want_resource,
+                want_amount,
+                expires_at,
+            } => {
+                map.serialize_entry("type", "CreateP2POffer")?;
+                map.serialize_entry("offer_id", offer_id)?;
+                map.serialize_entry("nonce", nonce)?;
+                map.serialize_entry("give_resource", give_resource)?;
+                map.serialize_entry("give_amount", give_amount)?;
+                map.serialize_entry("want_resource", want_resource)?;
+                map.serialize_entry("want_amount", want_amount)?;
+                map.serialize_entry("expires_at", expires_at)?;
+            }
+            Self::AcceptP2POffer { offer_id } => {
+                serialize_id_action(&mut map, "AcceptP2POffer", "offer_id", offer_id)?
+            }
+            Self::CancelP2POffer { offer_id } => {
+                serialize_id_action(&mut map, "CancelP2POffer", "offer_id", offer_id)?
+            }
+            Self::RefundP2POffer { offer_id } => {
+                serialize_id_action(&mut map, "RefundP2POffer", "offer_id", offer_id)?
+            }
+            Self::CreateAuction {
+                auction_id,
+                nonce,
+                lot_resource,
+                lot_amount,
+                bid_resource,
+                min_bid,
+                ends_at,
+            } => {
+                map.serialize_entry("type", "CreateAuction")?;
+                map.serialize_entry("auction_id", auction_id)?;
+                map.serialize_entry("nonce", nonce)?;
+                map.serialize_entry("lot_resource", lot_resource)?;
+                map.serialize_entry("lot_amount", lot_amount)?;
+                map.serialize_entry("bid_resource", bid_resource)?;
+                map.serialize_entry("min_bid", min_bid)?;
+                map.serialize_entry("ends_at", ends_at)?;
+            }
+            Self::BidAuction {
+                auction_id,
+                bid_amount,
+            } => {
+                map.serialize_entry("type", "BidAuction")?;
+                map.serialize_entry("auction_id", auction_id)?;
+                map.serialize_entry("bid_amount", bid_amount)?;
+            }
+            Self::SettleAuction { auction_id } => {
+                serialize_id_action(&mut map, "SettleAuction", "auction_id", auction_id)?
+            }
+            Self::CancelAuction { auction_id } => {
+                serialize_id_action(&mut map, "CancelAuction", "auction_id", auction_id)?
+            }
+            Self::CreateEscrow {
+                escrow_id,
+                nonce,
+                payee,
+                arbiter,
+                resource,
+                amount,
+            } => {
+                map.serialize_entry("type", "CreateEscrow")?;
+                map.serialize_entry("escrow_id", escrow_id)?;
+                map.serialize_entry("nonce", nonce)?;
+                map.serialize_entry("payee", payee)?;
+                map.serialize_entry("arbiter", arbiter)?;
+                map.serialize_entry("resource", resource)?;
+                map.serialize_entry("amount", amount)?;
+            }
+            Self::ReleaseEscrow { escrow_id } => {
+                serialize_id_action(&mut map, "ReleaseEscrow", "escrow_id", escrow_id)?
+            }
+            Self::RefundEscrow { escrow_id } => {
+                serialize_id_action(&mut map, "RefundEscrow", "escrow_id", escrow_id)?
+            }
+            Self::CreateLoanOffer {
+                loan_id,
+                nonce,
+                borrower,
+                resource,
+                principal,
+                repay_amount,
+                due_at,
+            } => {
+                map.serialize_entry("type", "CreateLoanOffer")?;
+                map.serialize_entry("loan_id", loan_id)?;
+                map.serialize_entry("nonce", nonce)?;
+                map.serialize_entry("borrower", borrower)?;
+                map.serialize_entry("resource", resource)?;
+                map.serialize_entry("principal", principal)?;
+                map.serialize_entry("repay_amount", repay_amount)?;
+                map.serialize_entry("due_at", due_at)?;
+            }
+            Self::AcceptLoan { loan_id } => {
+                serialize_id_action(&mut map, "AcceptLoan", "loan_id", loan_id)?
+            }
+            Self::RepayLoan { loan_id } => {
+                serialize_id_action(&mut map, "RepayLoan", "loan_id", loan_id)?
+            }
+            Self::DefaultLoan { loan_id } => {
+                serialize_id_action(&mut map, "DefaultLoan", "loan_id", loan_id)?
+            }
+            Self::Attack { .. }
+            | Self::RangedAttack { .. }
+            | Self::Heal { .. }
+            | Self::Hack { .. }
+            | Self::Drain { .. }
+            | Self::Overload { .. }
+            | Self::Debilitate { .. }
+            | Self::Disrupt { .. }
+            | Self::Fortify { .. }
+            | Self::Leech { .. }
+            | Self::Fabricate { .. } => unreachable!("special actions return above"),
         }
         map.end()
     }
+}
+
+fn serialize_special_action<S>(map: &mut S, special: SpecialActionInput<'_>) -> Result<(), S::Error>
+where
+    S: SerializeMap,
+{
+    map.serialize_entry("type", special.action_type)?;
+    map.serialize_entry("object_id", &special.object_id)?;
+    map.serialize_entry("target_id", &special.target_id)?;
+    if let Some(resource) = special.resource {
+        map.serialize_entry("resource", resource)?;
+    }
+    if let Some(amount) = special.amount {
+        map.serialize_entry("amount", &amount)?;
+    }
+    if let Some(range) = special.range {
+        map.serialize_entry("range", &range)?;
+    }
+    if let Some(structure) = special.structure {
+        map.serialize_entry("structure", &structure)?;
+    }
+    if let Some(damage_type) = special.damage_type {
+        map.serialize_entry("damage_type", damage_type)?;
+    }
+    if let Some(cooldown) = special.cooldown {
+        map.serialize_entry("cooldown", &cooldown)?;
+    }
+    Ok(())
 }
 
 fn serialize_action_payload_entries<S>(
@@ -569,9 +2166,23 @@ where
     map.serialize_entry("amount", amount)
 }
 
+fn serialize_id_action<S, I>(
+    map: &mut S,
+    action_type: &str,
+    id_field: &str,
+    id: &I,
+) -> Result<(), S::Error>
+where
+    S: SerializeMap,
+    I: Serialize,
+{
+    map.serialize_entry("type", action_type)?;
+    map.serialize_entry(id_field, id)
+}
+
 /// Untrusted command shape emitted by a player module. Envelope fields are not
 /// representable here; Source Gate is the only path to `RawCommand`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 pub struct CommandIntent {
     pub sequence: u32,
@@ -1226,23 +2837,8 @@ fn effective_command_player_id(world: &World, raw: &RawCommand) -> PlayerId {
     if raw.source != CommandSource::Admin {
         return raw.player_id;
     }
-    let actor_id = match &raw.action {
-        CommandAction::Move { object_id, .. }
-        | CommandAction::Harvest { object_id, .. }
-        | CommandAction::Transfer { object_id, .. }
-        | CommandAction::Withdraw { object_id, .. }
-        | CommandAction::Action { object_id, .. }
-        | CommandAction::ClaimController { object_id, .. }
-        | CommandAction::Recycle { object_id }
-        | CommandAction::Build { object_id, .. }
-        | CommandAction::Repair { object_id, .. }
-        | CommandAction::UpgradeController { object_id, .. } => Some(*object_id),
-        CommandAction::Spawn { object_id, .. } => Some(*object_id),
-        CommandAction::TransferToGlobal { .. }
-        | CommandAction::TransferFromGlobal { .. }
-        | CommandAction::AlliedTransfer { .. } => None,
-    };
-    actor_id
+    raw.action
+        .actor_object_id()
         .and_then(|object_id| entity(object_id).ok())
         .and_then(|entity| world.get_entity(entity).ok())
         .and_then(|entity| {
@@ -1280,123 +2876,301 @@ pub(crate) fn validate_command(
     }
     let effective_player_id = effective_command_player_id(world, &raw);
 
-    let result = match &raw.action {
-        CommandAction::Move {
-            object_id,
-            direction,
-        } => validate_move(world, effective_player_id, raw.tick, *object_id, *direction),
-        CommandAction::Harvest {
-            object_id,
-            target_id,
-            resource: _,
-        } => validate_harvest(world, effective_player_id, raw.tick, *object_id, *target_id),
-        CommandAction::Transfer {
-            object_id,
-            target_id,
-            resource,
-            amount,
-        } => validate_transfer(
-            world,
-            effective_player_id,
-            *object_id,
-            *target_id,
-            resource,
-            *amount,
-            raw.tick,
-        ),
-        CommandAction::Withdraw {
-            object_id,
-            target_id,
-            resource,
-            amount,
-        } => validate_withdraw(
-            world,
-            effective_player_id,
-            *object_id,
-            *target_id,
-            resource,
-            *amount,
-            raw.tick,
-        ),
-        CommandAction::Action {
-            action_type,
-            object_id,
-            target_id,
-            payload,
-        } => validate_action(
-            world,
-            effective_player_id,
-            raw.tick,
-            action_type,
-            *object_id,
-            *target_id,
-            payload,
-        ),
-        CommandAction::ClaimController {
-            object_id,
-            target_id,
-        } => {
-            validate_claim_controller(world, effective_player_id, raw.tick, *object_id, *target_id)
+    let result = if let Some(special) = raw.action.special_action() {
+        validate_special_action(world, effective_player_id, raw.tick, special)
+    } else {
+        match &raw.action {
+            CommandAction::Move {
+                object_id,
+                direction,
+            } => validate_move(world, effective_player_id, raw.tick, *object_id, *direction),
+            CommandAction::Harvest {
+                object_id,
+                target_id,
+                resource: _,
+            } => validate_harvest(world, effective_player_id, raw.tick, *object_id, *target_id),
+            CommandAction::Transfer {
+                object_id,
+                target_id,
+                resource,
+                amount,
+            } => validate_transfer(
+                world,
+                effective_player_id,
+                *object_id,
+                *target_id,
+                resource,
+                *amount,
+                raw.tick,
+            ),
+            CommandAction::Withdraw {
+                object_id,
+                target_id,
+                resource,
+                amount,
+            } => validate_withdraw(
+                world,
+                effective_player_id,
+                *object_id,
+                *target_id,
+                resource,
+                *amount,
+                raw.tick,
+            ),
+            CommandAction::Action {
+                action_type,
+                object_id,
+                target_id,
+                payload,
+            } => validate_action(
+                world,
+                effective_player_id,
+                raw.tick,
+                action_type,
+                *object_id,
+                *target_id,
+                payload,
+            ),
+            CommandAction::ClaimController {
+                object_id,
+                target_id,
+            } => validate_claim_controller(
+                world,
+                effective_player_id,
+                raw.tick,
+                *object_id,
+                *target_id,
+            ),
+            CommandAction::Spawn {
+                object_id,
+                spawn_id,
+                body_parts,
+            } => validate_spawn_drone(
+                world,
+                effective_player_id,
+                *object_id,
+                *spawn_id,
+                body_parts,
+            ),
+            CommandAction::Recycle { object_id } => {
+                validate_recycle(world, effective_player_id, raw.tick, *object_id)
+            }
+            CommandAction::Build {
+                object_id,
+                x,
+                y,
+                structure,
+            } => validate_build(
+                world,
+                effective_player_id,
+                raw.tick,
+                *object_id,
+                *x,
+                *y,
+                *structure,
+            ),
+            CommandAction::Repair {
+                object_id,
+                target_id,
+            } => validate_repair(world, effective_player_id, raw.tick, *object_id, *target_id),
+            CommandAction::UpgradeController {
+                object_id,
+                target_id,
+            } => validate_upgrade_controller(
+                world,
+                effective_player_id,
+                raw.tick,
+                *object_id,
+                *target_id,
+            ),
+            CommandAction::TransferToGlobal { resource, amount } => {
+                validate_transfer_to_global(world, effective_player_id, resource, *amount)
+            }
+            CommandAction::TransferFromGlobal { resource, amount } => {
+                validate_transfer_from_global(world, effective_player_id, resource, *amount)
+            }
+            CommandAction::AlliedTransfer {
+                target_player,
+                resource,
+                amount,
+            } => validate_allied_transfer(
+                world,
+                effective_player_id,
+                *target_player,
+                resource,
+                *amount,
+            ),
+            CommandAction::CreateContractSettlement {
+                settlement_id,
+                nonce,
+                input_resource,
+                input_amount,
+                output_resource,
+                output_amount,
+                counterparty,
+                expires_at,
+            } => validate_create_contract(
+                world,
+                effective_player_id,
+                *settlement_id,
+                *nonce,
+                input_resource,
+                *input_amount,
+                output_resource,
+                *output_amount,
+                *counterparty,
+                *expires_at,
+            ),
+            CommandAction::SettleContract { settlement_id } => {
+                validate_settle_contract(world, effective_player_id, *settlement_id)
+            }
+            CommandAction::CancelContract { settlement_id } => {
+                validate_cancel_contract(world, effective_player_id, *settlement_id)
+            }
+            CommandAction::CreateMerchantQuote {
+                quote_id,
+                player_id,
+                pay_resource,
+                pay_amount,
+                receive_resource,
+                receive_amount,
+                expires_at,
+            } => validate_create_merchant_quote(
+                raw.source,
+                world,
+                effective_player_id,
+                *quote_id,
+                *player_id,
+                pay_resource,
+                *pay_amount,
+                receive_resource,
+                *receive_amount,
+                *expires_at,
+            ),
+            CommandAction::AcceptMerchantTrade {
+                quote_id,
+                min_receive,
+            } => {
+                validate_accept_merchant_trade(world, effective_player_id, *quote_id, *min_receive)
+            }
+            CommandAction::CreateP2POffer {
+                offer_id,
+                nonce,
+                give_resource,
+                give_amount,
+                want_resource,
+                want_amount,
+                expires_at,
+            } => validate_create_p2p_offer(
+                world,
+                effective_player_id,
+                *offer_id,
+                *nonce,
+                give_resource,
+                *give_amount,
+                want_resource,
+                *want_amount,
+                *expires_at,
+            ),
+            CommandAction::AcceptP2POffer { offer_id } => {
+                validate_accept_p2p_offer(world, effective_player_id, *offer_id)
+            }
+            CommandAction::CancelP2POffer { offer_id } => {
+                validate_cancel_p2p_offer(world, effective_player_id, *offer_id)
+            }
+            CommandAction::RefundP2POffer { offer_id } => {
+                validate_refund_p2p_offer(world, effective_player_id, *offer_id)
+            }
+            CommandAction::CreateAuction {
+                auction_id,
+                nonce,
+                lot_resource,
+                lot_amount,
+                bid_resource,
+                min_bid,
+                ends_at,
+            } => validate_create_auction(
+                world,
+                effective_player_id,
+                *auction_id,
+                *nonce,
+                lot_resource,
+                *lot_amount,
+                bid_resource,
+                *min_bid,
+                *ends_at,
+            ),
+            CommandAction::BidAuction {
+                auction_id,
+                bid_amount,
+            } => validate_bid_auction(world, effective_player_id, *auction_id, *bid_amount),
+            CommandAction::SettleAuction { auction_id } => {
+                validate_settle_auction(world, *auction_id)
+            }
+            CommandAction::CancelAuction { auction_id } => {
+                validate_cancel_auction(world, effective_player_id, *auction_id)
+            }
+            CommandAction::CreateEscrow {
+                escrow_id,
+                nonce,
+                payee,
+                arbiter,
+                resource,
+                amount,
+            } => validate_create_escrow(
+                world,
+                effective_player_id,
+                *escrow_id,
+                *nonce,
+                *payee,
+                *arbiter,
+                resource,
+                *amount,
+            ),
+            CommandAction::ReleaseEscrow { escrow_id } => {
+                validate_release_escrow(world, effective_player_id, *escrow_id)
+            }
+            CommandAction::RefundEscrow { escrow_id } => {
+                validate_refund_escrow(world, effective_player_id, *escrow_id)
+            }
+            CommandAction::CreateLoanOffer {
+                loan_id,
+                nonce,
+                borrower,
+                resource,
+                principal,
+                repay_amount,
+                due_at,
+            } => validate_create_loan_offer(
+                world,
+                effective_player_id,
+                *loan_id,
+                *nonce,
+                *borrower,
+                resource,
+                *principal,
+                *repay_amount,
+                *due_at,
+            ),
+            CommandAction::AcceptLoan { loan_id } => {
+                validate_accept_loan(world, effective_player_id, *loan_id)
+            }
+            CommandAction::RepayLoan { loan_id } => {
+                validate_repay_loan(world, effective_player_id, *loan_id)
+            }
+            CommandAction::DefaultLoan { loan_id } => validate_default_loan(world, *loan_id),
+            CommandAction::Attack { .. }
+            | CommandAction::RangedAttack { .. }
+            | CommandAction::Heal { .. }
+            | CommandAction::Hack { .. }
+            | CommandAction::Drain { .. }
+            | CommandAction::Overload { .. }
+            | CommandAction::Debilitate { .. }
+            | CommandAction::Disrupt { .. }
+            | CommandAction::Fortify { .. }
+            | CommandAction::Leech { .. }
+            | CommandAction::Fabricate { .. } => unreachable!("special actions validate above"),
         }
-        CommandAction::Spawn {
-            object_id,
-            spawn_id,
-            body_parts,
-        } => validate_spawn_drone(
-            world,
-            effective_player_id,
-            *object_id,
-            *spawn_id,
-            body_parts,
-        ),
-        CommandAction::Recycle { object_id } => {
-            validate_recycle(world, effective_player_id, raw.tick, *object_id)
-        }
-        CommandAction::Build {
-            object_id,
-            x,
-            y,
-            structure,
-        } => validate_build(
-            world,
-            effective_player_id,
-            raw.tick,
-            *object_id,
-            *x,
-            *y,
-            *structure,
-        ),
-        CommandAction::Repair {
-            object_id,
-            target_id,
-        } => validate_repair(world, effective_player_id, raw.tick, *object_id, *target_id),
-        CommandAction::UpgradeController {
-            object_id,
-            target_id,
-        } => validate_upgrade_controller(
-            world,
-            effective_player_id,
-            raw.tick,
-            *object_id,
-            *target_id,
-        ),
-        CommandAction::TransferToGlobal { resource, amount } => {
-            validate_transfer_to_global(world, effective_player_id, resource, *amount)
-        }
-        CommandAction::TransferFromGlobal { resource, amount } => {
-            validate_transfer_from_global(world, effective_player_id, resource, *amount)
-        }
-        CommandAction::AlliedTransfer {
-            target_player,
-            resource,
-            amount,
-        } => validate_allied_transfer(
-            world,
-            effective_player_id,
-            *target_player,
-            resource,
-            *amount,
-        ),
     };
 
     if matches!(result, Err(RejectionReason::InsufficientResource { .. })) {
@@ -1528,6 +3302,26 @@ fn action_uses_global_storage(action: &CommandAction) -> bool {
         CommandAction::TransferToGlobal { .. }
             | CommandAction::TransferFromGlobal { .. }
             | CommandAction::AlliedTransfer { .. }
+            | CommandAction::CreateContractSettlement { .. }
+            | CommandAction::SettleContract { .. }
+            | CommandAction::CancelContract { .. }
+            | CommandAction::CreateMerchantQuote { .. }
+            | CommandAction::AcceptMerchantTrade { .. }
+            | CommandAction::CreateP2POffer { .. }
+            | CommandAction::AcceptP2POffer { .. }
+            | CommandAction::CancelP2POffer { .. }
+            | CommandAction::RefundP2POffer { .. }
+            | CommandAction::CreateAuction { .. }
+            | CommandAction::BidAuction { .. }
+            | CommandAction::SettleAuction { .. }
+            | CommandAction::CancelAuction { .. }
+            | CommandAction::CreateEscrow { .. }
+            | CommandAction::ReleaseEscrow { .. }
+            | CommandAction::RefundEscrow { .. }
+            | CommandAction::CreateLoanOffer { .. }
+            | CommandAction::AcceptLoan { .. }
+            | CommandAction::RepayLoan { .. }
+            | CommandAction::DefaultLoan { .. }
     )
 }
 
@@ -1628,11 +3422,6 @@ pub fn available_action_metadata(world: &World) -> Vec<CommandActionMetadata> {
             "Withdraw",
             "Withdraw resource from a target",
             &["object_id", "target_id", "resource", "amount"],
-        ),
-        builtin_action_metadata(
-            "Action",
-            "Dispatch a registered combat or effect action",
-            &["action_type", "object_id", "target_id", "payload"],
         ),
         builtin_action_metadata(
             "ClaimController",
@@ -1759,22 +3548,7 @@ impl CommandRejection {
 }
 
 fn rejection_detail(command: &RawCommand, rejection: &RejectionReason) -> serde_json::Value {
-    let action = match &command.action {
-        CommandAction::Move { .. } => "Move",
-        CommandAction::Harvest { .. } => "Harvest",
-        CommandAction::Transfer { .. } => "Transfer",
-        CommandAction::Withdraw { .. } => "Withdraw",
-        CommandAction::Action { action_type, .. } => action_type,
-        CommandAction::ClaimController { .. } => "ClaimController",
-        CommandAction::Spawn { .. } => "Spawn",
-        CommandAction::Recycle { .. } => "Recycle",
-        CommandAction::Build { .. } => "Build",
-        CommandAction::Repair { .. } => "Repair",
-        CommandAction::UpgradeController { .. } => "UpgradeController",
-        CommandAction::TransferToGlobal { .. } => "TransferToGlobal",
-        CommandAction::TransferFromGlobal { .. } => "TransferFromGlobal",
-        CommandAction::AlliedTransfer { .. } => "AlliedTransfer",
-    };
+    let action = command.action.wire_type();
 
     let detail = match rejection {
         RejectionReason::SourceEmpty => match &command.action {
@@ -2062,103 +3836,262 @@ pub(crate) fn apply_command(world: &mut World, command: ValidatedCommand) -> Com
     let action_tick = command.raw.tick;
     let player_id = command.effective_player_id;
     let mut actor_id = None;
-    let result = match command.raw.action {
-        CommandAction::Move {
-            object_id,
-            direction,
-        } => {
-            actor_id = Some(object_id);
-            apply_move(world, object_id, direction)
-        }
-        CommandAction::Harvest {
-            object_id,
-            target_id,
-            resource,
-        } => {
-            actor_id = Some(object_id);
-            apply_harvest(world, object_id, target_id, resource)
-        }
-        CommandAction::Transfer {
-            object_id,
-            target_id,
-            resource,
-            amount,
-        } => apply_transfer(world, object_id, target_id, &resource, amount),
-        CommandAction::Withdraw {
-            object_id,
-            target_id,
-            resource,
-            amount,
-        } => apply_withdraw(world, object_id, target_id, &resource, amount),
-        CommandAction::Action {
-            action_type,
-            object_id,
-            target_id,
-            payload,
-        } => {
-            actor_id = Some(object_id);
-            apply_action(
-                world,
-                player_id,
-                action_tick,
-                &action_type,
+    let action = command.raw.action;
+    let result = if let Some(special) = action.special_action() {
+        actor_id = Some(special.object_id);
+        apply_special_action(world, player_id, action_tick, special)
+    } else {
+        match action {
+            CommandAction::Move {
+                object_id,
+                direction,
+            } => {
+                actor_id = Some(object_id);
+                apply_move(world, object_id, direction)
+            }
+            CommandAction::Harvest {
                 object_id,
                 target_id,
-                &payload,
-            )
+                resource,
+            } => {
+                actor_id = Some(object_id);
+                apply_harvest(world, object_id, target_id, resource)
+            }
+            CommandAction::Transfer {
+                object_id,
+                target_id,
+                resource,
+                amount,
+            } => apply_transfer(world, object_id, target_id, &resource, amount),
+            CommandAction::Withdraw {
+                object_id,
+                target_id,
+                resource,
+                amount,
+            } => apply_withdraw(world, object_id, target_id, &resource, amount),
+            CommandAction::Action {
+                action_type,
+                object_id,
+                target_id,
+                payload,
+            } => {
+                actor_id = Some(object_id);
+                apply_action(
+                    world,
+                    player_id,
+                    action_tick,
+                    &action_type,
+                    object_id,
+                    target_id,
+                    &payload,
+                )
+            }
+            CommandAction::ClaimController {
+                object_id,
+                target_id,
+            } => {
+                actor_id = Some(object_id);
+                apply_claim_controller(world, player_id, target_id)
+            }
+            CommandAction::Spawn {
+                object_id,
+                spawn_id,
+                body_parts,
+            } => {
+                actor_id = Some(object_id);
+                apply_spawn_drone(world, player_id, spawn_id, body_parts)
+            }
+            CommandAction::Recycle { object_id } => {
+                apply_recycle(world, player_id, action_tick, object_id)
+            }
+            CommandAction::Build {
+                object_id,
+                x,
+                y,
+                structure,
+            } => {
+                actor_id = Some(object_id);
+                apply_build(world, player_id, object_id, x, y, structure)
+            }
+            CommandAction::Repair {
+                object_id,
+                target_id,
+            } => {
+                actor_id = Some(object_id);
+                apply_repair(world, object_id, target_id)
+            }
+            CommandAction::UpgradeController {
+                object_id,
+                target_id,
+            } => {
+                actor_id = Some(object_id);
+                apply_upgrade_controller(world, object_id, target_id)
+            }
+            CommandAction::TransferToGlobal { resource, amount } => {
+                apply_transfer_to_global(world, player_id, &resource, amount)
+            }
+            CommandAction::TransferFromGlobal { resource, amount } => {
+                apply_transfer_from_global(world, player_id, &resource, amount)
+            }
+            CommandAction::AlliedTransfer {
+                target_player,
+                resource,
+                amount,
+            } => apply_allied_transfer(world, player_id, target_player, &resource, amount),
+            CommandAction::CreateContractSettlement {
+                settlement_id,
+                nonce,
+                input_resource,
+                input_amount,
+                output_resource,
+                output_amount,
+                counterparty,
+                expires_at,
+            } => apply_create_contract(
+                world,
+                player_id,
+                settlement_id,
+                nonce,
+                &input_resource,
+                input_amount,
+                &output_resource,
+                output_amount,
+                counterparty,
+                expires_at,
+            ),
+            CommandAction::SettleContract { settlement_id } => {
+                apply_settle_contract(world, player_id, settlement_id)
+            }
+            CommandAction::CancelContract { settlement_id } => {
+                apply_cancel_contract(world, player_id, settlement_id)
+            }
+            CommandAction::CreateMerchantQuote {
+                quote_id,
+                player_id: quote_player_id,
+                pay_resource,
+                pay_amount,
+                receive_resource,
+                receive_amount,
+                expires_at,
+            } => apply_create_merchant_quote(
+                world,
+                quote_id,
+                quote_player_id,
+                &pay_resource,
+                pay_amount,
+                &receive_resource,
+                receive_amount,
+                expires_at,
+            ),
+            CommandAction::AcceptMerchantTrade {
+                quote_id,
+                min_receive,
+            } => apply_accept_merchant_trade(world, player_id, quote_id, min_receive),
+            CommandAction::CreateP2POffer {
+                offer_id,
+                nonce,
+                give_resource,
+                give_amount,
+                want_resource,
+                want_amount,
+                expires_at,
+            } => apply_create_p2p_offer(
+                world,
+                player_id,
+                offer_id,
+                nonce,
+                &give_resource,
+                give_amount,
+                &want_resource,
+                want_amount,
+                expires_at,
+            ),
+            CommandAction::AcceptP2POffer { offer_id } => {
+                apply_accept_p2p_offer(world, player_id, offer_id)
+            }
+            CommandAction::CancelP2POffer { offer_id } => {
+                apply_cancel_p2p_offer(world, player_id, offer_id)
+            }
+            CommandAction::RefundP2POffer { offer_id } => {
+                apply_refund_p2p_offer(world, player_id, offer_id)
+            }
+            CommandAction::CreateAuction {
+                auction_id,
+                nonce,
+                lot_resource,
+                lot_amount,
+                bid_resource,
+                min_bid,
+                ends_at,
+            } => apply_create_auction(
+                world,
+                player_id,
+                auction_id,
+                nonce,
+                &lot_resource,
+                lot_amount,
+                &bid_resource,
+                min_bid,
+                ends_at,
+            ),
+            CommandAction::BidAuction {
+                auction_id,
+                bid_amount,
+            } => apply_bid_auction(world, player_id, auction_id, bid_amount),
+            CommandAction::SettleAuction { auction_id } => apply_settle_auction(world, auction_id),
+            CommandAction::CancelAuction { auction_id } => {
+                apply_cancel_auction(world, player_id, auction_id)
+            }
+            CommandAction::CreateEscrow {
+                escrow_id,
+                nonce,
+                payee,
+                arbiter,
+                resource,
+                amount,
+            } => apply_create_escrow(
+                world, player_id, escrow_id, nonce, payee, arbiter, &resource, amount,
+            ),
+            CommandAction::ReleaseEscrow { escrow_id } => {
+                apply_release_escrow(world, player_id, escrow_id)
+            }
+            CommandAction::RefundEscrow { escrow_id } => {
+                apply_refund_escrow(world, player_id, escrow_id)
+            }
+            CommandAction::CreateLoanOffer {
+                loan_id,
+                nonce,
+                borrower,
+                resource,
+                principal,
+                repay_amount,
+                due_at,
+            } => apply_create_loan_offer(
+                world,
+                player_id,
+                loan_id,
+                nonce,
+                borrower,
+                &resource,
+                principal,
+                repay_amount,
+                due_at,
+            ),
+            CommandAction::AcceptLoan { loan_id } => apply_accept_loan(world, player_id, loan_id),
+            CommandAction::RepayLoan { loan_id } => apply_repay_loan(world, player_id, loan_id),
+            CommandAction::DefaultLoan { loan_id } => apply_default_loan(world, loan_id),
+            CommandAction::Attack { .. }
+            | CommandAction::RangedAttack { .. }
+            | CommandAction::Heal { .. }
+            | CommandAction::Hack { .. }
+            | CommandAction::Drain { .. }
+            | CommandAction::Overload { .. }
+            | CommandAction::Debilitate { .. }
+            | CommandAction::Disrupt { .. }
+            | CommandAction::Fortify { .. }
+            | CommandAction::Leech { .. }
+            | CommandAction::Fabricate { .. } => unreachable!("special actions apply above"),
         }
-        CommandAction::ClaimController {
-            object_id,
-            target_id,
-        } => {
-            actor_id = Some(object_id);
-            apply_claim_controller(world, player_id, target_id)
-        }
-        CommandAction::Spawn {
-            object_id,
-            spawn_id,
-            body_parts,
-        } => {
-            actor_id = Some(object_id);
-            apply_spawn_drone(world, player_id, spawn_id, body_parts)
-        }
-        CommandAction::Recycle { object_id } => {
-            apply_recycle(world, player_id, action_tick, object_id)
-        }
-        CommandAction::Build {
-            object_id,
-            x,
-            y,
-            structure,
-        } => {
-            actor_id = Some(object_id);
-            apply_build(world, player_id, object_id, x, y, structure)
-        }
-        CommandAction::Repair {
-            object_id,
-            target_id,
-        } => {
-            actor_id = Some(object_id);
-            apply_repair(world, object_id, target_id)
-        }
-        CommandAction::UpgradeController {
-            object_id,
-            target_id,
-        } => {
-            actor_id = Some(object_id);
-            apply_upgrade_controller(world, object_id, target_id)
-        }
-        CommandAction::TransferToGlobal { resource, amount } => {
-            apply_transfer_to_global(world, player_id, &resource, amount)
-        }
-        CommandAction::TransferFromGlobal { resource, amount } => {
-            apply_transfer_from_global(world, player_id, &resource, amount)
-        }
-        CommandAction::AlliedTransfer {
-            target_player,
-            resource,
-            amount,
-        } => apply_allied_transfer(world, player_id, target_player, &resource, amount),
     };
 
     if result.is_ok()
@@ -2349,6 +4282,34 @@ fn validate_heal(
     ensure_range(position, target_position, 3)
 }
 
+fn validate_special_action(
+    world: &mut World,
+    player_id: PlayerId,
+    tick: Tick,
+    special: SpecialActionInput<'_>,
+) -> CommandResult {
+    match special.action_type {
+        "Attack" => validate_attack(world, player_id, tick, special.object_id, special.target_id),
+        "RangedAttack" => validate_ranged_attack(
+            world,
+            player_id,
+            tick,
+            special.object_id,
+            special.target_id,
+            special.range.unwrap_or(MAX_RANGED_ATTACK_RANGE),
+        ),
+        "Heal" => validate_heal(world, player_id, tick, special.object_id, special.target_id),
+        action_type => validate_custom_action(
+            world,
+            player_id,
+            tick,
+            action_type,
+            special.object_id,
+            Some(special.target_id),
+        ),
+    }
+}
+
 fn validate_action(
     world: &mut World,
     player_id: PlayerId,
@@ -2358,42 +4319,16 @@ fn validate_action(
     target_id: Option<ObjectId>,
     payload: &serde_json::Value,
 ) -> CommandResult {
-    match action_type {
-        "Attack" => validate_attack(
-            world,
-            player_id,
-            tick,
-            object_id,
-            require_target_id(target_id)?,
-        ),
-        "RangedAttack" => validate_ranged_attack(
-            world,
-            player_id,
-            tick,
-            object_id,
-            require_target_id(target_id)?,
-            payload_u32(payload, "range").unwrap_or(MAX_RANGED_ATTACK_RANGE),
-        ),
-        "Heal" => validate_heal(
-            world,
-            player_id,
-            tick,
-            object_id,
-            require_target_id(target_id)?,
-        ),
-        custom => validate_custom_action(world, player_id, tick, custom, object_id, target_id),
+    let _ = payload;
+    if CORE_COMMAND_ACTIONS.contains(&action_type)
+        || SPECIAL_COMMAND_ACTIONS.contains(&action_type)
+        || action_type == "Action"
+    {
+        return Err(RejectionReason::UnknownAction {
+            action: action_type.to_string(),
+        });
     }
-}
-
-fn require_target_id(target_id: Option<ObjectId>) -> Result<ObjectId, RejectionReason> {
-    target_id.ok_or(RejectionReason::ObjectNotFound)
-}
-
-fn payload_u32(payload: &serde_json::Value, field: &str) -> Option<u32> {
-    payload
-        .get(field)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
+    validate_custom_action(world, player_id, tick, action_type, object_id, target_id)
 }
 
 fn validate_claim_controller(
@@ -2861,6 +4796,28 @@ fn apply_withdraw(
     Ok(())
 }
 
+fn apply_special_action(
+    world: &mut World,
+    player_id: PlayerId,
+    tick: Tick,
+    special: SpecialActionInput<'_>,
+) -> CommandResult {
+    match special.action_type {
+        "Attack" => apply_basic_attack(world, special.object_id, special.target_id),
+        "RangedAttack" => apply_basic_ranged_attack(world, special.object_id, special.target_id),
+        "Heal" => apply_basic_heal(world, special.object_id, special.target_id),
+        action_type => apply_custom_action(
+            world,
+            player_id,
+            tick,
+            action_type,
+            special.object_id,
+            Some(special.target_id),
+            special.structure,
+        ),
+    }
+}
+
 fn apply_action(
     world: &mut World,
     player_id: PlayerId,
@@ -2870,22 +4827,23 @@ fn apply_action(
     target_id: Option<ObjectId>,
     payload: &serde_json::Value,
 ) -> CommandResult {
-    match action_type {
-        "Attack" => apply_basic_attack(world, object_id, require_target_id(target_id)?),
-        "RangedAttack" => {
-            apply_basic_ranged_attack(world, object_id, require_target_id(target_id)?)
-        }
-        "Heal" => apply_basic_heal(world, object_id, require_target_id(target_id)?),
-        custom => apply_custom_action(
-            world,
-            player_id,
-            tick,
-            custom,
-            object_id,
-            target_id,
-            payload_structure(payload),
-        ),
+    if CORE_COMMAND_ACTIONS.contains(&action_type)
+        || SPECIAL_COMMAND_ACTIONS.contains(&action_type)
+        || action_type == "Action"
+    {
+        return Err(RejectionReason::UnknownAction {
+            action: action_type.to_string(),
+        });
     }
+    apply_custom_action(
+        world,
+        player_id,
+        tick,
+        action_type,
+        object_id,
+        target_id,
+        payload_structure(payload),
+    )
 }
 
 fn payload_structure(payload: &serde_json::Value) -> Option<StructureType> {
@@ -3582,7 +5540,7 @@ fn apply_allied_transfer(
         Some(from_player),
         Some(to_player),
         resource,
-        deliver_amount,
+        amount,
         ResourceOperation::AlliedTransfer,
         fee,
         ALLIED_TRANSFER_FEE_BP,
@@ -3619,6 +5577,1292 @@ fn apply_allied_transfer(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_create_contract(
+    world: &World,
+    owner: PlayerId,
+    id: SettlementId,
+    nonce: u64,
+    input_resource: &str,
+    input_amount: u32,
+    output_resource: &str,
+    output_amount: u32,
+    _counterparty: Option<PlayerId>,
+    expires_at: Option<Tick>,
+) -> CommandResult {
+    ensure_positive(input_amount)?;
+    ensure_positive(output_amount)?;
+    ensure_valid_resource_names(input_resource, output_resource)?;
+    if input_resource == output_resource && output_amount > input_amount {
+        return Err(RejectionReason::InsufficientResources);
+    }
+    ensure_not_expired(world, expires_at)?;
+    ensure_settlement_id_available(world, id, owner, nonce)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_create_contract(
+    world: &mut World,
+    owner: PlayerId,
+    id: SettlementId,
+    nonce: u64,
+    input_resource: &str,
+    input_amount: u32,
+    output_resource: &str,
+    output_amount: u32,
+    counterparty: Option<PlayerId>,
+    expires_at: Option<Tick>,
+) -> CommandResult {
+    validate_create_contract(
+        world,
+        owner,
+        id,
+        nonce,
+        input_resource,
+        input_amount,
+        output_resource,
+        output_amount,
+        counterparty,
+        expires_at,
+    )?;
+    reserve_player_resource(
+        world,
+        SettlementKind::Contract,
+        id,
+        owner,
+        input_resource,
+        input_amount,
+    )?;
+    world
+        .resource_mut::<SettlementState>()
+        .id_nonces
+        .insert(id, SettlementIdNonce { owner, nonce });
+    world.resource_mut::<SettlementState>().contracts.insert(
+        id,
+        ContractSettlement {
+            owner,
+            counterparty,
+            input_resource: input_resource.to_string(),
+            input_amount,
+            output_resource: output_resource.to_string(),
+            output_amount,
+            expires_at,
+            status: SettlementStatus::Open,
+        },
+    );
+    mark_receipt(
+        world,
+        SettlementKind::Contract,
+        id,
+        SettlementPhase::Reserve,
+    );
+    record_account_flow(
+        world,
+        player_account(owner),
+        reserve_account(SettlementKind::Contract, id, "input"),
+        input_resource,
+        input_amount,
+        ResourceOperation::ContractSettlement,
+    );
+    Ok(())
+}
+
+fn validate_settle_contract(world: &World, player: PlayerId, id: SettlementId) -> CommandResult {
+    let contract = world
+        .resource::<SettlementState>()
+        .contracts
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if contract.owner != player && contract.counterparty != Some(player) {
+        return Err(RejectionReason::NotOwner);
+    }
+    if has_receipt(world, SettlementKind::Contract, id, SettlementPhase::Settle) {
+        return Ok(());
+    }
+    ensure_open(contract.status)?;
+    ensure_not_expired(world, contract.expires_at)
+}
+
+fn apply_settle_contract(world: &mut World, player: PlayerId, id: SettlementId) -> CommandResult {
+    validate_settle_contract(world, player, id)?;
+    if has_receipt(world, SettlementKind::Contract, id, SettlementPhase::Settle) {
+        return Ok(());
+    }
+    let contract = world
+        .resource::<SettlementState>()
+        .contracts
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if contract.input_resource == contract.output_resource {
+        release_reserved_to_player(
+            world,
+            SettlementKind::Contract,
+            id,
+            contract.owner,
+            &contract.output_resource,
+            contract.output_amount,
+        )?;
+        record_account_flow(
+            world,
+            reserve_account(SettlementKind::Contract, id, "input"),
+            player_account(contract.owner),
+            &contract.output_resource,
+            contract.output_amount,
+            ResourceOperation::ContractSettlement,
+        );
+        if contract.input_amount > contract.output_amount {
+            consume_reserved(
+                world,
+                SettlementKind::Contract,
+                id,
+                &contract.input_resource,
+                contract.input_amount - contract.output_amount,
+            )?;
+            record_account_flow(
+                world,
+                reserve_account(SettlementKind::Contract, id, "input"),
+                settlement_sink("contract_remainder"),
+                &contract.input_resource,
+                contract.input_amount - contract.output_amount,
+                ResourceOperation::ContractSettlement,
+            );
+        }
+    } else {
+        consume_reserved(
+            world,
+            SettlementKind::Contract,
+            id,
+            &contract.input_resource,
+            contract.input_amount,
+        )?;
+        credit_global(
+            world,
+            contract.owner,
+            &contract.output_resource,
+            contract.output_amount,
+        );
+        record_account_flow(
+            world,
+            reserve_account(SettlementKind::Contract, id, "input"),
+            settlement_sink("contract_input"),
+            &contract.input_resource,
+            contract.input_amount,
+            ResourceOperation::ContractSettlement,
+        );
+        record_account_flow(
+            world,
+            settlement_system("contract_output"),
+            player_account(contract.owner),
+            &contract.output_resource,
+            contract.output_amount,
+            ResourceOperation::ContractSettlement,
+        );
+    }
+    world
+        .resource_mut::<SettlementState>()
+        .contracts
+        .get_mut(&id)
+        .unwrap()
+        .status = SettlementStatus::Settled;
+    mark_receipt(world, SettlementKind::Contract, id, SettlementPhase::Settle);
+    Ok(())
+}
+
+fn validate_cancel_contract(world: &World, player: PlayerId, id: SettlementId) -> CommandResult {
+    let contract = world
+        .resource::<SettlementState>()
+        .contracts
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if contract.owner != player {
+        return Err(RejectionReason::NotOwner);
+    }
+    if has_receipt(world, SettlementKind::Contract, id, SettlementPhase::Cancel) {
+        return Ok(());
+    }
+    ensure_open(contract.status)?;
+    Ok(())
+}
+
+fn apply_cancel_contract(world: &mut World, player: PlayerId, id: SettlementId) -> CommandResult {
+    validate_cancel_contract(world, player, id)?;
+    if has_receipt(world, SettlementKind::Contract, id, SettlementPhase::Cancel) {
+        return Ok(());
+    }
+    let contract = world
+        .resource::<SettlementState>()
+        .contracts
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    release_reserved_to_player(
+        world,
+        SettlementKind::Contract,
+        id,
+        contract.owner,
+        &contract.input_resource,
+        contract.input_amount,
+    )?;
+    world
+        .resource_mut::<SettlementState>()
+        .contracts
+        .get_mut(&id)
+        .unwrap()
+        .status = SettlementStatus::Cancelled;
+    mark_receipt(world, SettlementKind::Contract, id, SettlementPhase::Cancel);
+    record_account_flow(
+        world,
+        reserve_account(SettlementKind::Contract, id, "input"),
+        player_account(contract.owner),
+        &contract.input_resource,
+        contract.input_amount,
+        ResourceOperation::ContractSettlement,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_create_merchant_quote(
+    source: CommandSource,
+    world: &World,
+    actor: PlayerId,
+    quote_id: SettlementId,
+    player_id: PlayerId,
+    pay_resource: &str,
+    pay_amount: u32,
+    receive_resource: &str,
+    receive_amount: u32,
+    expires_at: Tick,
+) -> CommandResult {
+    if !matches!(source, CommandSource::Admin | CommandSource::TestHarness) || actor != 0 {
+        return Err(RejectionReason::SourceNotAllowed);
+    }
+    ensure_positive(pay_amount)?;
+    ensure_positive(receive_amount)?;
+    ensure_valid_resource_names(pay_resource, receive_resource)?;
+    if world.resource::<CurrentTick>().0 >= expires_at {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    if world
+        .resource::<SettlementState>()
+        .merchant_quotes
+        .contains_key(&quote_id)
+    {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    let _ = player_id;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_create_merchant_quote(
+    world: &mut World,
+    quote_id: SettlementId,
+    player_id: PlayerId,
+    pay_resource: &str,
+    pay_amount: u32,
+    receive_resource: &str,
+    receive_amount: u32,
+    expires_at: Tick,
+) -> CommandResult {
+    world
+        .resource_mut::<SettlementState>()
+        .merchant_quotes
+        .insert(
+            quote_id,
+            MerchantQuote {
+                player_id,
+                pay_resource: pay_resource.to_string(),
+                pay_amount,
+                receive_resource: receive_resource.to_string(),
+                receive_amount,
+                expires_at,
+                status: SettlementStatus::Open,
+            },
+        );
+    Ok(())
+}
+
+fn validate_accept_merchant_trade(
+    world: &World,
+    player: PlayerId,
+    quote_id: SettlementId,
+    min_receive: u32,
+) -> CommandResult {
+    let quote = world
+        .resource::<SettlementState>()
+        .merchant_quotes
+        .get(&quote_id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if quote.player_id != player {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    if has_receipt(
+        world,
+        SettlementKind::MerchantTrade,
+        quote_id,
+        SettlementPhase::Settle,
+    ) {
+        return Ok(());
+    }
+    ensure_open(quote.status)?;
+    if quote.receive_amount < min_receive || world.resource::<CurrentTick>().0 > quote.expires_at {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    ensure_player_global_resource(world, player, &quote.pay_resource, quote.pay_amount)
+}
+
+fn apply_accept_merchant_trade(
+    world: &mut World,
+    player: PlayerId,
+    quote_id: SettlementId,
+    min_receive: u32,
+) -> CommandResult {
+    validate_accept_merchant_trade(world, player, quote_id, min_receive)?;
+    if has_receipt(
+        world,
+        SettlementKind::MerchantTrade,
+        quote_id,
+        SettlementPhase::Settle,
+    ) {
+        return Ok(());
+    }
+    let quote = world
+        .resource::<SettlementState>()
+        .merchant_quotes
+        .get(&quote_id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    debit_global(world, player, &quote.pay_resource, quote.pay_amount)?;
+    credit_global(world, player, &quote.receive_resource, quote.receive_amount);
+    world
+        .resource_mut::<SettlementState>()
+        .merchant_quotes
+        .get_mut(&quote_id)
+        .unwrap()
+        .status = SettlementStatus::Settled;
+    mark_receipt(
+        world,
+        SettlementKind::MerchantTrade,
+        quote_id,
+        SettlementPhase::Settle,
+    );
+    record_account_flow(
+        world,
+        player_account(player),
+        merchant_account(quote_id),
+        &quote.pay_resource,
+        quote.pay_amount,
+        ResourceOperation::MerchantTradeSettlement,
+    );
+    record_account_flow(
+        world,
+        merchant_account(quote_id),
+        player_account(player),
+        &quote.receive_resource,
+        quote.receive_amount,
+        ResourceOperation::MerchantTradeSettlement,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_create_p2p_offer(
+    world: &World,
+    maker: PlayerId,
+    id: SettlementId,
+    nonce: u64,
+    give_resource: &str,
+    give_amount: u32,
+    want_resource: &str,
+    want_amount: u32,
+    expires_at: Tick,
+) -> CommandResult {
+    ensure_positive(give_amount)?;
+    ensure_positive(want_amount)?;
+    ensure_valid_resource_names(give_resource, want_resource)?;
+    if world.resource::<CurrentTick>().0 >= expires_at {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    ensure_settlement_id_available(world, id, maker, nonce)?;
+    ensure_player_global_resource(world, maker, give_resource, give_amount)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_create_p2p_offer(
+    world: &mut World,
+    maker: PlayerId,
+    id: SettlementId,
+    nonce: u64,
+    give_resource: &str,
+    give_amount: u32,
+    want_resource: &str,
+    want_amount: u32,
+    expires_at: Tick,
+) -> CommandResult {
+    validate_create_p2p_offer(
+        world,
+        maker,
+        id,
+        nonce,
+        give_resource,
+        give_amount,
+        want_resource,
+        want_amount,
+        expires_at,
+    )?;
+    reserve_player_resource(
+        world,
+        SettlementKind::P2POffer,
+        id,
+        maker,
+        give_resource,
+        give_amount,
+    )?;
+    world.resource_mut::<SettlementState>().id_nonces.insert(
+        id,
+        SettlementIdNonce {
+            owner: maker,
+            nonce,
+        },
+    );
+    world.resource_mut::<SettlementState>().p2p_offers.insert(
+        id,
+        P2POffer {
+            maker,
+            taker: None,
+            give_resource: give_resource.to_string(),
+            give_amount,
+            want_resource: want_resource.to_string(),
+            want_amount,
+            expires_at,
+            status: SettlementStatus::Open,
+        },
+    );
+    mark_receipt(
+        world,
+        SettlementKind::P2POffer,
+        id,
+        SettlementPhase::Reserve,
+    );
+    record_account_flow(
+        world,
+        player_account(maker),
+        reserve_account(SettlementKind::P2POffer, id, "give"),
+        give_resource,
+        give_amount,
+        ResourceOperation::P2POfferSettlement,
+    );
+    Ok(())
+}
+
+fn validate_accept_p2p_offer(world: &World, taker: PlayerId, id: SettlementId) -> CommandResult {
+    let offer = world
+        .resource::<SettlementState>()
+        .p2p_offers
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if has_receipt(world, SettlementKind::P2POffer, id, SettlementPhase::Accept) {
+        return if offer.taker == Some(taker) {
+            Ok(())
+        } else {
+            Err(RejectionReason::NotOwner)
+        };
+    }
+    ensure_open(offer.status)?;
+    if offer.maker == taker || world.resource::<CurrentTick>().0 > offer.expires_at {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    ensure_player_global_resource(world, taker, &offer.want_resource, offer.want_amount)
+}
+
+fn apply_accept_p2p_offer(world: &mut World, taker: PlayerId, id: SettlementId) -> CommandResult {
+    validate_accept_p2p_offer(world, taker, id)?;
+    if has_receipt(world, SettlementKind::P2POffer, id, SettlementPhase::Accept) {
+        return Ok(());
+    }
+    let offer = world
+        .resource::<SettlementState>()
+        .p2p_offers
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    debit_global(world, taker, &offer.want_resource, offer.want_amount)?;
+    credit_global(world, offer.maker, &offer.want_resource, offer.want_amount);
+    release_reserved_to_player(
+        world,
+        SettlementKind::P2POffer,
+        id,
+        taker,
+        &offer.give_resource,
+        offer.give_amount,
+    )?;
+    let mut stored = world.resource_mut::<SettlementState>();
+    let offer_mut = stored.p2p_offers.get_mut(&id).unwrap();
+    offer_mut.taker = Some(taker);
+    offer_mut.status = SettlementStatus::Settled;
+    mark_receipt(world, SettlementKind::P2POffer, id, SettlementPhase::Accept);
+    record_account_flow(
+        world,
+        player_account(taker),
+        player_account(offer.maker),
+        &offer.want_resource,
+        offer.want_amount,
+        ResourceOperation::P2POfferSettlement,
+    );
+    record_account_flow(
+        world,
+        reserve_account(SettlementKind::P2POffer, id, "give"),
+        player_account(taker),
+        &offer.give_resource,
+        offer.give_amount,
+        ResourceOperation::P2POfferSettlement,
+    );
+    Ok(())
+}
+
+fn validate_cancel_p2p_offer(world: &World, maker: PlayerId, id: SettlementId) -> CommandResult {
+    let offer = world
+        .resource::<SettlementState>()
+        .p2p_offers
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if offer.maker != maker {
+        return Err(RejectionReason::NotOwner);
+    }
+    ensure_open(offer.status)
+}
+
+fn apply_cancel_p2p_offer(world: &mut World, maker: PlayerId, id: SettlementId) -> CommandResult {
+    validate_cancel_p2p_offer(world, maker, id)?;
+    refund_p2p_offer(world, id, SettlementPhase::Cancel)
+}
+fn validate_refund_p2p_offer(world: &World, maker: PlayerId, id: SettlementId) -> CommandResult {
+    let offer = world
+        .resource::<SettlementState>()
+        .p2p_offers
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if offer.maker != maker {
+        return Err(RejectionReason::NotOwner);
+    }
+    if has_receipt(world, SettlementKind::P2POffer, id, SettlementPhase::Refund) {
+        return Ok(());
+    }
+    ensure_open(offer.status)?;
+    if world.resource::<CurrentTick>().0 <= offer.expires_at {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    Ok(())
+}
+fn apply_refund_p2p_offer(world: &mut World, maker: PlayerId, id: SettlementId) -> CommandResult {
+    validate_refund_p2p_offer(world, maker, id)?;
+    refund_p2p_offer(world, id, SettlementPhase::Refund)
+}
+fn refund_p2p_offer(world: &mut World, id: SettlementId, phase: SettlementPhase) -> CommandResult {
+    if has_receipt(world, SettlementKind::P2POffer, id, phase) {
+        return Ok(());
+    }
+    let offer = world
+        .resource::<SettlementState>()
+        .p2p_offers
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    release_reserved_to_player(
+        world,
+        SettlementKind::P2POffer,
+        id,
+        offer.maker,
+        &offer.give_resource,
+        offer.give_amount,
+    )?;
+    world
+        .resource_mut::<SettlementState>()
+        .p2p_offers
+        .get_mut(&id)
+        .unwrap()
+        .status = if phase == SettlementPhase::Refund {
+        SettlementStatus::Refunded
+    } else {
+        SettlementStatus::Cancelled
+    };
+    mark_receipt(world, SettlementKind::P2POffer, id, phase);
+    record_account_flow(
+        world,
+        reserve_account(SettlementKind::P2POffer, id, "give"),
+        player_account(offer.maker),
+        &offer.give_resource,
+        offer.give_amount,
+        ResourceOperation::P2POfferSettlement,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_create_auction(
+    world: &World,
+    seller: PlayerId,
+    id: SettlementId,
+    nonce: u64,
+    lot_resource: &str,
+    lot_amount: u32,
+    bid_resource: &str,
+    min_bid: u32,
+    ends_at: Tick,
+) -> CommandResult {
+    ensure_positive(lot_amount)?;
+    ensure_positive(min_bid)?;
+    ensure_valid_resource_names(lot_resource, bid_resource)?;
+    if world.resource::<CurrentTick>().0 >= ends_at {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    ensure_settlement_id_available(world, id, seller, nonce)?;
+    ensure_player_global_resource(world, seller, lot_resource, lot_amount)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_create_auction(
+    world: &mut World,
+    seller: PlayerId,
+    id: SettlementId,
+    nonce: u64,
+    lot_resource: &str,
+    lot_amount: u32,
+    bid_resource: &str,
+    min_bid: u32,
+    ends_at: Tick,
+) -> CommandResult {
+    validate_create_auction(
+        world,
+        seller,
+        id,
+        nonce,
+        lot_resource,
+        lot_amount,
+        bid_resource,
+        min_bid,
+        ends_at,
+    )?;
+    reserve_player_resource(
+        world,
+        SettlementKind::Auction,
+        id,
+        seller,
+        lot_resource,
+        lot_amount,
+    )?;
+    world.resource_mut::<SettlementState>().id_nonces.insert(
+        id,
+        SettlementIdNonce {
+            owner: seller,
+            nonce,
+        },
+    );
+    world.resource_mut::<SettlementState>().auctions.insert(
+        id,
+        AuctionSettlement {
+            seller,
+            lot_resource: lot_resource.to_string(),
+            lot_amount,
+            bid_resource: bid_resource.to_string(),
+            min_bid,
+            ends_at,
+            high_bidder: None,
+            high_bid: 0,
+            status: SettlementStatus::Open,
+        },
+    );
+    mark_receipt(world, SettlementKind::Auction, id, SettlementPhase::Reserve);
+    record_account_flow(
+        world,
+        player_account(seller),
+        reserve_account(SettlementKind::Auction, id, "lot"),
+        lot_resource,
+        lot_amount,
+        ResourceOperation::AuctionSettlement,
+    );
+    Ok(())
+}
+
+fn validate_bid_auction(
+    world: &World,
+    bidder: PlayerId,
+    id: SettlementId,
+    bid: u32,
+) -> CommandResult {
+    ensure_positive(bid)?;
+    let auction = world
+        .resource::<SettlementState>()
+        .auctions
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    ensure_open(auction.status)?;
+    if bidder == auction.seller
+        || world.resource::<CurrentTick>().0 >= auction.ends_at
+        || bid < auction.min_bid
+        || bid <= auction.high_bid
+    {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    ensure_player_global_resource(world, bidder, &auction.bid_resource, bid)
+}
+
+fn apply_bid_auction(
+    world: &mut World,
+    bidder: PlayerId,
+    id: SettlementId,
+    bid: u32,
+) -> CommandResult {
+    validate_bid_auction(world, bidder, id, bid)?;
+    let prior = world
+        .resource::<SettlementState>()
+        .auctions
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if let Some(prior_bidder) = prior.high_bidder {
+        release_reserved_to_player(
+            world,
+            SettlementKind::Auction,
+            id,
+            prior_bidder,
+            &prior.bid_resource,
+            prior.high_bid,
+        )?;
+        record_account_flow(
+            world,
+            reserve_account(SettlementKind::Auction, id, "bid"),
+            player_account(prior_bidder),
+            &prior.bid_resource,
+            prior.high_bid,
+            ResourceOperation::AuctionSettlement,
+        );
+    }
+    reserve_player_resource(
+        world,
+        SettlementKind::Auction,
+        id,
+        bidder,
+        &prior.bid_resource,
+        bid,
+    )?;
+    let mut state = world.resource_mut::<SettlementState>();
+    let auction = state.auctions.get_mut(&id).unwrap();
+    auction.high_bidder = Some(bidder);
+    auction.high_bid = bid;
+    mark_receipt(world, SettlementKind::Auction, id, SettlementPhase::Accept);
+    record_account_flow(
+        world,
+        player_account(bidder),
+        reserve_account(SettlementKind::Auction, id, "bid"),
+        &prior.bid_resource,
+        bid,
+        ResourceOperation::AuctionSettlement,
+    );
+    Ok(())
+}
+
+fn validate_settle_auction(world: &World, id: SettlementId) -> CommandResult {
+    if has_receipt(world, SettlementKind::Auction, id, SettlementPhase::Settle) {
+        return Ok(());
+    }
+    let auction = world
+        .resource::<SettlementState>()
+        .auctions
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    ensure_open(auction.status)?;
+    if world.resource::<CurrentTick>().0 < auction.ends_at || auction.high_bidder.is_none() {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    Ok(())
+}
+fn apply_settle_auction(world: &mut World, id: SettlementId) -> CommandResult {
+    validate_settle_auction(world, id)?;
+    if has_receipt(world, SettlementKind::Auction, id, SettlementPhase::Settle) {
+        return Ok(());
+    }
+    let auction = world
+        .resource::<SettlementState>()
+        .auctions
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    let winner = auction.high_bidder.ok_or(RejectionReason::OrderNotFound)?;
+    release_reserved_to_player(
+        world,
+        SettlementKind::Auction,
+        id,
+        winner,
+        &auction.lot_resource,
+        auction.lot_amount,
+    )?;
+    release_reserved_to_player(
+        world,
+        SettlementKind::Auction,
+        id,
+        auction.seller,
+        &auction.bid_resource,
+        auction.high_bid,
+    )?;
+    world
+        .resource_mut::<SettlementState>()
+        .auctions
+        .get_mut(&id)
+        .unwrap()
+        .status = SettlementStatus::Settled;
+    mark_receipt(world, SettlementKind::Auction, id, SettlementPhase::Settle);
+    record_account_flow(
+        world,
+        reserve_account(SettlementKind::Auction, id, "lot"),
+        player_account(winner),
+        &auction.lot_resource,
+        auction.lot_amount,
+        ResourceOperation::AuctionSettlement,
+    );
+    record_account_flow(
+        world,
+        reserve_account(SettlementKind::Auction, id, "bid"),
+        player_account(auction.seller),
+        &auction.bid_resource,
+        auction.high_bid,
+        ResourceOperation::AuctionSettlement,
+    );
+    Ok(())
+}
+fn validate_cancel_auction(world: &World, seller: PlayerId, id: SettlementId) -> CommandResult {
+    let auction = world
+        .resource::<SettlementState>()
+        .auctions
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if auction.seller != seller || auction.high_bidder.is_some() {
+        return Err(RejectionReason::NotOwner);
+    }
+    ensure_open(auction.status)
+}
+fn apply_cancel_auction(world: &mut World, seller: PlayerId, id: SettlementId) -> CommandResult {
+    validate_cancel_auction(world, seller, id)?;
+    if has_receipt(world, SettlementKind::Auction, id, SettlementPhase::Cancel) {
+        return Ok(());
+    }
+    let auction = world
+        .resource::<SettlementState>()
+        .auctions
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    release_reserved_to_player(
+        world,
+        SettlementKind::Auction,
+        id,
+        auction.seller,
+        &auction.lot_resource,
+        auction.lot_amount,
+    )?;
+    world
+        .resource_mut::<SettlementState>()
+        .auctions
+        .get_mut(&id)
+        .unwrap()
+        .status = SettlementStatus::Cancelled;
+    mark_receipt(world, SettlementKind::Auction, id, SettlementPhase::Cancel);
+    record_account_flow(
+        world,
+        reserve_account(SettlementKind::Auction, id, "lot"),
+        player_account(auction.seller),
+        &auction.lot_resource,
+        auction.lot_amount,
+        ResourceOperation::AuctionSettlement,
+    );
+    Ok(())
+}
+
+fn validate_create_escrow(
+    world: &World,
+    payer: PlayerId,
+    id: SettlementId,
+    nonce: u64,
+    payee: PlayerId,
+    arbiter: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    ensure_positive(amount)?;
+    ensure_settlement_id_available(world, id, payer, nonce)?;
+    if payer == payee {
+        return Err(RejectionReason::NotFriendly);
+    }
+    let _ = arbiter;
+    ensure_player_global_resource(world, payer, resource, amount)
+}
+fn apply_create_escrow(
+    world: &mut World,
+    payer: PlayerId,
+    id: SettlementId,
+    nonce: u64,
+    payee: PlayerId,
+    arbiter: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    validate_create_escrow(world, payer, id, nonce, payee, arbiter, resource, amount)?;
+    reserve_player_resource(world, SettlementKind::Escrow, id, payer, resource, amount)?;
+    world.resource_mut::<SettlementState>().id_nonces.insert(
+        id,
+        SettlementIdNonce {
+            owner: payer,
+            nonce,
+        },
+    );
+    world.resource_mut::<SettlementState>().escrows.insert(
+        id,
+        EscrowSettlement {
+            payer,
+            payee,
+            arbiter,
+            resource: resource.to_string(),
+            amount,
+            status: SettlementStatus::Open,
+        },
+    );
+    mark_receipt(world, SettlementKind::Escrow, id, SettlementPhase::Reserve);
+    record_account_flow(
+        world,
+        player_account(payer),
+        reserve_account(SettlementKind::Escrow, id, "escrow"),
+        resource,
+        amount,
+        ResourceOperation::EscrowSettlement,
+    );
+    Ok(())
+}
+fn validate_release_escrow(world: &World, actor: PlayerId, id: SettlementId) -> CommandResult {
+    let escrow = world
+        .resource::<SettlementState>()
+        .escrows
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if actor != escrow.payer && actor != escrow.arbiter {
+        return Err(RejectionReason::NotOwner);
+    }
+    if has_receipt(world, SettlementKind::Escrow, id, SettlementPhase::Settle) {
+        return Ok(());
+    }
+    ensure_open(escrow.status)?;
+    Ok(())
+}
+fn apply_release_escrow(world: &mut World, actor: PlayerId, id: SettlementId) -> CommandResult {
+    validate_release_escrow(world, actor, id)?;
+    if has_receipt(world, SettlementKind::Escrow, id, SettlementPhase::Settle) {
+        return Ok(());
+    }
+    let escrow = world
+        .resource::<SettlementState>()
+        .escrows
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    release_reserved_to_player(
+        world,
+        SettlementKind::Escrow,
+        id,
+        escrow.payee,
+        &escrow.resource,
+        escrow.amount,
+    )?;
+    world
+        .resource_mut::<SettlementState>()
+        .escrows
+        .get_mut(&id)
+        .unwrap()
+        .status = SettlementStatus::Settled;
+    mark_receipt(world, SettlementKind::Escrow, id, SettlementPhase::Settle);
+    record_account_flow(
+        world,
+        reserve_account(SettlementKind::Escrow, id, "escrow"),
+        player_account(escrow.payee),
+        &escrow.resource,
+        escrow.amount,
+        ResourceOperation::EscrowSettlement,
+    );
+    Ok(())
+}
+fn validate_refund_escrow(world: &World, actor: PlayerId, id: SettlementId) -> CommandResult {
+    let escrow = world
+        .resource::<SettlementState>()
+        .escrows
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if actor != escrow.payee && actor != escrow.arbiter {
+        return Err(RejectionReason::NotOwner);
+    }
+    if has_receipt(world, SettlementKind::Escrow, id, SettlementPhase::Refund) {
+        return Ok(());
+    }
+    ensure_open(escrow.status)?;
+    Ok(())
+}
+fn apply_refund_escrow(world: &mut World, actor: PlayerId, id: SettlementId) -> CommandResult {
+    validate_refund_escrow(world, actor, id)?;
+    if has_receipt(world, SettlementKind::Escrow, id, SettlementPhase::Refund) {
+        return Ok(());
+    }
+    let escrow = world
+        .resource::<SettlementState>()
+        .escrows
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    release_reserved_to_player(
+        world,
+        SettlementKind::Escrow,
+        id,
+        escrow.payer,
+        &escrow.resource,
+        escrow.amount,
+    )?;
+    world
+        .resource_mut::<SettlementState>()
+        .escrows
+        .get_mut(&id)
+        .unwrap()
+        .status = SettlementStatus::Refunded;
+    mark_receipt(world, SettlementKind::Escrow, id, SettlementPhase::Refund);
+    record_account_flow(
+        world,
+        reserve_account(SettlementKind::Escrow, id, "escrow"),
+        player_account(escrow.payer),
+        &escrow.resource,
+        escrow.amount,
+        ResourceOperation::EscrowSettlement,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_create_loan_offer(
+    world: &World,
+    lender: PlayerId,
+    id: SettlementId,
+    nonce: u64,
+    borrower: PlayerId,
+    resource: &str,
+    principal: u32,
+    repay_amount: u32,
+    due_at: Tick,
+) -> CommandResult {
+    ensure_positive(principal)?;
+    ensure_positive(repay_amount)?;
+    if borrower == lender || repay_amount < principal || world.resource::<CurrentTick>().0 >= due_at
+    {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    ensure_settlement_id_available(world, id, lender, nonce)?;
+    ensure_player_global_resource(world, lender, resource, principal)
+}
+#[allow(clippy::too_many_arguments)]
+fn apply_create_loan_offer(
+    world: &mut World,
+    lender: PlayerId,
+    id: SettlementId,
+    nonce: u64,
+    borrower: PlayerId,
+    resource: &str,
+    principal: u32,
+    repay_amount: u32,
+    due_at: Tick,
+) -> CommandResult {
+    validate_create_loan_offer(
+        world,
+        lender,
+        id,
+        nonce,
+        borrower,
+        resource,
+        principal,
+        repay_amount,
+        due_at,
+    )?;
+    reserve_player_resource(
+        world,
+        SettlementKind::Lending,
+        id,
+        lender,
+        resource,
+        principal,
+    )?;
+    world.resource_mut::<SettlementState>().id_nonces.insert(
+        id,
+        SettlementIdNonce {
+            owner: lender,
+            nonce,
+        },
+    );
+    world.resource_mut::<SettlementState>().loans.insert(
+        id,
+        LendingSettlement {
+            lender,
+            borrower,
+            resource: resource.to_string(),
+            principal,
+            repay_amount,
+            due_at,
+            accepted: false,
+            status: SettlementStatus::Open,
+        },
+    );
+    mark_receipt(world, SettlementKind::Lending, id, SettlementPhase::Reserve);
+    record_account_flow(
+        world,
+        player_account(lender),
+        reserve_account(SettlementKind::Lending, id, "principal"),
+        resource,
+        principal,
+        ResourceOperation::LendingSettlement,
+    );
+    Ok(())
+}
+fn validate_accept_loan(world: &World, borrower: PlayerId, id: SettlementId) -> CommandResult {
+    let loan = world
+        .resource::<SettlementState>()
+        .loans
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if loan.borrower != borrower {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    if has_receipt(world, SettlementKind::Lending, id, SettlementPhase::Accept) {
+        return Ok(());
+    }
+    ensure_open(loan.status)?;
+    if loan.accepted || world.resource::<CurrentTick>().0 >= loan.due_at {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    Ok(())
+}
+fn apply_accept_loan(world: &mut World, borrower: PlayerId, id: SettlementId) -> CommandResult {
+    validate_accept_loan(world, borrower, id)?;
+    if has_receipt(world, SettlementKind::Lending, id, SettlementPhase::Accept) {
+        return Ok(());
+    }
+    let loan = world
+        .resource::<SettlementState>()
+        .loans
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    release_reserved_to_player(
+        world,
+        SettlementKind::Lending,
+        id,
+        borrower,
+        &loan.resource,
+        loan.principal,
+    )?;
+    let mut state = world.resource_mut::<SettlementState>();
+    let loan_mut = state.loans.get_mut(&id).unwrap();
+    loan_mut.accepted = true;
+    loan_mut.status = SettlementStatus::Accepted;
+    mark_receipt(world, SettlementKind::Lending, id, SettlementPhase::Accept);
+    record_account_flow(
+        world,
+        reserve_account(SettlementKind::Lending, id, "principal"),
+        player_account(borrower),
+        &loan.resource,
+        loan.principal,
+        ResourceOperation::LendingSettlement,
+    );
+    Ok(())
+}
+fn validate_repay_loan(world: &World, borrower: PlayerId, id: SettlementId) -> CommandResult {
+    let loan = world
+        .resource::<SettlementState>()
+        .loans
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if loan.borrower != borrower {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    if has_receipt(world, SettlementKind::Lending, id, SettlementPhase::Repay) {
+        return Ok(());
+    }
+    if !loan.accepted || loan.status.is_terminal() {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    ensure_player_global_resource(world, borrower, &loan.resource, loan.repay_amount)
+}
+fn apply_repay_loan(world: &mut World, borrower: PlayerId, id: SettlementId) -> CommandResult {
+    validate_repay_loan(world, borrower, id)?;
+    if has_receipt(world, SettlementKind::Lending, id, SettlementPhase::Repay) {
+        return Ok(());
+    }
+    let loan = world
+        .resource::<SettlementState>()
+        .loans
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    debit_global(world, borrower, &loan.resource, loan.repay_amount)?;
+    credit_global(world, loan.lender, &loan.resource, loan.repay_amount);
+    world
+        .resource_mut::<SettlementState>()
+        .loans
+        .get_mut(&id)
+        .unwrap()
+        .status = SettlementStatus::Repaid;
+    mark_receipt(world, SettlementKind::Lending, id, SettlementPhase::Repay);
+    record_account_flow(
+        world,
+        player_account(borrower),
+        player_account(loan.lender),
+        &loan.resource,
+        loan.repay_amount,
+        ResourceOperation::LendingSettlement,
+    );
+    Ok(())
+}
+fn validate_default_loan(world: &World, id: SettlementId) -> CommandResult {
+    if has_receipt(world, SettlementKind::Lending, id, SettlementPhase::Default) {
+        return Ok(());
+    }
+    let loan = world
+        .resource::<SettlementState>()
+        .loans
+        .get(&id)
+        .ok_or(RejectionReason::OrderNotFound)?;
+    if !loan.accepted
+        || loan.status.is_terminal()
+        || world.resource::<CurrentTick>().0 <= loan.due_at
+    {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    Ok(())
+}
+fn apply_default_loan(world: &mut World, id: SettlementId) -> CommandResult {
+    validate_default_loan(world, id)?;
+    if has_receipt(world, SettlementKind::Lending, id, SettlementPhase::Default) {
+        return Ok(());
+    }
+    let loan = world
+        .resource::<SettlementState>()
+        .loans
+        .get(&id)
+        .cloned()
+        .ok_or(RejectionReason::OrderNotFound)?;
+    world
+        .resource_mut::<SettlementState>()
+        .loans
+        .get_mut(&id)
+        .unwrap()
+        .status = SettlementStatus::Defaulted;
+    mark_receipt(world, SettlementKind::Lending, id, SettlementPhase::Default);
+    let _ = loan;
+    Ok(())
+}
+
 fn apply_transfer_to_global(
     world: &mut World,
     player_id: PlayerId,
@@ -3626,6 +6870,8 @@ fn apply_transfer_to_global(
     amount: u32,
 ) -> CommandResult {
     let config = world.resource::<GlobalStorageConfig>().clone();
+    let fee = transfer_fee(amount, config.transfer_to_global_fee_per_10_000);
+    let deliver_amount = amount.saturating_sub(fee);
     subtract_player_resource(
         world
             .resource_mut::<PlayerLocalStorage>()
@@ -3643,10 +6889,7 @@ fn apply_transfer_to_global(
             direction: GlobalTransferDirection::ToGlobal,
             resource: resource.to_string(),
             amount,
-            deliver_amount: amount.saturating_sub(transfer_fee(
-                amount,
-                config.transfer_to_global_fee_per_10_000,
-            )),
+            deliver_amount,
             remaining_ticks: config.transfer_to_global_ticks,
             start: player_storage_position(player_id),
             end: global_storage_position(player_id),
@@ -3656,12 +6899,9 @@ fn apply_transfer_to_global(
         Some(player_id),
         Some(player_id),
         resource,
-        amount.saturating_sub(transfer_fee(
-            amount,
-            config.transfer_to_global_fee_per_10_000,
-        )),
+        amount,
         ResourceOperation::GlobalDeposit,
-        transfer_fee(amount, config.transfer_to_global_fee_per_10_000),
+        fee,
         config.transfer_to_global_fee_per_10_000,
     );
     Ok(())
@@ -3674,6 +6914,8 @@ fn apply_transfer_from_global(
     amount: u32,
 ) -> CommandResult {
     let config = world.resource::<GlobalStorageConfig>().clone();
+    let fee = transfer_fee(amount, config.transfer_from_global_fee_per_10_000);
+    let deliver_amount = amount.saturating_sub(fee);
     subtract_player_resource(
         world
             .resource_mut::<PlayerGlobalStorage>()
@@ -3691,10 +6933,7 @@ fn apply_transfer_from_global(
             direction: GlobalTransferDirection::FromGlobal,
             resource: resource.to_string(),
             amount,
-            deliver_amount: amount.saturating_sub(transfer_fee(
-                amount,
-                config.transfer_from_global_fee_per_10_000,
-            )),
+            deliver_amount,
             remaining_ticks: config.transfer_from_global_ticks,
             start: global_storage_position(player_id),
             end: player_storage_position(player_id),
@@ -3704,12 +6943,9 @@ fn apply_transfer_from_global(
         Some(player_id),
         Some(player_id),
         resource,
-        amount.saturating_sub(transfer_fee(
-            amount,
-            config.transfer_from_global_fee_per_10_000,
-        )),
+        amount,
         ResourceOperation::GlobalWithdraw,
-        transfer_fee(amount, config.transfer_from_global_fee_per_10_000),
+        fee,
         config.transfer_from_global_fee_per_10_000,
     );
     Ok(())
@@ -4306,6 +7542,238 @@ fn record_resource_flow(
     );
 }
 
+fn record_account_flow(
+    world: &mut World,
+    source: LedgerAccount,
+    target: LedgerAccount,
+    resource: &str,
+    amount: u32,
+    operation: ResourceOperation,
+) {
+    if amount == 0 {
+        return;
+    }
+    let tick = world.resource::<CurrentTick>().0;
+    world
+        .resource_mut::<ResourceLedger>()
+        .record_account_transfer(tick, source, target, resource, amount, operation);
+}
+
+fn player_account(player: PlayerId) -> LedgerAccount {
+    LedgerAccount::player(player)
+}
+
+fn reserve_account(kind: SettlementKind, id: SettlementId, label: &str) -> LedgerAccount {
+    LedgerAccount::reserve(kind, id, label)
+}
+
+fn merchant_account(quote_id: SettlementId) -> LedgerAccount {
+    LedgerAccount::merchant(quote_id)
+}
+
+fn settlement_sink(label: &str) -> LedgerAccount {
+    LedgerAccount::sink(label)
+}
+
+fn settlement_system(label: &str) -> LedgerAccount {
+    LedgerAccount::system(label)
+}
+
+fn ensure_positive(amount: u32) -> CommandResult {
+    if amount == 0 {
+        Err(RejectionReason::InsufficientResources)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_valid_resource_names(left: &str, right: &str) -> CommandResult {
+    if left.is_empty() || right.is_empty() {
+        Err(RejectionReason::InvalidResourceType)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_open(status: SettlementStatus) -> CommandResult {
+    if status.is_terminal() {
+        Err(RejectionReason::OrderNotFound)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_not_expired(world: &World, expires_at: Option<Tick>) -> CommandResult {
+    if let Some(expires_at) = expires_at
+        && world.resource::<CurrentTick>().0 > expires_at
+    {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    Ok(())
+}
+
+fn ensure_settlement_id_available(
+    world: &World,
+    id: SettlementId,
+    owner: PlayerId,
+    nonce: u64,
+) -> CommandResult {
+    if id == 0 {
+        return Err(RejectionReason::AuthContextInvalid);
+    }
+    let state = world.resource::<SettlementState>();
+    if state.id_nonces.contains_key(&id)
+        || state.contracts.contains_key(&id)
+        || state.merchant_quotes.contains_key(&id)
+        || state.p2p_offers.contains_key(&id)
+        || state.auctions.contains_key(&id)
+        || state.escrows.contains_key(&id)
+        || state.loans.contains_key(&id)
+    {
+        return Err(RejectionReason::OrderNotFound);
+    }
+    if deterministic_settlement_id(owner, nonce) != id {
+        return Err(RejectionReason::AuthContextInvalid);
+    }
+    Ok(())
+}
+
+fn deterministic_settlement_id(owner: PlayerId, nonce: u64) -> SettlementId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"swarm:settlement-id:v1");
+    hasher.update(&owner.to_le_bytes());
+    hasher.update(&nonce.to_le_bytes());
+    u64::from_le_bytes(
+        hasher.finalize().as_bytes()[..8]
+            .try_into()
+            .expect("BLAKE3 digest has 32 bytes"),
+    )
+}
+
+fn receipt(kind: SettlementKind, id: SettlementId, phase: SettlementPhase) -> SettlementKey {
+    SettlementKey { kind, id, phase }
+}
+
+fn has_receipt(
+    world: &World,
+    kind: SettlementKind,
+    id: SettlementId,
+    phase: SettlementPhase,
+) -> bool {
+    world
+        .resource::<SettlementState>()
+        .receipts
+        .contains_key(&receipt(kind, id, phase))
+}
+
+fn mark_receipt(world: &mut World, kind: SettlementKind, id: SettlementId, phase: SettlementPhase) {
+    world
+        .resource_mut::<SettlementState>()
+        .receipts
+        .insert(receipt(kind, id, phase), true);
+}
+
+fn ensure_player_global_resource(
+    world: &World,
+    player: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    let available = world
+        .resource::<PlayerGlobalStorage>()
+        .0
+        .get(&player)
+        .and_then(|storage| storage.get(resource))
+        .copied()
+        .unwrap_or_default();
+    if available < amount {
+        Err(RejectionReason::InsufficientResource {
+            resource: resource.to_string(),
+            required: amount,
+            available,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn debit_global(world: &mut World, player: PlayerId, resource: &str, amount: u32) -> CommandResult {
+    ensure_player_global_resource(world, player, resource, amount)?;
+    subtract_player_resource(
+        world
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(player)
+            .or_default(),
+        resource,
+        amount,
+    );
+    Ok(())
+}
+
+fn credit_global(world: &mut World, player: PlayerId, resource: &str, amount: u32) {
+    *world
+        .resource_mut::<PlayerGlobalStorage>()
+        .0
+        .entry(player)
+        .or_default()
+        .entry(resource.to_string())
+        .or_default() += amount;
+}
+
+fn reserve_player_resource(
+    world: &mut World,
+    kind: SettlementKind,
+    id: SettlementId,
+    player: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    debit_global(world, player, resource, amount)?;
+    *world
+        .resource_mut::<SettlementState>()
+        .reserves
+        .entry((kind, id))
+        .or_default()
+        .entry(resource.to_string())
+        .or_default() += amount;
+    Ok(())
+}
+
+fn release_reserved_to_player(
+    world: &mut World,
+    kind: SettlementKind,
+    id: SettlementId,
+    player: PlayerId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    consume_reserved(world, kind, id, resource, amount)?;
+    credit_global(world, player, resource, amount);
+    Ok(())
+}
+
+fn consume_reserved(
+    world: &mut World,
+    kind: SettlementKind,
+    id: SettlementId,
+    resource: &str,
+    amount: u32,
+) -> CommandResult {
+    let mut state = world.resource_mut::<SettlementState>();
+    let reserve = state.reserves.entry((kind, id)).or_default();
+    let available = reserve.get(resource).copied().unwrap_or_default();
+    if available < amount {
+        return Err(RejectionReason::InsufficientResource {
+            resource: resource.to_string(),
+            required: amount,
+            available,
+        });
+    }
+    reserve.insert(resource.to_string(), available - amount);
+    Ok(())
+}
+
 fn transfer_fee(amount: u32, fee_per_10_000: u32) -> u32 {
     amount.saturating_mul(fee_per_10_000) / 10_000
 }
@@ -4498,6 +7966,768 @@ mod tests {
         }
     }
 
+    fn run_settlement_action(
+        swarm: &mut crate::SwarmWorld,
+        player_id: PlayerId,
+        tick: Tick,
+        source: CommandSource,
+        action: CommandAction,
+    ) -> CommandResult {
+        let world = swarm.app.world_mut();
+        let raw = RawCommand {
+            player_id,
+            tick,
+            source,
+            auth: CommandAuth::server_injected(source, player_id, tick, tick),
+            sequence: 1,
+            action,
+        };
+        let validated = validate_command(world, raw)?;
+        apply_command(world, validated)
+    }
+
+    fn set_global(swarm: &mut crate::SwarmWorld, player: PlayerId, resource: &str, amount: u32) {
+        swarm
+            .app
+            .world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(player)
+            .or_default()
+            .insert(resource.to_string(), amount);
+    }
+
+    fn global_amount(swarm: &crate::SwarmWorld, player: PlayerId, resource: &str) -> u32 {
+        swarm
+            .app
+            .world()
+            .resource::<PlayerGlobalStorage>()
+            .0
+            .get(&player)
+            .and_then(|storage| storage.get(resource))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn local_amount(swarm: &crate::SwarmWorld, player: PlayerId, resource: &str) -> u32 {
+        swarm
+            .app
+            .world()
+            .resource::<PlayerLocalStorage>()
+            .0
+            .get(&player)
+            .and_then(|storage| storage.get(resource))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn submit_transfer_action(
+        world: &mut crate::SwarmWorld,
+        player_id: PlayerId,
+        action: CommandAction,
+    ) {
+        world
+            .submit_raw_command(RawCommand {
+                player_id,
+                tick: 1,
+                source: CommandSource::TestHarness,
+                auth: CommandAuth::server_injected(CommandSource::TestHarness, player_id, 1, 1),
+                sequence: 1,
+                action,
+            })
+            .unwrap();
+    }
+
+    fn seed_first_spawn(world: &mut crate::SwarmWorld, player_id: PlayerId) {
+        world
+            .app
+            .world_mut()
+            .resource_mut::<crate::systems::PlayerFirstSpawnTick>()
+            .0
+            .insert(player_id, 1);
+    }
+
+    fn settlement_id(owner: PlayerId, nonce: u64) -> SettlementId {
+        deterministic_settlement_id(owner, nonce)
+    }
+
+    #[test]
+    fn contract_settlement_reserves_settles_once_and_is_idempotent() {
+        let mut world = create_world();
+        set_global(&mut world, 1, "Energy", 100);
+        let id = settlement_id(1, 7);
+
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::CreateContractSettlement {
+                settlement_id: id,
+                nonce: 7,
+                input_resource: "Energy".into(),
+                input_amount: 40,
+                output_resource: "Energy".into(),
+                output_amount: 35,
+                counterparty: None,
+                expires_at: Some(10),
+            },
+        )
+        .unwrap();
+        assert_eq!(global_amount(&world, 1, "Energy"), 60);
+
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::SettleContract { settlement_id: id },
+        )
+        .unwrap();
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::SettleContract { settlement_id: id },
+        )
+        .unwrap();
+
+        assert_eq!(global_amount(&world, 1, "Energy"), 95);
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<SettlementState>()
+                .receipts
+                .contains_key(&receipt(
+                    SettlementKind::Contract,
+                    id,
+                    SettlementPhase::Settle
+                ))
+        );
+        let ledger = world.app.world().resource::<ResourceLedger>();
+        let contract_ops = ledger
+            .ops
+            .iter()
+            .filter(|op| op.operation == ResourceOperation::ContractSettlement)
+            .collect::<Vec<_>>();
+        assert_eq!(contract_ops.len(), 3);
+        assert!(contract_ops.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Player { player_id: 1 }),
+                    Some(LedgerAccount::Reserve { kind: SettlementKind::Contract, id: reserve_id, label })
+                ) if *reserve_id == id && label == "input"
+            )
+        }));
+        assert!(contract_ops.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Reserve { kind: SettlementKind::Contract, id: reserve_id, label }),
+                    Some(LedgerAccount::Sink { label: sink_label })
+                ) if *reserve_id == id && label == "input" && sink_label == "contract_remainder"
+            )
+        }));
+    }
+
+    #[test]
+    fn merchant_trade_requires_server_quote_and_min_receive() {
+        let mut world = create_world();
+        set_global(&mut world, 1, "Energy", 50);
+        let forged = run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::CreateMerchantQuote {
+                quote_id: 9,
+                player_id: 1,
+                pay_resource: "Energy".into(),
+                pay_amount: 10,
+                receive_resource: "Ore".into(),
+                receive_amount: 9,
+                expires_at: 10,
+            },
+        );
+        assert_eq!(forged, Err(RejectionReason::SourceNotAllowed));
+
+        run_settlement_action(
+            &mut world,
+            0,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::CreateMerchantQuote {
+                quote_id: 9,
+                player_id: 1,
+                pay_resource: "Energy".into(),
+                pay_amount: 10,
+                receive_resource: "Ore".into(),
+                receive_amount: 9,
+                expires_at: 10,
+            },
+        )
+        .unwrap();
+        assert!(
+            run_settlement_action(
+                &mut world,
+                1,
+                1,
+                CommandSource::TestHarness,
+                CommandAction::AcceptMerchantTrade {
+                    quote_id: 9,
+                    min_receive: 10
+                },
+            )
+            .is_err()
+        );
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::AcceptMerchantTrade {
+                quote_id: 9,
+                min_receive: 9,
+            },
+        )
+        .unwrap();
+        assert_eq!(global_amount(&world, 1, "Energy"), 40);
+        assert_eq!(global_amount(&world, 1, "Ore"), 9);
+
+        let ledger = world
+            .app
+            .world()
+            .resource::<ResourceLedger>()
+            .trace_snapshot();
+        assert!(ledger.conservation_imbalance.is_empty());
+        assert!(ledger.operations.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Player { player_id: 1 }),
+                    Some(LedgerAccount::Merchant { quote_id })
+                ) if *quote_id == 9 && op.resource == "Energy" && op.amount_requested == 10
+            )
+        }));
+        assert!(ledger.operations.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Merchant { quote_id }),
+                    Some(LedgerAccount::Player { player_id: 1 })
+                ) if *quote_id == 9 && op.resource == "Ore" && op.amount_requested == 9
+            )
+        }));
+    }
+
+    #[test]
+    fn settlement_ids_are_domain_separated_and_zero_is_rejected() {
+        let old_owner_one = (1_u64 << 32) ^ 0;
+        let old_owner_two = (2_u64 << 32) ^ (3_u64 << 32);
+        assert_eq!(old_owner_one, old_owner_two);
+        assert_ne!(settlement_id(1, 0), settlement_id(2, 3_u64 << 32));
+
+        let mut world = create_world();
+        set_global(&mut world, 1, "Energy", 10);
+        assert_eq!(
+            run_settlement_action(
+                &mut world,
+                1,
+                1,
+                CommandSource::TestHarness,
+                CommandAction::CreateEscrow {
+                    escrow_id: 0,
+                    nonce: 1,
+                    payee: 2,
+                    arbiter: 3,
+                    resource: "Energy".into(),
+                    amount: 1,
+                },
+            ),
+            Err(RejectionReason::AuthContextInvalid)
+        );
+    }
+
+    #[test]
+    fn terminal_receipts_authorize_actor_before_idempotency() {
+        let mut world = create_world();
+        set_global(&mut world, 1, "Energy", 100);
+        let contract_id = settlement_id(1, 31);
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::CreateContractSettlement {
+                settlement_id: contract_id,
+                nonce: 31,
+                input_resource: "Energy".into(),
+                input_amount: 10,
+                output_resource: "Energy".into(),
+                output_amount: 10,
+                counterparty: None,
+                expires_at: Some(10),
+            },
+        )
+        .unwrap();
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::SettleContract {
+                settlement_id: contract_id,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            run_settlement_action(
+                &mut world,
+                2,
+                1,
+                CommandSource::TestHarness,
+                CommandAction::SettleContract {
+                    settlement_id: contract_id,
+                },
+            ),
+            Err(RejectionReason::NotOwner)
+        );
+
+        let escrow_id = settlement_id(1, 32);
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::CreateEscrow {
+                escrow_id,
+                nonce: 32,
+                payee: 2,
+                arbiter: 3,
+                resource: "Energy".into(),
+                amount: 10,
+            },
+        )
+        .unwrap();
+        run_settlement_action(
+            &mut world,
+            3,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::ReleaseEscrow { escrow_id },
+        )
+        .unwrap();
+        assert!(
+            run_settlement_action(
+                &mut world,
+                3,
+                1,
+                CommandSource::TestHarness,
+                CommandAction::RefundEscrow { escrow_id },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn lending_default_is_status_only_and_does_not_mint() {
+        let mut world = create_world();
+        set_global(&mut world, 1, "Energy", 50);
+        let loan_id = settlement_id(1, 33);
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::CreateLoanOffer {
+                loan_id,
+                nonce: 33,
+                borrower: 2,
+                resource: "Energy".into(),
+                principal: 10,
+                repay_amount: 12,
+                due_at: 4,
+            },
+        )
+        .unwrap();
+        run_settlement_action(
+            &mut world,
+            2,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::AcceptLoan { loan_id },
+        )
+        .unwrap();
+        let total_before = global_amount(&world, 1, "Energy") + global_amount(&world, 2, "Energy");
+        let ops_before = world
+            .app
+            .world()
+            .resource::<ResourceLedger>()
+            .ops
+            .iter()
+            .filter(|op| op.operation == ResourceOperation::LendingSettlement)
+            .count();
+        world.app.world_mut().resource_mut::<CurrentTick>().0 = 5;
+        run_settlement_action(
+            &mut world,
+            99,
+            5,
+            CommandSource::TestHarness,
+            CommandAction::DefaultLoan { loan_id },
+        )
+        .unwrap();
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<SettlementState>()
+                .loans
+                .get(&loan_id)
+                .unwrap()
+                .status,
+            SettlementStatus::Defaulted
+        );
+        assert_eq!(
+            global_amount(&world, 1, "Energy") + global_amount(&world, 2, "Energy"),
+            total_before
+        );
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<ResourceLedger>()
+                .ops
+                .iter()
+                .filter(|op| op.operation == ResourceOperation::LendingSettlement)
+                .count(),
+            ops_before
+        );
+    }
+
+    #[test]
+    fn p2p_offer_auction_escrow_and_lending_workflows_conserve_balances() {
+        let mut world = create_world();
+        set_global(&mut world, 1, "Energy", 200);
+        set_global(&mut world, 2, "Ore", 100);
+        set_global(&mut world, 2, "Energy", 100);
+        set_global(&mut world, 3, "Ore", 50);
+
+        let offer_id = settlement_id(1, 11);
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::CreateP2POffer {
+                offer_id,
+                nonce: 11,
+                give_resource: "Energy".into(),
+                give_amount: 30,
+                want_resource: "Ore".into(),
+                want_amount: 10,
+                expires_at: 10,
+            },
+        )
+        .unwrap();
+        run_settlement_action(
+            &mut world,
+            2,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::AcceptP2POffer { offer_id },
+        )
+        .unwrap();
+        assert_eq!(global_amount(&world, 1, "Ore"), 10);
+        assert_eq!(global_amount(&world, 2, "Energy"), 130);
+
+        let auction_id = settlement_id(1, 12);
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::CreateAuction {
+                auction_id,
+                nonce: 12,
+                lot_resource: "Energy".into(),
+                lot_amount: 20,
+                bid_resource: "Ore".into(),
+                min_bid: 5,
+                ends_at: 3,
+            },
+        )
+        .unwrap();
+        run_settlement_action(
+            &mut world,
+            2,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::BidAuction {
+                auction_id,
+                bid_amount: 8,
+            },
+        )
+        .unwrap();
+        run_settlement_action(
+            &mut world,
+            3,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::BidAuction {
+                auction_id,
+                bid_amount: 9,
+            },
+        )
+        .unwrap();
+        assert_eq!(global_amount(&world, 2, "Ore"), 90);
+        world.app.world_mut().resource_mut::<CurrentTick>().0 = 3;
+        assert!(
+            run_settlement_action(
+                &mut world,
+                2,
+                3,
+                CommandSource::TestHarness,
+                CommandAction::BidAuction {
+                    auction_id,
+                    bid_amount: 9
+                }
+            )
+            .is_err()
+        );
+        world.app.world_mut().resource_mut::<CurrentTick>().0 = 3;
+        run_settlement_action(
+            &mut world,
+            1,
+            3,
+            CommandSource::TestHarness,
+            CommandAction::SettleAuction { auction_id },
+        )
+        .unwrap();
+        assert_eq!(global_amount(&world, 2, "Energy"), 130);
+        assert_eq!(global_amount(&world, 3, "Energy"), 20);
+
+        let escrow_id = settlement_id(1, 13);
+        run_settlement_action(
+            &mut world,
+            1,
+            3,
+            CommandSource::TestHarness,
+            CommandAction::CreateEscrow {
+                escrow_id,
+                nonce: 13,
+                payee: 2,
+                arbiter: 3,
+                resource: "Energy".into(),
+                amount: 10,
+            },
+        )
+        .unwrap();
+        assert!(
+            run_settlement_action(
+                &mut world,
+                1,
+                3,
+                CommandSource::TestHarness,
+                CommandAction::RefundEscrow { escrow_id }
+            )
+            .is_err()
+        );
+        run_settlement_action(
+            &mut world,
+            3,
+            3,
+            CommandSource::TestHarness,
+            CommandAction::ReleaseEscrow { escrow_id },
+        )
+        .unwrap();
+        assert_eq!(global_amount(&world, 2, "Energy"), 140);
+
+        let loan_id = settlement_id(1, 14);
+        run_settlement_action(
+            &mut world,
+            1,
+            3,
+            CommandSource::TestHarness,
+            CommandAction::CreateLoanOffer {
+                loan_id,
+                nonce: 14,
+                borrower: 2,
+                resource: "Energy".into(),
+                principal: 10,
+                repay_amount: 12,
+                due_at: 6,
+            },
+        )
+        .unwrap();
+        run_settlement_action(
+            &mut world,
+            2,
+            3,
+            CommandSource::TestHarness,
+            CommandAction::AcceptLoan { loan_id },
+        )
+        .unwrap();
+        run_settlement_action(
+            &mut world,
+            2,
+            4,
+            CommandSource::TestHarness,
+            CommandAction::RepayLoan { loan_id },
+        )
+        .unwrap();
+        assert_eq!(
+            world
+                .app
+                .world()
+                .resource::<SettlementState>()
+                .loans
+                .get(&loan_id)
+                .unwrap()
+                .status,
+            SettlementStatus::Repaid
+        );
+
+        let total_energy = global_amount(&world, 1, "Energy")
+            + global_amount(&world, 2, "Energy")
+            + global_amount(&world, 3, "Energy")
+            + world
+                .app
+                .world()
+                .resource::<SettlementState>()
+                .reserves
+                .values()
+                .map(|cost| cost.get("Energy").copied().unwrap_or_default())
+                .sum::<u32>();
+        assert_eq!(total_energy, 300);
+
+        let ledger = world
+            .app
+            .world()
+            .resource::<ResourceLedger>()
+            .trace_snapshot();
+        assert!(ledger.conservation_imbalance.is_empty());
+        assert!(ledger.operations.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Player { player_id: 1 }),
+                    Some(LedgerAccount::Reserve { kind: SettlementKind::P2POffer, id: reserve_id, label })
+                ) if *reserve_id == offer_id && label == "give" && op.resource == "Energy" && op.amount_requested == 30
+            )
+        }));
+        assert!(ledger.operations.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Player { player_id: 2 }),
+                    Some(LedgerAccount::Player { player_id: 1 })
+                ) if op.operation == ResourceOperation::P2POfferSettlement && op.resource == "Ore" && op.amount_requested == 10
+            )
+        }));
+        assert!(ledger.operations.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Reserve { kind: SettlementKind::Auction, id: reserve_id, label }),
+                    Some(LedgerAccount::Player { player_id: 2 })
+                ) if *reserve_id == auction_id && label == "bid" && op.resource == "Ore" && op.amount_requested == 8
+            )
+        }));
+        assert!(ledger.operations.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Reserve { kind: SettlementKind::Auction, id: reserve_id, label }),
+                    Some(LedgerAccount::Player { player_id: 3 })
+                ) if *reserve_id == auction_id && label == "lot" && op.resource == "Energy" && op.amount_requested == 20
+            )
+        }));
+        assert!(ledger.operations.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Reserve { kind: SettlementKind::Escrow, id: reserve_id, label }),
+                    Some(LedgerAccount::Player { player_id: 2 })
+                ) if *reserve_id == escrow_id && label == "escrow" && op.resource == "Energy" && op.amount_requested == 10
+            )
+        }));
+        assert!(ledger.operations.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Reserve { kind: SettlementKind::Lending, id: reserve_id, label }),
+                    Some(LedgerAccount::Player { player_id: 2 })
+                ) if *reserve_id == loan_id && label == "principal" && op.resource == "Energy" && op.amount_requested == 10
+            )
+        }));
+        assert!(ledger.operations.iter().any(|op| {
+            matches!(
+                (&op.source_account, &op.target_account),
+                (
+                    Some(LedgerAccount::Player { player_id: 2 }),
+                    Some(LedgerAccount::Player { player_id: 1 })
+                ) if op.operation == ResourceOperation::LendingSettlement && op.resource == "Energy" && op.amount_requested == 12
+            )
+        }));
+    }
+
+    #[test]
+    fn settlement_state_is_snapshot_restored_and_schema_exports_commands() {
+        let mut world = create_world();
+        set_global(&mut world, 1, "Energy", 100);
+        let before = crate::world::state_checksum(world.app.world_mut());
+        let id = settlement_id(1, 21);
+        run_settlement_action(
+            &mut world,
+            1,
+            1,
+            CommandSource::TestHarness,
+            CommandAction::CreateEscrow {
+                escrow_id: id,
+                nonce: 21,
+                payee: 2,
+                arbiter: 3,
+                resource: "Energy".into(),
+                amount: 10,
+            },
+        )
+        .unwrap();
+        let after = crate::world::state_checksum(world.app.world_mut());
+        assert_ne!(before, after);
+        let snapshot = crate::tick::WorldSnapshot::capture(world.app.world_mut());
+        world
+            .app
+            .world_mut()
+            .resource_mut::<SettlementState>()
+            .escrows
+            .clear();
+        snapshot.restore(world.app.world_mut());
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<SettlementState>()
+                .escrows
+                .contains_key(&id)
+        );
+
+        assert!(serde_json::from_value::<SettlementState>(serde_json::json!({})).is_ok());
+
+        let schema = serde_json::to_value(schemars::schema_for!(Vec<CommandIntent>)).unwrap();
+        let tags = schema["$defs"]["CommandAction"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|branch| branch["properties"]["type"]["const"].as_str())
+            .collect::<Vec<_>>();
+        assert!(tags.contains(&"CreateContractSettlement"));
+        assert!(tags.contains(&"DefaultLoan"));
+        assert!(!tags.contains(&"Action"));
+    }
+
     #[test]
     fn concrete_action_wire_flattens_optional_payload_fields() {
         let action: CommandAction = serde_json::from_value(serde_json::json!({
@@ -4509,20 +8739,101 @@ mod tests {
         }))
         .unwrap();
 
-        let CommandAction::Action {
-            action_type,
+        let CommandAction::Debilitate {
             object_id,
             target_id,
-            payload,
+            resource,
+            amount,
+            range,
+            structure,
+            damage_type,
+            cooldown,
         } = action
         else {
-            panic!("concrete action must deserialize to the internal Action variant");
+            panic!("concrete action must deserialize to its concrete variant");
         };
-        assert_eq!(action_type, "Debilitate");
         assert_eq!(object_id, 7);
-        assert_eq!(target_id, Some(9));
-        assert_eq!(payload["damage_type"], "Kinetic");
-        assert_eq!(payload["cooldown"], 5);
+        assert_eq!(target_id, 9);
+        assert_eq!(resource, None);
+        assert_eq!(amount, None);
+        assert_eq!(range, None);
+        assert_eq!(structure, None);
+        assert_eq!(damage_type.as_deref(), Some("Kinetic"));
+        assert_eq!(cooldown, Some(5));
+    }
+
+    #[test]
+    fn every_special_action_decodes_legacy_and_serializes_canonical_wire() {
+        for &action_type in SPECIAL_COMMAND_ACTIONS {
+            let canonical = serde_json::json!({
+                "type": action_type,
+                "object_id": 7,
+                "target_id": 9,
+                "resource": "Energy",
+                "amount": 3,
+                "range": 2,
+                "structure": "Tower",
+                "damage_type": "EMP",
+                "cooldown": 5
+            });
+            let direct = serde_json::from_value::<CommandAction>(canonical.clone()).unwrap();
+            let expected = special_action_from_name::<serde::de::value::Error>(
+                action_type,
+                SpecialActionFields {
+                    object_id: 7,
+                    target_id: 9,
+                    resource: Some("Energy".to_string()),
+                    amount: Some(3),
+                    range: Some(2),
+                    structure: Some(StructureType::Tower),
+                    damage_type: Some("EMP".to_string()),
+                    cooldown: Some(5),
+                },
+            )
+            .unwrap();
+            assert_eq!(direct, expected);
+
+            let legacy = serde_json::from_value::<CommandAction>(serde_json::json!({
+                "type": "Action",
+                "action_type": action_type,
+                "object_id": 7,
+                "target_id": 9,
+                "payload": {
+                    "resource": "Energy",
+                    "amount": 3,
+                    "range": 2,
+                    "structure": "Tower",
+                    "damage_type": "EMP",
+                    "cooldown": 5
+                }
+            }))
+            .unwrap();
+            assert_eq!(legacy, expected);
+
+            let serialized = serde_json::to_value(&legacy).unwrap();
+            assert_eq!(serialized, canonical);
+            assert!(serialized.get("action_type").is_none());
+            assert!(serialized.get("payload").is_none());
+        }
+    }
+
+    #[test]
+    fn generated_command_schema_tags_match_special_action_registry() {
+        let schema = serde_json::to_value(schemars::schema_for!(Vec<CommandIntent>)).unwrap();
+        let tags = schema["$defs"]["CommandAction"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|branch| branch["properties"]["type"]["const"].as_str())
+            .collect::<Vec<_>>();
+        let special_tags = tags
+            .iter()
+            .copied()
+            .filter(|tag| SPECIAL_COMMAND_ACTIONS.contains(tag))
+            .collect::<Vec<_>>();
+
+        assert_eq!(special_tags, SPECIAL_COMMAND_ACTIONS);
+        assert!(!tags.contains(&"Action"));
     }
 
     #[test]
@@ -4712,15 +9023,50 @@ mod tests {
     }
 
     #[test]
-    fn legacy_action_wrapper_and_reserved_payload_keys_are_rejected() {
+    fn legacy_action_wrapper_normalizes_action_type_and_rejects_reserved_payload_keys() {
         let legacy = serde_json::from_value::<CommandAction>(serde_json::json!({
             "type": "Action",
             "action_type": "Attack",
             "object_id": 7,
             "target_id": 9
         }))
+        .unwrap();
+        assert_eq!(
+            legacy,
+            CommandAction::Attack {
+                object_id: 7,
+                target_id: 9,
+                resource: None,
+                amount: None,
+                range: None,
+                structure: None,
+                damage_type: None,
+                cooldown: None,
+            }
+        );
+
+        let unknown = serde_json::from_value::<CommandAction>(serde_json::json!({
+            "type": "Action",
+            "action_type": "Move",
+            "object_id": 7,
+            "target_id": 9
+        }))
         .unwrap_err();
-        assert!(legacy.to_string().contains("wire type Action is internal"));
+        assert!(
+            unknown
+                .to_string()
+                .contains("legacy Action wrapper uses reserved non-special action_type Move")
+        );
+
+        let reserved_payload = serde_json::from_value::<CommandAction>(serde_json::json!({
+            "type": "Action",
+            "action_type": "Attack",
+            "object_id": 7,
+            "target_id": 9,
+            "payload": {"type": "Move"}
+        }))
+        .unwrap_err();
+        assert!(reserved_payload.to_string().contains("reserved field type"));
 
         assert!(
             serde_json::from_value::<CommandAction>(serde_json::json!({
@@ -5048,7 +9394,23 @@ mod tests {
             .insert((target_id, "Hack".to_string()), 50);
 
         world
-            .submit_raw_command(raw_custom(1, "Disrupt", attacker_id, Some(target_id)))
+            .submit_raw_command(RawCommand {
+                player_id: 1,
+                tick: 1,
+                source: CommandSource::TestHarness,
+                auth: CommandAuth::server_injected(CommandSource::TestHarness, 1, 1, 1),
+                sequence: 1,
+                action: CommandAction::Disrupt {
+                    object_id: attacker_id,
+                    target_id,
+                    resource: None,
+                    amount: None,
+                    range: None,
+                    structure: None,
+                    damage_type: None,
+                    cooldown: None,
+                },
+            })
             .unwrap();
         world.run_tick_for(1);
 
@@ -5094,7 +9456,23 @@ mod tests {
         ));
 
         world
-            .submit_raw_command(raw_custom(1, "Fortify", drone_id, None))
+            .submit_raw_command(RawCommand {
+                player_id: 1,
+                tick: 1,
+                source: CommandSource::TestHarness,
+                auth: CommandAuth::server_injected(CommandSource::TestHarness, 1, 1, 1),
+                sequence: 1,
+                action: CommandAction::Fortify {
+                    object_id: drone_id,
+                    target_id: drone_id,
+                    resource: None,
+                    amount: None,
+                    range: None,
+                    structure: None,
+                    damage_type: None,
+                    cooldown: None,
+                },
+            })
             .unwrap();
         world.run_tick_for(1);
 
@@ -5112,5 +9490,172 @@ mod tests {
         assert!(!flags.contains_key("Hacking"));
         assert_eq!(flags.get("Fortified"), Some(&true));
         assert_eq!(flags.get("immune_Kinetic"), Some(&true));
+    }
+
+    #[test]
+    fn allied_transfer_records_gross_delivered_and_fee_once() {
+        let mut world = create_world();
+        set_global(&mut world, 1, "Energy", 1_000);
+        seed_first_spawn(&mut world, 2);
+
+        submit_transfer_action(
+            &mut world,
+            1,
+            CommandAction::AlliedTransfer {
+                target_player: 2,
+                resource: "Energy".into(),
+                amount: 100,
+            },
+        );
+
+        let ledger = world.app.world().resource::<ResourceLedger>();
+        let entry = ledger.ops.last().unwrap();
+        assert_eq!(entry.operation, ResourceOperation::AlliedTransfer);
+        assert_eq!(entry.amount_requested, 100);
+        assert_eq!(entry.amount_delivered, 98);
+        assert_eq!(entry.fee_paid, 2);
+        assert_eq!(entry.basis_points_used, ALLIED_TRANSFER_FEE_BP);
+        assert_eq!(
+            *ledger.balance_delta.get(&1).unwrap().get("Energy").unwrap(),
+            -100
+        );
+        assert_eq!(
+            *ledger.balance_delta.get(&2).unwrap().get("Energy").unwrap(),
+            98
+        );
+        assert_eq!(
+            *ledger
+                .account_delta
+                .get("player:1")
+                .unwrap()
+                .get("Energy")
+                .unwrap(),
+            -100
+        );
+        assert_eq!(
+            *ledger
+                .account_delta
+                .get("player:2")
+                .unwrap()
+                .get("Energy")
+                .unwrap(),
+            98
+        );
+        assert_eq!(
+            *ledger
+                .account_delta
+                .get("sink:AlliedTransfer:fee")
+                .unwrap()
+                .get("Energy")
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn transfer_to_global_records_gross_delivered_and_fee_once() {
+        let mut world = create_world();
+        give_local_energy(world.app.world_mut(), 1, 1_000);
+
+        submit_transfer_action(
+            &mut world,
+            1,
+            CommandAction::TransferToGlobal {
+                resource: "Energy".into(),
+                amount: 100,
+            },
+        );
+
+        {
+            let ledger = world.app.world().resource::<ResourceLedger>();
+            let entry = ledger.ops.last().unwrap();
+            assert_eq!(entry.operation, ResourceOperation::GlobalDeposit);
+            assert_eq!(entry.amount_requested, 100);
+            assert_eq!(entry.amount_delivered, 99);
+            assert_eq!(entry.fee_paid, 1);
+            assert_eq!(entry.basis_points_used, 100);
+            assert_eq!(
+                *ledger.balance_delta.get(&1).unwrap().get("Energy").unwrap(),
+                -1
+            );
+            assert_eq!(
+                *ledger
+                    .account_delta
+                    .get("player:1")
+                    .unwrap()
+                    .get("Energy")
+                    .unwrap(),
+                -1
+            );
+            assert_eq!(
+                *ledger
+                    .account_delta
+                    .get("sink:GlobalDeposit:fee")
+                    .unwrap()
+                    .get("Energy")
+                    .unwrap(),
+                1
+            );
+        }
+        assert_eq!(local_amount(&world, 1, "Energy"), 900);
+        {
+            let pending = world.app.world().resource::<PendingGlobalTransfers>();
+            let transfer = pending.0.last().unwrap();
+            assert_eq!(transfer.amount, 100);
+            assert_eq!(transfer.deliver_amount, 99);
+        }
+    }
+
+    #[test]
+    fn transfer_from_global_records_gross_delivered_and_fee_once() {
+        let mut world = create_world();
+        set_global(&mut world, 1, "Energy", 1_000);
+
+        submit_transfer_action(
+            &mut world,
+            1,
+            CommandAction::TransferFromGlobal {
+                resource: "Energy".into(),
+                amount: 1_000,
+            },
+        );
+
+        {
+            let ledger = world.app.world().resource::<ResourceLedger>();
+            let entry = ledger.ops.last().unwrap();
+            assert_eq!(entry.operation, ResourceOperation::GlobalWithdraw);
+            assert_eq!(entry.amount_requested, 1_000);
+            assert_eq!(entry.amount_delivered, 950);
+            assert_eq!(entry.fee_paid, 50);
+            assert_eq!(entry.basis_points_used, 500);
+            assert_eq!(
+                *ledger.balance_delta.get(&1).unwrap().get("Energy").unwrap(),
+                -50
+            );
+            assert_eq!(
+                *ledger
+                    .account_delta
+                    .get("player:1")
+                    .unwrap()
+                    .get("Energy")
+                    .unwrap(),
+                -50
+            );
+            assert_eq!(
+                *ledger
+                    .account_delta
+                    .get("sink:GlobalWithdraw:fee")
+                    .unwrap()
+                    .get("Energy")
+                    .unwrap(),
+                50
+            );
+        }
+        {
+            let pending = world.app.world().resource::<PendingGlobalTransfers>();
+            let transfer = pending.0.last().unwrap();
+            assert_eq!(transfer.amount, 1_000);
+            assert_eq!(transfer.deliver_amount, 950);
+        }
     }
 }

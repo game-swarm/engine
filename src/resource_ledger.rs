@@ -8,9 +8,12 @@ use crate::command::Tick;
 use crate::components::PlayerId;
 use crate::resources::{
     GlobalStorageConfig, PendingGlobalTransfer, PendingGlobalTransfers, PlayerGlobalStorage,
-    PlayerLocalStorage, ResourceAmount, ResourceName,
+    PlayerLocalStorage, ResourceAmount, ResourceName, SettlementId, SettlementKind,
 };
 use crate::tick::{TickTraceEvent, TickTraceEventLog};
+
+const RESOURCE_LEDGER_ENTRY_DIGEST_DOMAIN: &[u8] = b"swarm.resource-ledger.entry.v1";
+const ZERO_LEDGER_DIGEST: [u8; 32] = [0; 32];
 
 // ═══════════════════════════════════════════════════════════════════
 // Resource Operations
@@ -31,6 +34,11 @@ pub enum ResourceOperation {
     UpkeepDeduction,
     StorageTax,
     ContractSettlement,
+    MerchantTradeSettlement,
+    P2POfferSettlement,
+    AuctionSettlement,
+    EscrowSettlement,
+    LendingSettlement,
 }
 
 /// Result of a resource operation
@@ -365,21 +373,112 @@ pub fn execute_storage_tax(
 
 use bevy::prelude::*;
 
-/// Cumulative ledger tracking all resource operations this tick
+/// Account identity used by the authoritative resource ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LedgerAccount {
+    Player {
+        player_id: PlayerId,
+    },
+    Reserve {
+        kind: SettlementKind,
+        id: SettlementId,
+        label: String,
+    },
+    Merchant {
+        quote_id: SettlementId,
+    },
+    System {
+        label: String,
+    },
+    Sink {
+        label: String,
+    },
+}
+
+impl LedgerAccount {
+    pub fn player(player_id: PlayerId) -> Self {
+        Self::Player { player_id }
+    }
+
+    pub fn reserve(kind: SettlementKind, id: SettlementId, label: impl Into<String>) -> Self {
+        Self::Reserve {
+            kind,
+            id,
+            label: label.into(),
+        }
+    }
+
+    pub fn merchant(quote_id: SettlementId) -> Self {
+        Self::Merchant { quote_id }
+    }
+
+    pub fn system(label: impl Into<String>) -> Self {
+        Self::System {
+            label: label.into(),
+        }
+    }
+
+    pub fn sink(label: impl Into<String>) -> Self {
+        Self::Sink {
+            label: label.into(),
+        }
+    }
+
+    fn player_id(&self) -> Option<PlayerId> {
+        match self {
+            Self::Player { player_id } => Some(*player_id),
+            _ => None,
+        }
+    }
+
+    fn key(&self) -> String {
+        match self {
+            Self::Player { player_id } => format!("player:{player_id}"),
+            Self::Reserve { kind, id, label } => format!("reserve:{kind:?}:{id}:{label}"),
+            Self::Merchant { quote_id } => format!("merchant:{quote_id}"),
+            Self::System { label } => format!("system:{label}"),
+            Self::Sink { label } => format!("sink:{label}"),
+        }
+    }
+}
+
+/// Cumulative ledger tracking current-tick and finalized resource operations.
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceLedger {
-    /// Ordered log of all resource operations
+    /// Ordered log of current-tick resource operations.
+    #[serde(default)]
     pub ops: Vec<ResourceLedgerEntry>,
-    /// Net balance delta per player per resource
+    /// Current-tick net balance delta per player per resource.
+    #[serde(default)]
     pub balance_delta: IndexMap<PlayerId, IndexMap<String, i64>>,
-    /// Ledger checksum for TickTrace integrity
+    /// Current-tick net balance delta per ledger account key per resource.
+    #[serde(default)]
+    pub account_delta: IndexMap<String, IndexMap<String, i64>>,
+    /// Persistent cumulative net balance delta per ledger account key per resource.
+    #[serde(default)]
+    pub cumulative_account_delta: IndexMap<String, IndexMap<String, i64>>,
+    /// Persistent ledger checksum for TickTrace integrity.
+    #[serde(default)]
     pub ledger_checksum: u64,
+    /// Persistent authenticated ledger digest for TickTrace integrity.
+    #[serde(default)]
+    pub ledger_digest: [u8; 32],
+    /// Digest at the start of the current tick chain.
+    #[serde(default)]
+    pub tick_start_ledger_digest: [u8; 32],
+    /// Finalized previous tick snapshot. Used after S29 clears current ops.
+    #[serde(default)]
+    pub last_tick: ResourceLedgerTraceSnapshot,
 }
 
 /// A single resource operation entry
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceLedgerEntry {
     pub tick: Tick,
+    #[serde(default)]
+    pub source_account: Option<LedgerAccount>,
+    #[serde(default)]
+    pub target_account: Option<LedgerAccount>,
     pub source_player: Option<PlayerId>,
     pub target_player: Option<PlayerId>,
     pub resource: String,
@@ -398,9 +497,52 @@ pub struct ResourceLedgerEntry {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceLedgerTraceSnapshot {
+    #[serde(default)]
     pub operations: Vec<ResourceLedgerEntry>,
+    #[serde(default)]
     pub balance_delta: IndexMap<PlayerId, IndexMap<String, i64>>,
+    #[serde(default)]
+    pub account_delta: IndexMap<String, IndexMap<String, i64>>,
+    #[serde(default)]
+    pub cumulative_account_delta: IndexMap<String, IndexMap<String, i64>>,
+    #[serde(default)]
+    pub conservation_imbalance: IndexMap<String, i64>,
+    #[serde(default)]
     pub ledger_checksum: u64,
+    #[serde(default)]
+    pub previous_ledger_digest: [u8; 32],
+    #[serde(default)]
+    pub ledger_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceLedgerValidationError {
+    ConservationSummaryMismatch {
+        expected: IndexMap<String, i64>,
+        actual: IndexMap<String, i64>,
+    },
+    ConservationImbalance {
+        imbalance: IndexMap<String, i64>,
+    },
+    BalanceDeltaMismatch {
+        expected: IndexMap<PlayerId, IndexMap<String, i64>>,
+        actual: IndexMap<PlayerId, IndexMap<String, i64>>,
+    },
+    AccountDeltaMismatch {
+        expected: IndexMap<String, IndexMap<String, i64>>,
+        actual: IndexMap<String, IndexMap<String, i64>>,
+    },
+    LegacyDigestForNewLedger,
+    LedgerDigestMismatch {
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
+}
+
+impl std::fmt::Display for ResourceLedgerValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
 }
 
 impl ResourceLedger {
@@ -414,6 +556,29 @@ impl ResourceLedger {
         operation: ResourceOperation,
     ) {
         self.record_attributed(tick, source, target, resource, amount, operation, 0, 0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_account_transfer(
+        &mut self,
+        tick: Tick,
+        source_account: LedgerAccount,
+        target_account: LedgerAccount,
+        resource: &str,
+        amount: ResourceAmount,
+        operation: ResourceOperation,
+    ) {
+        self.record_account_transfer_amounts(
+            tick,
+            Some(source_account),
+            Some(target_account),
+            resource,
+            amount,
+            amount,
+            operation,
+            0,
+            0,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -456,9 +621,49 @@ impl ResourceLedger {
         fee_paid: ResourceAmount,
         basis_points_used: u32,
     ) {
-        let amount = i64::from(amount_requested);
-        self.ops.push(ResourceLedgerEntry {
+        let source_account = source
+            .map(LedgerAccount::player)
+            .or_else(|| target.map(|_| LedgerAccount::system(format!("{:?}", operation))));
+        let target_account = target
+            .map(LedgerAccount::player)
+            .or_else(|| source.map(|_| LedgerAccount::sink(format!("{:?}", operation))));
+
+        self.record_account_transfer_amounts(
             tick,
+            source_account,
+            target_account,
+            resource,
+            amount_requested,
+            amount_delivered,
+            operation,
+            fee_paid,
+            basis_points_used,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_account_transfer_amounts(
+        &mut self,
+        tick: Tick,
+        source_account: Option<LedgerAccount>,
+        target_account: Option<LedgerAccount>,
+        resource: &str,
+        amount_requested: ResourceAmount,
+        amount_delivered: ResourceAmount,
+        operation: ResourceOperation,
+        fee_paid: ResourceAmount,
+        basis_points_used: u32,
+    ) {
+        let amount = i64::from(amount_requested);
+        let source = source_account.as_ref().and_then(LedgerAccount::player_id);
+        let target = target_account.as_ref().and_then(LedgerAccount::player_id);
+        if self.ops.is_empty() {
+            self.tick_start_ledger_digest = self.ledger_digest;
+        }
+        let entry = ResourceLedgerEntry {
+            tick,
+            source_account: source_account.clone(),
+            target_account: target_account.clone(),
             source_player: source,
             target_player: target,
             resource: resource.to_string(),
@@ -468,7 +673,9 @@ impl ResourceLedger {
             operation,
             fee_paid,
             basis_points_used,
-        });
+        };
+        self.ledger_digest = ledger_entry_digest(self.ledger_digest, &entry);
+        self.ops.push(entry);
 
         // Track balance delta
         if let Some(s) = source {
@@ -488,6 +695,20 @@ impl ResourceLedger {
                 .or_default() += i64::from(amount_delivered);
         }
 
+        if let Some(account) = &source_account {
+            self.add_account_delta(account, resource, -i64::from(amount_requested));
+        }
+        if let Some(account) = &target_account {
+            self.add_account_delta(account, resource, i64::from(amount_delivered));
+        }
+        if fee_paid > 0 {
+            self.add_account_delta(
+                &LedgerAccount::sink(format!("{:?}:fee", operation)),
+                resource,
+                i64::from(fee_paid),
+            );
+        }
+
         // Simple rolling checksum
         self.ledger_checksum = self
             .ledger_checksum
@@ -495,7 +716,28 @@ impl ResourceLedger {
             .wrapping_add(u64::from(amount_delivered))
             .wrapping_add(fee_paid as u64)
             .wrapping_add(basis_points_used as u64)
-            .wrapping_add(tick);
+            .wrapping_add(tick)
+            .wrapping_add(account_checksum(source_account.as_ref()))
+            .wrapping_add(account_checksum(target_account.as_ref()));
+    }
+
+    fn add_account_delta(&mut self, account: &LedgerAccount, resource: &str, delta: i64) {
+        if delta == 0 {
+            return;
+        }
+        let key = account.key();
+        *self
+            .account_delta
+            .entry(key.clone())
+            .or_default()
+            .entry(resource.to_string())
+            .or_default() += delta;
+        *self
+            .cumulative_account_delta
+            .entry(key)
+            .or_default()
+            .entry(resource.to_string())
+            .or_default() += delta;
     }
 
     pub fn record_transfer_result(&mut self, tick: Tick, result: &TransferResult) {
@@ -516,12 +758,354 @@ impl ResourceLedger {
     }
 
     pub fn trace_snapshot(&self) -> ResourceLedgerTraceSnapshot {
+        if self.ops.is_empty() && self.balance_delta.is_empty() && self.account_delta.is_empty() {
+            return self.last_tick.clone();
+        }
+        self.current_snapshot()
+    }
+
+    pub fn finalize_current_tick(&mut self) -> ResourceLedgerTraceSnapshot {
+        let snapshot = self.current_snapshot();
+        self.last_tick = snapshot.clone();
+        self.ops.clear();
+        self.balance_delta.clear();
+        self.account_delta.clear();
+        self.tick_start_ledger_digest = self.ledger_digest;
+        snapshot
+    }
+
+    fn current_snapshot(&self) -> ResourceLedgerTraceSnapshot {
         ResourceLedgerTraceSnapshot {
             operations: self.ops.clone(),
             balance_delta: self.balance_delta.clone(),
+            account_delta: self.account_delta.clone(),
+            cumulative_account_delta: self.cumulative_account_delta.clone(),
+            conservation_imbalance: conservation_imbalance(&self.account_delta),
             ledger_checksum: self.ledger_checksum,
+            previous_ledger_digest: self.tick_start_ledger_digest,
+            ledger_digest: self.ledger_digest,
         }
     }
+}
+
+impl ResourceLedgerTraceSnapshot {
+    pub fn validate_for_commit(&self) -> Result<(), ResourceLedgerValidationError> {
+        self.validate(false)
+    }
+
+    pub fn validate_for_replay(&self) -> Result<(), ResourceLedgerValidationError> {
+        self.validate(true)
+    }
+
+    pub fn replay_equivalent(&self, replayed: &Self) -> bool {
+        if !self.uses_legacy_digest() {
+            return self == replayed;
+        }
+
+        let mut expected = self.clone();
+        let mut actual = replayed.clone();
+        expected.previous_ledger_digest = ZERO_LEDGER_DIGEST;
+        expected.ledger_digest = ZERO_LEDGER_DIGEST;
+        actual.previous_ledger_digest = ZERO_LEDGER_DIGEST;
+        actual.ledger_digest = ZERO_LEDGER_DIGEST;
+        expected == actual
+    }
+
+    fn validate(&self, allow_legacy_digest: bool) -> Result<(), ResourceLedgerValidationError> {
+        let expected_imbalance = conservation_imbalance(&self.account_delta);
+        if expected_imbalance != self.conservation_imbalance {
+            return Err(ResourceLedgerValidationError::ConservationSummaryMismatch {
+                expected: expected_imbalance,
+                actual: self.conservation_imbalance.clone(),
+            });
+        }
+        if !self.conservation_imbalance.is_empty() {
+            return Err(ResourceLedgerValidationError::ConservationImbalance {
+                imbalance: self.conservation_imbalance.clone(),
+            });
+        }
+
+        self.validate_digest(allow_legacy_digest)?;
+
+        let expected_balance_delta = balance_delta_from_operations(&self.operations);
+        if expected_balance_delta != self.balance_delta {
+            return Err(ResourceLedgerValidationError::BalanceDeltaMismatch {
+                expected: expected_balance_delta,
+                actual: self.balance_delta.clone(),
+            });
+        }
+
+        let expected_account_delta = account_delta_from_operations(&self.operations);
+        if expected_account_delta != self.account_delta {
+            return Err(ResourceLedgerValidationError::AccountDeltaMismatch {
+                expected: expected_account_delta,
+                actual: self.account_delta.clone(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_digest(
+        &self,
+        allow_legacy_digest: bool,
+    ) -> Result<(), ResourceLedgerValidationError> {
+        if self.uses_legacy_digest() && !self.operations.is_empty() {
+            if allow_legacy_digest {
+                return Ok(());
+            }
+            return Err(ResourceLedgerValidationError::LegacyDigestForNewLedger);
+        }
+
+        let expected = ledger_digest_for_entries(self.previous_ledger_digest, &self.operations);
+        if expected != self.ledger_digest {
+            return Err(ResourceLedgerValidationError::LedgerDigestMismatch {
+                expected,
+                actual: self.ledger_digest,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn uses_legacy_digest(&self) -> bool {
+        self.previous_ledger_digest == ZERO_LEDGER_DIGEST
+            && self.ledger_digest == ZERO_LEDGER_DIGEST
+    }
+}
+
+fn account_checksum(account: Option<&LedgerAccount>) -> u64 {
+    let Some(account) = account else {
+        return 0;
+    };
+    let hash = blake3::hash(account.key().as_bytes());
+    u64::from_le_bytes(
+        hash.as_bytes()[..8]
+            .try_into()
+            .expect("BLAKE3 digest has 32 bytes"),
+    )
+}
+
+fn ledger_digest_for_entries(
+    previous_digest: [u8; 32],
+    entries: &[ResourceLedgerEntry],
+) -> [u8; 32] {
+    entries.iter().fold(previous_digest, ledger_entry_digest)
+}
+
+fn ledger_entry_digest(previous_digest: [u8; 32], entry: &ResourceLedgerEntry) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(RESOURCE_LEDGER_ENTRY_DIGEST_DOMAIN);
+    hasher.update(&previous_digest);
+    hash_u64(&mut hasher, entry.tick);
+    hash_option_account(&mut hasher, entry.source_account.as_ref());
+    hash_option_account(&mut hasher, entry.target_account.as_ref());
+    hash_option_player(&mut hasher, entry.source_player);
+    hash_option_player(&mut hasher, entry.target_player);
+    hash_string(&mut hasher, &entry.resource);
+    hash_i64(&mut hasher, entry.amount);
+    hash_u32(&mut hasher, entry.amount_requested);
+    hash_u32(&mut hasher, entry.amount_delivered);
+    hash_u8(&mut hasher, resource_operation_tag(entry.operation));
+    hash_u32(&mut hasher, entry.fee_paid);
+    hash_u32(&mut hasher, entry.basis_points_used);
+    *hasher.finalize().as_bytes()
+}
+
+fn hash_option_account(hasher: &mut blake3::Hasher, account: Option<&LedgerAccount>) {
+    match account {
+        Some(account) => {
+            hash_u8(hasher, 1);
+            hash_account(hasher, account);
+        }
+        None => hash_u8(hasher, 0),
+    }
+}
+
+fn hash_account(hasher: &mut blake3::Hasher, account: &LedgerAccount) {
+    match account {
+        LedgerAccount::Player { player_id } => {
+            hash_u8(hasher, 1);
+            hash_u32(hasher, *player_id);
+        }
+        LedgerAccount::Reserve { kind, id, label } => {
+            hash_u8(hasher, 2);
+            hash_u8(hasher, settlement_kind_tag(*kind));
+            hash_u64(hasher, *id);
+            hash_string(hasher, label);
+        }
+        LedgerAccount::Merchant { quote_id } => {
+            hash_u8(hasher, 3);
+            hash_u64(hasher, *quote_id);
+        }
+        LedgerAccount::System { label } => {
+            hash_u8(hasher, 4);
+            hash_string(hasher, label);
+        }
+        LedgerAccount::Sink { label } => {
+            hash_u8(hasher, 5);
+            hash_string(hasher, label);
+        }
+    }
+}
+
+fn hash_option_player(hasher: &mut blake3::Hasher, player: Option<PlayerId>) {
+    match player {
+        Some(player) => {
+            hash_u8(hasher, 1);
+            hash_u32(hasher, player);
+        }
+        None => hash_u8(hasher, 0),
+    }
+}
+
+fn hash_string(hasher: &mut blake3::Hasher, value: &str) {
+    hash_u64(hasher, value.len() as u64);
+    hasher.update(value.as_bytes());
+}
+
+fn hash_u8(hasher: &mut blake3::Hasher, value: u8) {
+    hasher.update(&[value]);
+}
+
+fn hash_u32(hasher: &mut blake3::Hasher, value: u32) {
+    hasher.update(&value.to_le_bytes());
+}
+
+fn hash_u64(hasher: &mut blake3::Hasher, value: u64) {
+    hasher.update(&value.to_le_bytes());
+}
+
+fn hash_i64(hasher: &mut blake3::Hasher, value: i64) {
+    hasher.update(&value.to_le_bytes());
+}
+
+fn settlement_kind_tag(kind: SettlementKind) -> u8 {
+    match kind {
+        SettlementKind::Contract => 1,
+        SettlementKind::MerchantTrade => 2,
+        SettlementKind::P2POffer => 3,
+        SettlementKind::Auction => 4,
+        SettlementKind::Escrow => 5,
+        SettlementKind::Lending => 6,
+    }
+}
+
+fn resource_operation_tag(operation: ResourceOperation) -> u8 {
+    match operation {
+        ResourceOperation::LocalTransfer => 1,
+        ResourceOperation::GlobalDeposit => 2,
+        ResourceOperation::GlobalWithdraw => 3,
+        ResourceOperation::AlliedTransfer => 4,
+        ResourceOperation::PvEAward => 5,
+        ResourceOperation::ControllerPassiveIncome => 6,
+        ResourceOperation::RecycleRefund => 7,
+        ResourceOperation::BuildCost => 8,
+        ResourceOperation::SpawnCost => 9,
+        ResourceOperation::UpkeepDeduction => 10,
+        ResourceOperation::StorageTax => 11,
+        ResourceOperation::ContractSettlement => 12,
+        ResourceOperation::MerchantTradeSettlement => 13,
+        ResourceOperation::P2POfferSettlement => 14,
+        ResourceOperation::AuctionSettlement => 15,
+        ResourceOperation::EscrowSettlement => 16,
+        ResourceOperation::LendingSettlement => 17,
+    }
+}
+
+fn balance_delta_from_operations(
+    operations: &[ResourceLedgerEntry],
+) -> IndexMap<PlayerId, IndexMap<String, i64>> {
+    let mut balance_delta = IndexMap::new();
+    for entry in operations {
+        if let Some(source) = entry.source_player {
+            add_player_resource_delta(
+                &mut balance_delta,
+                source,
+                &entry.resource,
+                -i64::from(entry.amount_requested),
+            );
+        }
+        if let Some(target) = entry.target_player {
+            add_player_resource_delta(
+                &mut balance_delta,
+                target,
+                &entry.resource,
+                i64::from(entry.amount_delivered),
+            );
+        }
+    }
+    balance_delta
+}
+
+fn account_delta_from_operations(
+    operations: &[ResourceLedgerEntry],
+) -> IndexMap<String, IndexMap<String, i64>> {
+    let mut account_delta = IndexMap::new();
+    for entry in operations {
+        if let Some(account) = &entry.source_account {
+            add_account_resource_delta(
+                &mut account_delta,
+                account.key(),
+                &entry.resource,
+                -i64::from(entry.amount_requested),
+            );
+        }
+        if let Some(account) = &entry.target_account {
+            add_account_resource_delta(
+                &mut account_delta,
+                account.key(),
+                &entry.resource,
+                i64::from(entry.amount_delivered),
+            );
+        }
+        if entry.fee_paid > 0 {
+            add_account_resource_delta(
+                &mut account_delta,
+                LedgerAccount::sink(format!("{:?}:fee", entry.operation)).key(),
+                &entry.resource,
+                i64::from(entry.fee_paid),
+            );
+        }
+    }
+    account_delta
+}
+
+fn add_player_resource_delta(
+    map: &mut IndexMap<PlayerId, IndexMap<String, i64>>,
+    player_id: PlayerId,
+    resource: &str,
+    delta: i64,
+) {
+    *map.entry(player_id)
+        .or_default()
+        .entry(resource.to_string())
+        .or_default() += delta;
+}
+
+fn add_account_resource_delta(
+    map: &mut IndexMap<String, IndexMap<String, i64>>,
+    account_key: String,
+    resource: &str,
+    delta: i64,
+) {
+    *map.entry(account_key)
+        .or_default()
+        .entry(resource.to_string())
+        .or_default() += delta;
+}
+
+fn conservation_imbalance(
+    account_delta: &IndexMap<String, IndexMap<String, i64>>,
+) -> IndexMap<String, i64> {
+    let mut imbalance = IndexMap::<String, i64>::new();
+    for resources in account_delta.values() {
+        for (resource, delta) in resources {
+            *imbalance.entry(resource.clone()).or_default() += *delta;
+        }
+    }
+    imbalance.retain(|_, delta| *delta != 0);
+    imbalance
 }
 
 impl ResourceLedgerEntry {
@@ -564,31 +1148,13 @@ pub fn resource_ledger_system(
     mut ledger: ResMut<ResourceLedger>,
     mut trace_events: ResMut<TickTraceEventLog>,
 ) {
-    // Per §08: produce balance summary, verify Σ inflows - Σ outflows = Δ storage
-    let total_inflow: i64 = ledger
-        .balance_delta
-        .values()
-        .flat_map(|p| p.values())
-        .filter(|v| **v > 0)
-        .sum();
-    let total_outflow: i64 = ledger
-        .balance_delta
-        .values()
-        .flat_map(|p| p.values())
-        .filter(|v| **v < 0)
-        .map(|v| -v)
-        .sum();
-
-    // The net should be zero (balanced ledger invariant)
-    // Imbalance is noted for diagnostics; logged via EventLog in production paths
-    let _imbalance = total_inflow - total_outflow;
-
-    trace_events
-        .events
-        .extend(ledger.ops.iter().map(ResourceLedgerEntry::tick_trace_event));
-
-    // Clear ops for next tick (but preserve checksum continuity)
-    ledger.ops.clear();
+    let snapshot = ledger.finalize_current_tick();
+    trace_events.events.extend(
+        snapshot
+            .operations
+            .iter()
+            .map(ResourceLedgerEntry::tick_trace_event),
+    );
 }
 
 #[cfg(test)]
@@ -667,7 +1233,8 @@ mod tests {
             *ledger.balance_delta.get(&2).unwrap().get("energy").unwrap(),
             100
         );
-        assert_eq!(ledger.ledger_checksum, 200);
+        assert_ne!(ledger.ledger_checksum, 0);
+        assert!(ledger.trace_snapshot().conservation_imbalance.is_empty());
     }
 
     #[test]
@@ -724,6 +1291,196 @@ mod tests {
     }
 
     #[test]
+    fn fee_transfer_digest_changes_with_corrected_entry_data() {
+        let mut correct = ResourceLedger::default();
+        correct.record_transfer_amounts(
+            77,
+            Some(1),
+            Some(2),
+            "Energy",
+            100,
+            95,
+            ResourceOperation::GlobalDeposit,
+            5,
+            500,
+        );
+
+        let mut incorrect = ResourceLedger::default();
+        incorrect.record_transfer_amounts(
+            77,
+            Some(1),
+            Some(2),
+            "Energy",
+            95,
+            90,
+            ResourceOperation::GlobalDeposit,
+            5,
+            500,
+        );
+
+        assert_ne!(
+            correct.trace_snapshot().ledger_digest,
+            incorrect.trace_snapshot().ledger_digest
+        );
+    }
+
+    fn balanced_transfer_snapshot() -> ResourceLedgerTraceSnapshot {
+        let mut ledger = ResourceLedger::default();
+        ledger.record_transfer_amounts(
+            9,
+            Some(1),
+            Some(2),
+            "Energy",
+            100,
+            95,
+            ResourceOperation::AlliedTransfer,
+            5,
+            500,
+        );
+        ledger.trace_snapshot()
+    }
+
+    #[test]
+    fn ledger_digest_detects_resource_mutation() {
+        let mut snapshot = balanced_transfer_snapshot();
+        snapshot.operations[0].resource = "Mineral".to_string();
+
+        let error = snapshot.validate_for_commit().unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResourceLedgerValidationError::LedgerDigestMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn ledger_digest_detects_operation_mutation() {
+        let mut snapshot = balanced_transfer_snapshot();
+        snapshot.operations[0].operation = ResourceOperation::StorageTax;
+
+        let error = snapshot.validate_for_commit().unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResourceLedgerValidationError::LedgerDigestMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn ledger_digest_chains_from_prior_digest() {
+        let mut chained = ResourceLedger::default();
+        chained.record(
+            1,
+            Some(1),
+            Some(2),
+            "Energy",
+            10,
+            ResourceOperation::LocalTransfer,
+        );
+        chained.finalize_current_tick();
+        let prior_digest = chained.ledger_digest;
+        chained.record(
+            2,
+            Some(2),
+            Some(1),
+            "Energy",
+            4,
+            ResourceOperation::LocalTransfer,
+        );
+        let chained_snapshot = chained.trace_snapshot();
+
+        let mut unchained = ResourceLedger::default();
+        unchained.record(
+            2,
+            Some(2),
+            Some(1),
+            "Energy",
+            4,
+            ResourceOperation::LocalTransfer,
+        );
+        let unchained_snapshot = unchained.trace_snapshot();
+
+        assert_eq!(chained_snapshot.previous_ledger_digest, prior_digest);
+        assert_ne!(
+            chained_snapshot.ledger_digest,
+            unchained_snapshot.ledger_digest
+        );
+        assert!(chained_snapshot.validate_for_commit().is_ok());
+    }
+
+    #[test]
+    fn ledger_digest_tamper_is_rejected() {
+        let mut snapshot = balanced_transfer_snapshot();
+        snapshot.ledger_digest[0] ^= 0x80;
+
+        let error = snapshot.validate_for_commit().unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResourceLedgerValidationError::LedgerDigestMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn conservation_imbalance_is_rejected() {
+        let mut ledger = ResourceLedger::default();
+        ledger.record_transfer_amounts(
+            3,
+            Some(1),
+            Some(2),
+            "Energy",
+            10,
+            9,
+            ResourceOperation::LocalTransfer,
+            0,
+            0,
+        );
+        let snapshot = ledger.trace_snapshot();
+
+        let error = snapshot.validate_for_commit().unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResourceLedgerValidationError::ConservationImbalance { .. }
+        ));
+    }
+
+    #[test]
+    fn legacy_digest_fields_default_on_deserialize() {
+        let snapshot = balanced_transfer_snapshot();
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("previous_ledger_digest");
+        object.remove("ledger_digest");
+        let legacy_snapshot: ResourceLedgerTraceSnapshot = serde_json::from_value(value).unwrap();
+
+        assert_eq!(legacy_snapshot.previous_ledger_digest, ZERO_LEDGER_DIGEST);
+        assert_eq!(legacy_snapshot.ledger_digest, ZERO_LEDGER_DIGEST);
+        assert!(legacy_snapshot.validate_for_replay().is_ok());
+        assert!(matches!(
+            legacy_snapshot.validate_for_commit().unwrap_err(),
+            ResourceLedgerValidationError::LegacyDigestForNewLedger
+        ));
+
+        let mut ledger = ResourceLedger::default();
+        ledger.record(
+            1,
+            Some(1),
+            Some(2),
+            "Energy",
+            1,
+            ResourceOperation::LocalTransfer,
+        );
+        let mut ledger_value = serde_json::to_value(&ledger).unwrap();
+        let ledger_object = ledger_value.as_object_mut().unwrap();
+        ledger_object.remove("ledger_digest");
+        ledger_object.remove("tick_start_ledger_digest");
+        let legacy_ledger: ResourceLedger = serde_json::from_value(ledger_value).unwrap();
+        assert_eq!(legacy_ledger.ledger_digest, ZERO_LEDGER_DIGEST);
+        assert_eq!(legacy_ledger.tick_start_ledger_digest, ZERO_LEDGER_DIGEST);
+    }
+
+    #[test]
     fn ledger_system_clears_ops() {
         let mut ledger = ResourceLedger::default();
         ledger.record(
@@ -735,11 +1492,17 @@ mod tests {
             ResourceOperation::UpkeepDeduction,
         );
         assert_eq!(ledger.ops.len(), 1);
-        // Manually clear ops (simulating what the Bevy system does)
-        ledger.ops.clear();
+        let checksum = ledger.ledger_checksum;
+        let finalized = ledger.finalize_current_tick();
         assert!(ledger.ops.is_empty(), "system should clear ops each tick");
+        assert!(
+            ledger.account_delta.is_empty(),
+            "system should clear current account deltas"
+        );
+        assert_eq!(finalized.operations.len(), 1);
+        assert_eq!(ledger.trace_snapshot().operations.len(), 1);
         assert_eq!(
-            ledger.ledger_checksum, 100,
+            ledger.ledger_checksum, checksum,
             "checksum should persist across ticks"
         );
     }
