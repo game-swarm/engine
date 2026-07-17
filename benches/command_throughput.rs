@@ -75,11 +75,15 @@ fn bench_command_throughput(c: &mut Criterion) {
         let intents: Vec<CommandIntent> = (0..COMMAND_BATCH_SIZE)
             .map(|i| CommandIntent {
                 sequence: i as u32,
-                action: CommandAction::Action {
-                    action_type: "Attack".to_string(),
+                action: CommandAction::Attack {
                     object_id: object_id(attacker),
-                    target_id: Some(object_id(target)),
-                    payload: serde_json::Value::Object(serde_json::Map::new()),
+                    target_id: object_id(target),
+                    resource: None,
+                    amount: None,
+                    range: None,
+                    structure: None,
+                    damage_type: None,
+                    cooldown: None,
                 },
             })
             .collect();

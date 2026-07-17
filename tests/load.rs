@@ -7,8 +7,10 @@ use swarm_engine::{
     PlayerId, PlayerLocalStorage, Position, Structure, TickSnapshot, create_world,
 };
 
-const PLAYERS: PlayerId = 100;
-const TICKS: usize = 500;
+const SMOKE_PLAYERS: PlayerId = 20;
+const SMOKE_TICKS: usize = 120;
+const RELEASE_PROFILE_PLAYERS: PlayerId = 100;
+const RELEASE_PROFILE_TICKS: usize = 500;
 const P99_LIMIT: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
@@ -42,11 +44,32 @@ struct LoadRun {
 }
 
 #[test]
-fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
-    let first = run_load();
-    let second = run_load();
+fn multiplayer_tick_scheduler_smoke_handles_load_deterministically_without_leaks() {
+    assert_eq!(expected_npc_spawns(50), 0);
+    assert_eq!(expected_npc_spawns(51), 1);
+    assert_eq!(expected_npc_spawns(101), 2);
+    assert_eq!(expected_npc_spawns(SMOKE_TICKS), 2);
+    assert_load_profile(SMOKE_PLAYERS, SMOKE_TICKS);
+}
 
-    let expected_npcs = expected_npc_spawns(TICKS);
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "exact release load profile runs in CI with --release --ignored"
+)]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "run explicitly with --release --ignored"
+)]
+fn release_load_profile_100_players_500_ticks() {
+    assert_load_profile(RELEASE_PROFILE_PLAYERS, RELEASE_PROFILE_TICKS);
+}
+
+fn assert_load_profile(players: PlayerId, ticks: usize) {
+    let first = run_load(players, ticks);
+    let second = run_load(players, ticks);
+
+    let expected_npcs = expected_npc_spawns(ticks);
     assert!(
         first.p99 < P99_LIMIT,
         "first load-test p99 {:?} exceeded {:?}",
@@ -60,7 +83,7 @@ fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
         P99_LIMIT
     );
 
-    assert_eq!(first.checksums.len(), TICKS);
+    assert_eq!(first.checksums.len(), ticks);
     assert_eq!(first.checksums, second.checksums);
     assert_eq!(first.final_checksum, second.final_checksum);
 
@@ -73,7 +96,7 @@ fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
         second.before.drones, second.after.drones,
         "second run leaked drones"
     );
-    assert_eq!(first.before.drones, PLAYERS as usize);
+    assert_eq!(first.before.drones, players as usize);
 
     // Non-drone resources must not leak (structures, local storage, transfers)
     assert_eq!(first.before.structures, first.after.structures);
@@ -90,8 +113,8 @@ fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
     // first-spawned player during the first tick.
     assert_eq!(first.before.global_storage_players, 0);
     assert_eq!(second.before.global_storage_players, 0);
-    assert_eq!(first.after.global_storage_players, PLAYERS as usize);
-    assert_eq!(second.after.global_storage_players, PLAYERS as usize);
+    assert_eq!(first.after.global_storage_players, players as usize);
+    assert_eq!(second.after.global_storage_players, players as usize);
 
     // NPC spawning is deterministic — verify spawned count matches expectation
     let actual_npcs_first = first.after.npcs;
@@ -124,9 +147,9 @@ fn multiplayer_tick_scheduler_handles_load_deterministically_without_leaks() {
     );
 }
 
-fn run_load() -> LoadRun {
+fn run_load(players: PlayerId, ticks: usize) -> LoadRun {
     let mut world = create_world();
-    for player_id in 1..=PLAYERS {
+    for player_id in 1..=players {
         let index = player_id as i32 - 1;
         world.spawn_drone(
             player_id,
@@ -139,13 +162,13 @@ fn run_load() -> LoadRun {
     let before = resource_footprint(&mut world);
     let mut scheduler = MultiPlayerTickScheduler::new(
         world,
-        executors(),
+        executors(players),
         InMemoryTickCommitter::default(),
         InMemoryTickBroadcaster::default(),
     );
-    let mut durations = Vec::with_capacity(TICKS);
+    let mut durations = Vec::with_capacity(ticks);
 
-    for expected_tick in 0..TICKS {
+    for expected_tick in 0..ticks {
         let started_at = Instant::now();
         let report = scheduler.tick();
         durations.push(started_at.elapsed());
@@ -165,7 +188,7 @@ fn run_load() -> LoadRun {
         .iter()
         .map(|record| record.state_checksum)
         .collect::<Vec<_>>();
-    assert_eq!(scheduler.committer.records.len(), TICKS);
+    assert_eq!(scheduler.committer.records.len(), ticks);
     for (expected_tick, record) in scheduler.committer.records.iter().enumerate() {
         assert_eq!(record.tick as usize, expected_tick);
         assert_eq!(record.metrics.executor_errors, 0);
@@ -185,8 +208,8 @@ fn run_load() -> LoadRun {
     }
 }
 
-fn executors() -> HashMap<PlayerId, Box<dyn PlayerExecutor>> {
-    (1..=PLAYERS)
+fn executors(players: PlayerId) -> HashMap<PlayerId, Box<dyn PlayerExecutor>> {
+    (1..=players)
         .map(|player_id| {
             (
                 player_id,

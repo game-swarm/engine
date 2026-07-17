@@ -14,7 +14,18 @@ env:
   IMAGE_NAME: ghcr.io/game-swarm/engine
 
 jobs:
+  release-load-profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run release load profile
+        run: timeout 25m cargo test -q -p swarm-engine --release --test load release_load_profile_100_players_500_ticks -- --ignored --exact
+
   build:
+    needs: release-load-profile
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
