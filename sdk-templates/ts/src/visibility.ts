@@ -38,7 +38,7 @@ export function visibleEntities(entities: WorldEntity[], player_id: PlayerId, ti
 
 export function canPublicSpectate(config: WorldConfig): boolean {
   if (!config.visibility.public_spectate) return false;
-  if (config.world.mode === "persistent" && config.visibility.spectate_delay < 50) return false;
+  if (config.world.mode !== "arena" && config.visibility.spectate_delay < 50) return false;
   return config.visibility.replay_privacy !== "private" || config.world.mode === "arena";
 }
 

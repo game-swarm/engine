@@ -125,7 +125,7 @@ export interface TickExplanation {
   notable_events: string[];
 }
 
-export type WorldMode = "persistent" | "arena";
+export type WorldMode = "persistent" | "tutorial" | "novice" | "arena";
 export type SpawnPolicy = "RandomRoom" | "ManualSelect" | "FixedSpawn" | "Inherit";
 export type RespawnPolicy = "NewRoom" | "SameRoom" | "Spectate" | "Ban";
 export type CodePropagationSource = "Spawn" | "Controller" | "AnyDrone";

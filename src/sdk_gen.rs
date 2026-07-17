@@ -6,7 +6,9 @@
 //! on CommandAction (the Rust equivalent of concrete types).
 
 use crate::{
-    command::SPECIAL_COMMAND_ACTIONS,
+    command::{
+        CommandSchemaBranch, CommandSchemaField, SPECIAL_COMMAND_ACTIONS, command_schema_branches,
+    },
     idl::{EnumDefs, IdlDoc, ModCustomAction},
 };
 
@@ -25,13 +27,15 @@ pub fn generate_typescript(idl: &IdlDoc) -> String {
     out.push('\n');
     out.push_str(&ts_core_actions(idl));
     out.push('\n');
-    out.push_str(&ts_builtin_dispatch_actions(idl));
+    out.push_str(&ts_builtin_dispatch_actions());
     out.push('\n');
     out.push_str(&ts_custom_actions(&idl.mods.custom_actions));
     out.push('\n');
     out.push_str(&ts_action_union(idl));
     out.push('\n');
     out.push_str(&ts_command_factories(idl));
+    out.push('\n');
+    out.push_str(&ts_realtime_types());
     out.push('\n');
     out.push_str(&ts_constants(idl));
     out
@@ -141,7 +145,7 @@ fn ts_core_actions(idl: &IdlDoc) -> String {
     let mut out = String::new();
 
     for cmd in &idl.core.commands {
-        if cmd.name == "Action" {
+        if cmd.name == "Action" || SPECIAL_COMMAND_ACTIONS.contains(&cmd.name.as_str()) {
             continue;
         }
         out.push_str(&format!(
@@ -160,22 +164,19 @@ fn ts_core_actions(idl: &IdlDoc) -> String {
     out
 }
 
-fn ts_builtin_dispatch_actions(idl: &IdlDoc) -> String {
+fn ts_builtin_dispatch_actions() -> String {
     let mut out = String::from("// ── Built-in ActionRegistry wire actions ──\n\n");
     for name in SPECIAL_COMMAND_ACTIONS {
-        if idl
-            .mods
-            .custom_actions
-            .iter()
-            .any(|action| action.name == *name)
-        {
-            continue;
-        }
         out.push_str(&format!(
-            "export interface {name}Action {{\n  type: \"{name}\";\n  object_id: ObjectId;\n  target_id: ObjectId;\n}}\n\n"
+            "export interface {name}Action {{\n  type: \"{name}\";\n{fields}}}\n\n",
+            fields = ts_special_action_fields(),
         ));
     }
     out
+}
+
+fn ts_special_action_fields() -> &'static str {
+    "  object_id: ObjectId;\n  target_id: ObjectId;\n  resource?: ResourceName;\n  amount?: ResourceAmount;\n  range?: number;\n  structure?: StructureType;\n  damage_type?: DamageType;\n  cooldown?: number;\n"
 }
 
 fn idl_to_ts_type(idl_type: &str) -> String {
@@ -210,6 +211,9 @@ fn ts_custom_actions(actions: &[ModCustomAction]) -> String {
     let mut out = String::from("// ── Custom actions (from world.toml mods) ──\n\n");
 
     for action in actions {
+        if SPECIAL_COMMAND_ACTIONS.contains(&action.name.as_str()) {
+            continue;
+        }
         out.push_str(&format!(
             "export interface {name}Action {{\n  type: \"{name}\";\n  object_id: ObjectId;\n  target_id: ObjectId;\n",
             name = action.name,
@@ -232,7 +236,7 @@ fn ts_action_union(idl: &IdlDoc) -> String {
 
     let mut first = true;
     for cmd in &idl.core.commands {
-        if cmd.name == "Action" {
+        if cmd.name == "Action" || SPECIAL_COMMAND_ACTIONS.contains(&cmd.name.as_str()) {
             continue;
         }
         if !first {
@@ -263,10 +267,15 @@ fn ts_action_union(idl: &IdlDoc) -> String {
     out
 }
 
+fn ts_special_action_payload_type() -> &'static str {
+    "export interface SpecialActionPayload {\n  resource?: ResourceName;\n  amount?: ResourceAmount;\n  range?: number;\n  structure?: StructureType;\n  damage_type?: DamageType;\n  cooldown?: number;\n}\n\n"
+}
+
 fn ts_command_factories(idl: &IdlDoc) -> String {
     let mut out = String::from(
         "export interface CommandIntent<A extends Action = Action> {\n  sequence: UInt32;\n  action: A;\n}\n\n",
     );
+    out.push_str(ts_special_action_payload_type());
     // ---- addCost helper ----
     out.push_str(
         "export function addCost(target: ResourceCost, source: ResourceCost): ResourceCost {\n  for (const [res, amt] of Object.entries(source)) {\n    target[res] = (target[res] ?? 0) + amt;\n  }\n  return target;\n}\n\n",
@@ -281,7 +290,7 @@ fn ts_command_factories(idl: &IdlDoc) -> String {
 
     // Core command factories
     for cmd in &idl.core.commands {
-        if cmd.name == "Action" {
+        if cmd.name == "Action" || SPECIAL_COMMAND_ACTIONS.contains(&cmd.name.as_str()) {
             continue;
         }
         let fn_name = to_camel_case(&cmd.name);
@@ -319,22 +328,17 @@ fn ts_command_factories(idl: &IdlDoc) -> String {
     }
 
     for name in SPECIAL_COMMAND_ACTIONS {
-        if idl
-            .mods
-            .custom_actions
-            .iter()
-            .any(|action| action.name == *name)
-        {
-            continue;
-        }
         let fn_name = to_camel_case(name);
         out.push_str(&format!(
-            "  {fn_name}: (object_id: ObjectId, target_id: ObjectId) =>\n    ({{ type: \"{name}\", object_id, target_id }}) as const,\n"
+            "  {fn_name}: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {{}}) =>\n    ({{ type: \"{name}\", object_id, target_id, ...payload }}) as const,\n"
         ));
     }
 
     // Custom action factories (方案β: concrete typed factories)
     for action in &idl.mods.custom_actions {
+        if SPECIAL_COMMAND_ACTIONS.contains(&action.name.as_str()) {
+            continue;
+        }
         let fn_name = to_camel_case(&action.name);
         let mut optional_args = Vec::new();
         let mut optional_fields = Vec::new();
@@ -391,6 +395,145 @@ fn ts_command_factories(idl: &IdlDoc) -> String {
     );
 
     out
+}
+
+fn ts_realtime_types() -> String {
+    r#"export interface RealtimePosition {
+  x: number;
+  y: number;
+  room_id: RoomId;
+}
+
+export interface RealtimeVisibleEntity {
+  type: "Drone" | "Structure" | "Source" | "Resource" | "Controller";
+  id: ObjectId;
+  position: RealtimePosition;
+  owner?: PlayerId | null;
+  structure_type?: string;
+  body?: BodyPart[];
+  carry?: ResourceCost;
+  hits?: UInt32;
+  energy?: UInt32 | null;
+  produces?: ResourceCost;
+  amounts?: ResourceCost;
+  level?: UInt32;
+}
+
+export interface RealtimePayloadV1 {
+  tick: Tick;
+  last_tick: Tick;
+  player_id: PlayerId;
+  full_snapshot: boolean;
+  changed_entities: RealtimeVisibleEntity[];
+  removed_entities: ObjectId[];
+  state_checksum: UInt64;
+}
+
+export interface RealtimeEnvelopeV1 {
+  schema: "swarm.realtime.v1";
+  payload: RealtimePayloadV1;
+}
+"#
+    .to_string()
+}
+
+pub fn generate_command_intent_schema(_idl: &IdlDoc) -> serde_json::Value {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Swarm tick() CommandIntent[]",
+        "type": "array",
+        "maxItems": 100,
+        "items": { "$ref": "#/definitions/CommandIntent" },
+        "definitions": {
+            "CommandIntent": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["sequence", "action"],
+                "properties": {
+                    "sequence": { "type": "integer", "minimum": 0, "maximum": 4294967295_u64 },
+                    "action": { "$ref": "#/definitions/Action" }
+                }
+            },
+            "Action": {
+                "oneOf": command_schema_branches()
+                    .iter()
+                    .map(command_schema_branch_schema)
+                    .collect::<Vec<_>>()
+            }
+        }
+    })
+}
+
+fn command_schema_branch_schema(branch: &CommandSchemaBranch) -> serde_json::Value {
+    if branch.custom_wildcard {
+        return serde_json::json!({
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["type", "object_id"],
+            "propertyNames": {"not": {"enum": ["payload", "action_type", "action_name"]}},
+            "properties": {
+                "type": {"type": "string", "not": {"enum": reserved_command_action_names()}},
+                "object_id": field_schema(&CommandSchemaField { name: "object_id", type_name: "ObjectId", required: true }),
+                "target_id": field_schema(&CommandSchemaField { name: "target_id", type_name: "ObjectId", required: false }),
+                "resource": field_schema(&CommandSchemaField { name: "resource", type_name: "ResourceName", required: false }),
+                "amount": field_schema(&CommandSchemaField { name: "amount", type_name: "ResourceAmount", required: false }),
+                "range": field_schema(&CommandSchemaField { name: "range", type_name: "u32", required: false }),
+                "structure": field_schema(&CommandSchemaField { name: "structure", type_name: "StructureType", required: false }),
+                "damage_type": field_schema(&CommandSchemaField { name: "damage_type", type_name: "DamageType", required: false }),
+                "cooldown": field_schema(&CommandSchemaField { name: "cooldown", type_name: "u32", required: false })
+            }
+        });
+    }
+    let mut required = vec!["type".to_string()];
+    required.extend(
+        branch
+            .fields
+            .iter()
+            .filter(|field| field.required)
+            .map(|field| field.name.to_string()),
+    );
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "type".to_string(),
+        serde_json::json!({"const": branch.name}),
+    );
+    for field in &branch.fields {
+        properties.insert(field.name.to_string(), field_schema(field));
+    }
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": required,
+        "properties": properties,
+    })
+}
+
+fn reserved_command_action_names() -> Vec<&'static str> {
+    command_schema_branches()
+        .into_iter()
+        .filter(|branch| !branch.custom_wildcard)
+        .map(|branch| branch.name)
+        .collect()
+}
+
+fn field_schema(field: &CommandSchemaField) -> serde_json::Value {
+    match field.type_name {
+        "ObjectId" => serde_json::json!({"type": "integer", "minimum": 0}),
+        "PlayerId" | "ResourceAmount" | "u32" => {
+            serde_json::json!({"type": "integer", "minimum": 0, "maximum": 4294967295_u64})
+        }
+        "Direction" => {
+            serde_json::json!({"type": "string", "enum": ["Top", "TopRight", "BottomRight", "Bottom", "BottomLeft", "TopLeft"]})
+        }
+        "ResourceName" | "StructureType" | "DamageType" => serde_json::json!({"type": "string"}),
+        "u64" => serde_json::json!({"type": "integer", "minimum": 0}),
+        "i32" => serde_json::json!({"type": "integer"}),
+        "BodyPart[]" => {
+            serde_json::json!({"type": "array", "items": {"type": "string", "enum": ["Move", "Work", "Carry", "Attack", "RangedAttack", "Heal", "Claim", "Tough"]}, "minItems": 1, "maxItems": crate::command::MAX_BODY_PARTS})
+        }
+        "JsonValue" => serde_json::json!(true),
+        _ => serde_json::json!({"type": "string"}),
+    }
 }
 
 fn ts_constants(idl: &IdlDoc) -> String {
@@ -582,7 +725,7 @@ fn rust_command_action(idl: &IdlDoc) -> String {
     out.push_str("pub enum CommandAction {\n");
 
     for cmd in &idl.core.commands {
-        if cmd.name == "Action" {
+        if cmd.name == "Action" || SPECIAL_COMMAND_ACTIONS.contains(&cmd.name.as_str()) {
             continue;
         }
         let variant_name = &cmd.name;
@@ -599,20 +742,16 @@ fn rust_command_action(idl: &IdlDoc) -> String {
     }
 
     for name in SPECIAL_COMMAND_ACTIONS {
-        if idl
-            .mods
-            .custom_actions
-            .iter()
-            .any(|action| action.name == *name)
-        {
-            continue;
-        }
         out.push_str(&format!(
-            "    {name} {{\n        object_id: u64,\n        target_id: u64,\n    }},\n"
+            "    {name} {{\n{fields}    }},\n",
+            fields = rust_special_action_fields(),
         ));
     }
 
     for action in &idl.mods.custom_actions {
+        if SPECIAL_COMMAND_ACTIONS.contains(&action.name.as_str()) {
+            continue;
+        }
         out.push_str(&format!(
             "    {name} {{\n        object_id: u64,\n        target_id: u64,\n",
             name = action.name
@@ -630,17 +769,23 @@ fn rust_command_action(idl: &IdlDoc) -> String {
     out
 }
 
+fn rust_special_action_fields() -> &'static str {
+    "        object_id: u64,\n        target_id: u64,\n        resource: Option<String>,\n        amount: Option<u32>,\n        range: Option<u32>,\n        structure: Option<StructureType>,\n        damage_type: Option<DamageType>,\n        cooldown: Option<u32>,\n"
+}
+
 fn idl_to_rust_type(idl_type: &str) -> String {
     match idl_type {
         "ObjectId" => "u64".into(),
         "ObjectId?" => "Option<u64>".into(),
         "PlayerId" => "u32".into(),
+        "PlayerId?" => "Option<u32>".into(),
         "Direction" => "Direction".into(),
         "ResourceName" => "String".into(),
         "ResourceName?" => "Option<String>".into(),
         "ResourceAmount" => "u32".into(),
         "u32" => "u32".into(),
         "u64" => "u64".into(),
+        "u64?" => "Option<u64>".into(),
         "i32" => "i32".into(),
         "StructureType" => "StructureType".into(),
         "BodyPart[]" => "Vec<BodyPart>".into(),
@@ -653,10 +798,13 @@ fn idl_to_rust_type(idl_type: &str) -> String {
 fn rust_command_struct() -> String {
     r#"#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Command {
+pub struct CommandIntent {
     pub sequence: u32,
     pub action: CommandAction,
 }
+
+#[deprecated(note = "use CommandIntent; Command remains as a one-release compatibility alias")]
+pub type Command = CommandIntent;
 "#
     .to_string()
 }
@@ -670,6 +818,9 @@ fn rust_custom_constructors(actions: &[ModCustomAction]) -> String {
     out.push_str("impl CommandAction {\n");
 
     for (index, action) in actions.iter().enumerate() {
+        if SPECIAL_COMMAND_ACTIONS.contains(&action.name.as_str()) {
+            continue;
+        }
         let fn_name = action.name.to_lowercase();
         let mut optional_defaults = String::new();
         if action.damage_type.is_some() {
@@ -853,6 +1004,11 @@ pub fn cli_generate_sdk(world_toml_path: &str, out_base: &str) -> Result<(), Str
     std::fs::create_dir_all(&ts_src).map_err(|e| format!("create {}: {e}", ts_src.display()))?;
     std::fs::write(ts_src.join("commands.ts"), ts_code)
         .map_err(|e| format!("write sdk-ts/commands.ts: {e}"))?;
+    std::fs::write(
+        ts_src.join("command-intent.schema.json"),
+        serde_json::to_string_pretty(&generate_command_intent_schema(&idl)).unwrap(),
+    )
+    .map_err(|e| format!("write sdk-ts/command-intent.schema.json: {e}"))?;
 
     // Merge templates with generated code for Rust
     let rust_code = generate_rust(&idl);
@@ -909,6 +1065,7 @@ mod tests {
                 commands: vec![CommandDef {
                     name: "Wait".to_string(),
                     fields: IndexMap::from([("until".to_string(), "u64".to_string())]),
+                    metadata: BTreeMap::new(),
                 }],
                 enums: EnumDefs {
                     direction: vec!["Top".to_string()],
@@ -921,17 +1078,30 @@ mod tests {
                 body_part_costs: BTreeMap::new(),
             },
             mods: ModIdl {
-                custom_actions: vec![ModCustomAction {
-                    name: "Debilitate".to_string(),
-                    description: "slow target".to_string(),
-                    damage_type: Some("EMP".to_string()),
-                    base_damage: Some(10),
-                    range: 3,
-                    special_effect: None,
-                    special_param: None,
-                    cooldown: Some(5),
-                    cost: BTreeMap::new(),
-                }],
+                custom_actions: vec![
+                    ModCustomAction {
+                        name: "Debilitate".to_string(),
+                        description: "reserved special shadow".to_string(),
+                        damage_type: Some("EMP".to_string()),
+                        base_damage: Some(10),
+                        range: 3,
+                        special_effect: None,
+                        special_param: None,
+                        cooldown: Some(5),
+                        cost: BTreeMap::new(),
+                    },
+                    ModCustomAction {
+                        name: "Blink".to_string(),
+                        description: "blink target".to_string(),
+                        damage_type: Some("EMP".to_string()),
+                        base_damage: None,
+                        range: 3,
+                        special_effect: None,
+                        special_param: None,
+                        cooldown: Some(5),
+                        cost: BTreeMap::new(),
+                    },
+                ],
                 special_effects: vec![],
                 body_parts: vec![],
                 structure_types: vec![],
@@ -948,6 +1118,7 @@ mod tests {
                 ("object_id".to_string(), "ObjectId".to_string()),
                 ("resource".to_string(), "ResourceName?".to_string()),
             ]),
+            metadata: BTreeMap::new(),
         });
         idl.core.commands.push(CommandDef {
             name: "AlliedTransfer".to_string(),
@@ -956,27 +1127,74 @@ mod tests {
                 ("resource".to_string(), "ResourceName".to_string()),
                 ("amount".to_string(), "ResourceAmount".to_string()),
             ]),
+            metadata: BTreeMap::new(),
         });
         let ts = generate_typescript(&idl);
         assert!(ts.contains("until: UInt64"));
         assert!(ts.contains("resource?: ResourceName"));
         assert!(ts.contains("target_player: PlayerId"));
         assert!(ts.contains("export interface AttackAction"));
+        assert!(ts.contains("resource?: ResourceName"));
+        assert!(ts.contains("structure?: StructureType"));
         assert!(ts.contains("export interface RangedAttackAction"));
         assert!(ts.contains("export interface HealAction"));
         assert!(ts.contains("export interface DebilitateAction"));
+        assert!(ts.contains("export interface BlinkAction"));
+        assert!(ts.contains("payload: SpecialActionPayload = {}"));
+        assert!(ts.contains("export interface RealtimeEnvelopeV1"));
+        assert!(ts.contains("schema: \"swarm.realtime.v1\""));
         assert!(!ts.contains("export interface ActionAction"));
         assert!(!ts.contains("type: \"Action\""));
 
         let rust = generate_rust(&idl);
-        assert!(rust.contains("Debilitate {\n        object_id: u64,\n        target_id: u64,"));
+        assert!(rust.contains(
+            "Debilitate {\n        object_id: u64,\n        target_id: u64,\n        resource: Option<String>,"
+        ));
         assert!(rust.contains("#[serde(tag = \"type\", deny_unknown_fields)]"));
         assert!(rust.contains("target_player: u32"));
         assert!(rust.contains("Attack {\n        object_id: u64,\n        target_id: u64,"));
+        assert!(rust.contains("structure: Option<StructureType>"));
+        assert!(rust.contains("Blink {\n        object_id: u64,\n        target_id: u64,"));
         assert!(rust.contains("damage_type: Option<DamageType>"));
         assert!(rust.contains("cooldown: Option<u32>"));
-        assert!(rust.contains("CommandAction::Debilitate"));
+        assert!(rust.contains("CommandAction::Blink"));
+        assert!(rust.contains("pub struct CommandIntent"));
+        assert!(rust.contains("pub type Command = CommandIntent"));
         assert!(!rust.contains("    Action {"));
+
+        let schema = generate_command_intent_schema(&idl);
+        assert_eq!(
+            schema["definitions"]["CommandIntent"]["required"][0],
+            "sequence"
+        );
+        assert_eq!(schema["items"]["$ref"], "#/definitions/CommandIntent");
+        let branches = schema["definitions"]["Action"]["oneOf"]
+            .as_array()
+            .expect("schema should expose action oneOf branches");
+        assert_eq!(branches.len(), command_schema_branches().len());
+        assert_eq!(branches.len(), 45);
+        let concrete_names = branches
+            .iter()
+            .filter_map(|branch| branch["properties"]["type"]["const"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(concrete_names.len(), 44);
+        assert!(concrete_names.contains("TransferToGlobal"));
+        assert!(concrete_names.contains("DefaultLoan"));
+        assert!(concrete_names.contains("Hack"));
+        let wildcard = branches
+            .iter()
+            .find(|branch| branch["properties"]["type"]["not"]["enum"].is_array())
+            .expect("schema should expose one custom wildcard branch");
+        let reserved = wildcard["properties"]["type"]["not"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(reserved.len(), concrete_names.len());
+        assert!(reserved.contains("Move"));
+        assert!(reserved.contains("Hack"));
+        assert!(reserved.contains("DefaultLoan"));
     }
 
     #[test]

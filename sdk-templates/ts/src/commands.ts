@@ -132,34 +132,191 @@ export interface AlliedTransferAction {
   amount: ResourceAmount;
 }
 
+export interface CreateContractSettlementAction {
+  type: "CreateContractSettlement";
+  settlement_id: UInt64;
+  nonce: UInt64;
+  input_resource: ResourceName;
+  input_amount: ResourceAmount;
+  output_resource: ResourceName;
+  output_amount: ResourceAmount;
+  counterparty?: PlayerId;
+  expires_at?: UInt64;
+}
+
+export interface SettleContractAction {
+  type: "SettleContract";
+  settlement_id: UInt64;
+}
+
+export interface CancelContractAction {
+  type: "CancelContract";
+  settlement_id: UInt64;
+}
+
+export interface CreateMerchantQuoteAction {
+  type: "CreateMerchantQuote";
+  quote_id: UInt64;
+  player_id: PlayerId;
+  pay_resource: ResourceName;
+  pay_amount: ResourceAmount;
+  receive_resource: ResourceName;
+  receive_amount: ResourceAmount;
+  expires_at: UInt64;
+}
+
+export interface AcceptMerchantTradeAction {
+  type: "AcceptMerchantTrade";
+  quote_id: UInt64;
+  min_receive: ResourceAmount;
+}
+
+export interface CreateP2POfferAction {
+  type: "CreateP2POffer";
+  offer_id: UInt64;
+  nonce: UInt64;
+  give_resource: ResourceName;
+  give_amount: ResourceAmount;
+  want_resource: ResourceName;
+  want_amount: ResourceAmount;
+  expires_at: UInt64;
+}
+
+export interface AcceptP2POfferAction {
+  type: "AcceptP2POffer";
+  offer_id: UInt64;
+}
+
+export interface CancelP2POfferAction {
+  type: "CancelP2POffer";
+  offer_id: UInt64;
+}
+
+export interface RefundP2POfferAction {
+  type: "RefundP2POffer";
+  offer_id: UInt64;
+}
+
+export interface CreateAuctionAction {
+  type: "CreateAuction";
+  auction_id: UInt64;
+  nonce: UInt64;
+  lot_resource: ResourceName;
+  lot_amount: ResourceAmount;
+  bid_resource: ResourceName;
+  min_bid: ResourceAmount;
+  ends_at: UInt64;
+}
+
+export interface BidAuctionAction {
+  type: "BidAuction";
+  auction_id: UInt64;
+  bid_amount: ResourceAmount;
+}
+
+export interface SettleAuctionAction {
+  type: "SettleAuction";
+  auction_id: UInt64;
+}
+
+export interface CancelAuctionAction {
+  type: "CancelAuction";
+  auction_id: UInt64;
+}
+
+export interface CreateEscrowAction {
+  type: "CreateEscrow";
+  escrow_id: UInt64;
+  nonce: UInt64;
+  payee: PlayerId;
+  arbiter: PlayerId;
+  resource: ResourceName;
+  amount: ResourceAmount;
+}
+
+export interface ReleaseEscrowAction {
+  type: "ReleaseEscrow";
+  escrow_id: UInt64;
+}
+
+export interface RefundEscrowAction {
+  type: "RefundEscrow";
+  escrow_id: UInt64;
+}
+
+export interface CreateLoanOfferAction {
+  type: "CreateLoanOffer";
+  loan_id: UInt64;
+  nonce: UInt64;
+  borrower: PlayerId;
+  resource: ResourceName;
+  principal: ResourceAmount;
+  repay_amount: ResourceAmount;
+  due_at: UInt64;
+}
+
+export interface AcceptLoanAction {
+  type: "AcceptLoan";
+  loan_id: UInt64;
+}
+
+export interface RepayLoanAction {
+  type: "RepayLoan";
+  loan_id: UInt64;
+}
+
+export interface DefaultLoanAction {
+  type: "DefaultLoan";
+  loan_id: UInt64;
+}
+
 
 // ── Built-in ActionRegistry wire actions ──
-
-
-// ── Custom actions (from world.toml mods) ──
 
 export interface AttackAction {
   type: "Attack";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
+  damage_type?: DamageType;
+  cooldown?: number;
 }
 
 export interface RangedAttackAction {
   type: "RangedAttack";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
+  damage_type?: DamageType;
+  cooldown?: number;
 }
 
 export interface HealAction {
   type: "Heal";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
+  damage_type?: DamageType;
+  cooldown?: number;
 }
 
 export interface HackAction {
   type: "Hack";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
   damage_type?: DamageType;
   cooldown?: number;
 }
@@ -168,6 +325,10 @@ export interface DrainAction {
   type: "Drain";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
   damage_type?: DamageType;
   cooldown?: number;
 }
@@ -176,6 +337,10 @@ export interface OverloadAction {
   type: "Overload";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
   damage_type?: DamageType;
   cooldown?: number;
 }
@@ -184,6 +349,10 @@ export interface DebilitateAction {
   type: "Debilitate";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
   damage_type?: DamageType;
   cooldown?: number;
 }
@@ -192,6 +361,10 @@ export interface DisruptAction {
   type: "Disrupt";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
   damage_type?: DamageType;
   cooldown?: number;
 }
@@ -200,6 +373,11 @@ export interface FortifyAction {
   type: "Fortify";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
+  damage_type?: DamageType;
   cooldown?: number;
 }
 
@@ -207,6 +385,10 @@ export interface LeechAction {
   type: "Leech";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
   damage_type?: DamageType;
   cooldown?: number;
 }
@@ -215,8 +397,16 @@ export interface FabricateAction {
   type: "Fabricate";
   object_id: ObjectId;
   target_id: ObjectId;
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
+  damage_type?: DamageType;
   cooldown?: number;
 }
+
+
+// ── Custom actions (from world.toml mods) ──
 
 
 export type Action = MoveAction
@@ -232,6 +422,26 @@ export type Action = MoveAction
   | TransferToGlobalAction
   | TransferFromGlobalAction
   | AlliedTransferAction
+  | CreateContractSettlementAction
+  | SettleContractAction
+  | CancelContractAction
+  | CreateMerchantQuoteAction
+  | AcceptMerchantTradeAction
+  | CreateP2POfferAction
+  | AcceptP2POfferAction
+  | CancelP2POfferAction
+  | RefundP2POfferAction
+  | CreateAuctionAction
+  | BidAuctionAction
+  | SettleAuctionAction
+  | CancelAuctionAction
+  | CreateEscrowAction
+  | ReleaseEscrowAction
+  | RefundEscrowAction
+  | CreateLoanOfferAction
+  | AcceptLoanAction
+  | RepayLoanAction
+  | DefaultLoanAction
   | AttackAction
   | RangedAttackAction
   | HealAction
@@ -248,6 +458,15 @@ export type Action = MoveAction
 export interface CommandIntent<A extends Action = Action> {
   sequence: UInt32;
   action: A;
+}
+
+export interface SpecialActionPayload {
+  resource?: ResourceName;
+  amount?: ResourceAmount;
+  range?: number;
+  structure?: StructureType;
+  damage_type?: DamageType;
+  cooldown?: number;
 }
 
 export function addCost(target: ResourceCost, source: ResourceCost): ResourceCost {
@@ -275,28 +494,48 @@ export const actions = Object.freeze({
   transferToGlobal: (resource: ResourceName, amount: ResourceAmount) => ({ type: "TransferToGlobal", resource, amount }) as const,
   transferFromGlobal: (resource: ResourceName, amount: ResourceAmount) => ({ type: "TransferFromGlobal", resource, amount }) as const,
   alliedTransfer: (target_player: PlayerId, resource: ResourceName, amount: ResourceAmount) => ({ type: "AlliedTransfer", target_player, resource, amount }) as const,
-  attack: (object_id: ObjectId, target_id: ObjectId) =>
-    ({ type: "Attack", object_id, target_id }) as const,
-  rangedAttack: (object_id: ObjectId, target_id: ObjectId) =>
-    ({ type: "RangedAttack", object_id, target_id }) as const,
-  heal: (object_id: ObjectId, target_id: ObjectId) =>
-    ({ type: "Heal", object_id, target_id }) as const,
-  hack: (object_id: ObjectId, target_id: ObjectId, damage_type?: DamageType, cooldown?: number) =>
-    ({ type: "Hack", object_id, target_id, damage_type, cooldown }) as const,
-  drain: (object_id: ObjectId, target_id: ObjectId, damage_type?: DamageType, cooldown?: number) =>
-    ({ type: "Drain", object_id, target_id, damage_type, cooldown }) as const,
-  overload: (object_id: ObjectId, target_id: ObjectId, damage_type?: DamageType, cooldown?: number) =>
-    ({ type: "Overload", object_id, target_id, damage_type, cooldown }) as const,
-  debilitate: (object_id: ObjectId, target_id: ObjectId, damage_type?: DamageType, cooldown?: number) =>
-    ({ type: "Debilitate", object_id, target_id, damage_type, cooldown }) as const,
-  disrupt: (object_id: ObjectId, target_id: ObjectId, damage_type?: DamageType, cooldown?: number) =>
-    ({ type: "Disrupt", object_id, target_id, damage_type, cooldown }) as const,
-  fortify: (object_id: ObjectId, target_id: ObjectId, cooldown?: number) =>
-    ({ type: "Fortify", object_id, target_id, cooldown }) as const,
-  leech: (object_id: ObjectId, target_id: ObjectId, damage_type?: DamageType, cooldown?: number) =>
-    ({ type: "Leech", object_id, target_id, damage_type, cooldown }) as const,
-  fabricate: (object_id: ObjectId, target_id: ObjectId, cooldown?: number) =>
-    ({ type: "Fabricate", object_id, target_id, cooldown }) as const,
+  createContractSettlement: (settlement_id: UInt64, nonce: UInt64, input_resource: ResourceName, input_amount: ResourceAmount, output_resource: ResourceName, output_amount: ResourceAmount, counterparty?: PlayerId, expires_at?: UInt64) => ({ type: "CreateContractSettlement", settlement_id, nonce, input_resource, input_amount, output_resource, output_amount, counterparty, expires_at }) as const,
+  settleContract: (settlement_id: UInt64) => ({ type: "SettleContract", settlement_id }) as const,
+  cancelContract: (settlement_id: UInt64) => ({ type: "CancelContract", settlement_id }) as const,
+  createMerchantQuote: (quote_id: UInt64, player_id: PlayerId, pay_resource: ResourceName, pay_amount: ResourceAmount, receive_resource: ResourceName, receive_amount: ResourceAmount, expires_at: UInt64) => ({ type: "CreateMerchantQuote", quote_id, player_id, pay_resource, pay_amount, receive_resource, receive_amount, expires_at }) as const,
+  acceptMerchantTrade: (quote_id: UInt64, min_receive: ResourceAmount) => ({ type: "AcceptMerchantTrade", quote_id, min_receive }) as const,
+  createP2POffer: (offer_id: UInt64, nonce: UInt64, give_resource: ResourceName, give_amount: ResourceAmount, want_resource: ResourceName, want_amount: ResourceAmount, expires_at: UInt64) => ({ type: "CreateP2POffer", offer_id, nonce, give_resource, give_amount, want_resource, want_amount, expires_at }) as const,
+  acceptP2POffer: (offer_id: UInt64) => ({ type: "AcceptP2POffer", offer_id }) as const,
+  cancelP2POffer: (offer_id: UInt64) => ({ type: "CancelP2POffer", offer_id }) as const,
+  refundP2POffer: (offer_id: UInt64) => ({ type: "RefundP2POffer", offer_id }) as const,
+  createAuction: (auction_id: UInt64, nonce: UInt64, lot_resource: ResourceName, lot_amount: ResourceAmount, bid_resource: ResourceName, min_bid: ResourceAmount, ends_at: UInt64) => ({ type: "CreateAuction", auction_id, nonce, lot_resource, lot_amount, bid_resource, min_bid, ends_at }) as const,
+  bidAuction: (auction_id: UInt64, bid_amount: ResourceAmount) => ({ type: "BidAuction", auction_id, bid_amount }) as const,
+  settleAuction: (auction_id: UInt64) => ({ type: "SettleAuction", auction_id }) as const,
+  cancelAuction: (auction_id: UInt64) => ({ type: "CancelAuction", auction_id }) as const,
+  createEscrow: (escrow_id: UInt64, nonce: UInt64, payee: PlayerId, arbiter: PlayerId, resource: ResourceName, amount: ResourceAmount) => ({ type: "CreateEscrow", escrow_id, nonce, payee, arbiter, resource, amount }) as const,
+  releaseEscrow: (escrow_id: UInt64) => ({ type: "ReleaseEscrow", escrow_id }) as const,
+  refundEscrow: (escrow_id: UInt64) => ({ type: "RefundEscrow", escrow_id }) as const,
+  createLoanOffer: (loan_id: UInt64, nonce: UInt64, borrower: PlayerId, resource: ResourceName, principal: ResourceAmount, repay_amount: ResourceAmount, due_at: UInt64) => ({ type: "CreateLoanOffer", loan_id, nonce, borrower, resource, principal, repay_amount, due_at }) as const,
+  acceptLoan: (loan_id: UInt64) => ({ type: "AcceptLoan", loan_id }) as const,
+  repayLoan: (loan_id: UInt64) => ({ type: "RepayLoan", loan_id }) as const,
+  defaultLoan: (loan_id: UInt64) => ({ type: "DefaultLoan", loan_id }) as const,
+  attack: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "Attack", object_id, target_id, ...payload }) as const,
+  rangedAttack: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "RangedAttack", object_id, target_id, ...payload }) as const,
+  heal: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "Heal", object_id, target_id, ...payload }) as const,
+  hack: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "Hack", object_id, target_id, ...payload }) as const,
+  drain: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "Drain", object_id, target_id, ...payload }) as const,
+  overload: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "Overload", object_id, target_id, ...payload }) as const,
+  debilitate: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "Debilitate", object_id, target_id, ...payload }) as const,
+  disrupt: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "Disrupt", object_id, target_id, ...payload }) as const,
+  fortify: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "Fortify", object_id, target_id, ...payload }) as const,
+  leech: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "Leech", object_id, target_id, ...payload }) as const,
+  fabricate: (object_id: ObjectId, target_id: ObjectId, payload: SpecialActionPayload = {}) =>
+    ({ type: "Fabricate", object_id, target_id, ...payload }) as const,
 });
 
 export const BODY_PART_COST = {
@@ -319,6 +558,42 @@ export function bodyCost(body: BodyPart[]): ResourceCost {
     }
   }
   return total;
+}
+
+export interface RealtimePosition {
+  x: number;
+  y: number;
+  room_id: RoomId;
+}
+
+export interface RealtimeVisibleEntity {
+  type: "Drone" | "Structure" | "Source" | "Resource" | "Controller";
+  id: ObjectId;
+  position: RealtimePosition;
+  owner?: PlayerId | null;
+  structure_type?: string;
+  body?: BodyPart[];
+  carry?: ResourceCost;
+  hits?: UInt32;
+  energy?: UInt32 | null;
+  produces?: ResourceCost;
+  amounts?: ResourceCost;
+  level?: UInt32;
+}
+
+export interface RealtimePayloadV1 {
+  tick: Tick;
+  last_tick: Tick;
+  player_id: PlayerId;
+  full_snapshot: boolean;
+  changed_entities: RealtimeVisibleEntity[];
+  removed_entities: ObjectId[];
+  state_checksum: UInt64;
+}
+
+export interface RealtimeEnvelopeV1 {
+  schema: "swarm.realtime.v1";
+  payload: RealtimePayloadV1;
 }
 
 

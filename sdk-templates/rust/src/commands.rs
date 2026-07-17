@@ -190,178 +190,229 @@ pub enum CommandAction {
         resource: String,
         amount: u32,
     },
+    CreateContractSettlement {
+        settlement_id: u64,
+        nonce: u64,
+        input_resource: String,
+        input_amount: u32,
+        output_resource: String,
+        output_amount: u32,
+        counterparty: Option<u32>,
+        expires_at: Option<u64>,
+    },
+    SettleContract {
+        settlement_id: u64,
+    },
+    CancelContract {
+        settlement_id: u64,
+    },
+    CreateMerchantQuote {
+        quote_id: u64,
+        player_id: u32,
+        pay_resource: String,
+        pay_amount: u32,
+        receive_resource: String,
+        receive_amount: u32,
+        expires_at: u64,
+    },
+    AcceptMerchantTrade {
+        quote_id: u64,
+        min_receive: u32,
+    },
+    CreateP2POffer {
+        offer_id: u64,
+        nonce: u64,
+        give_resource: String,
+        give_amount: u32,
+        want_resource: String,
+        want_amount: u32,
+        expires_at: u64,
+    },
+    AcceptP2POffer {
+        offer_id: u64,
+    },
+    CancelP2POffer {
+        offer_id: u64,
+    },
+    RefundP2POffer {
+        offer_id: u64,
+    },
+    CreateAuction {
+        auction_id: u64,
+        nonce: u64,
+        lot_resource: String,
+        lot_amount: u32,
+        bid_resource: String,
+        min_bid: u32,
+        ends_at: u64,
+    },
+    BidAuction {
+        auction_id: u64,
+        bid_amount: u32,
+    },
+    SettleAuction {
+        auction_id: u64,
+    },
+    CancelAuction {
+        auction_id: u64,
+    },
+    CreateEscrow {
+        escrow_id: u64,
+        nonce: u64,
+        payee: u32,
+        arbiter: u32,
+        resource: String,
+        amount: u32,
+    },
+    ReleaseEscrow {
+        escrow_id: u64,
+    },
+    RefundEscrow {
+        escrow_id: u64,
+    },
+    CreateLoanOffer {
+        loan_id: u64,
+        nonce: u64,
+        borrower: u32,
+        resource: String,
+        principal: u32,
+        repay_amount: u32,
+        due_at: u64,
+    },
+    AcceptLoan {
+        loan_id: u64,
+    },
+    RepayLoan {
+        loan_id: u64,
+    },
+    DefaultLoan {
+        loan_id: u64,
+    },
     Attack {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
+        damage_type: Option<DamageType>,
+        cooldown: Option<u32>,
     },
     RangedAttack {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
+        damage_type: Option<DamageType>,
+        cooldown: Option<u32>,
     },
     Heal {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
+        damage_type: Option<DamageType>,
+        cooldown: Option<u32>,
     },
     Hack {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
         damage_type: Option<DamageType>,
         cooldown: Option<u32>,
     },
     Drain {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
         damage_type: Option<DamageType>,
         cooldown: Option<u32>,
     },
     Overload {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
         damage_type: Option<DamageType>,
         cooldown: Option<u32>,
     },
     Debilitate {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
         damage_type: Option<DamageType>,
         cooldown: Option<u32>,
     },
     Disrupt {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
         damage_type: Option<DamageType>,
         cooldown: Option<u32>,
     },
     Fortify {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
+        damage_type: Option<DamageType>,
         cooldown: Option<u32>,
     },
     Leech {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
         damage_type: Option<DamageType>,
         cooldown: Option<u32>,
     },
     Fabricate {
         object_id: u64,
         target_id: u64,
+        resource: Option<String>,
+        amount: Option<u32>,
+        range: Option<u32>,
+        structure: Option<StructureType>,
+        damage_type: Option<DamageType>,
         cooldown: Option<u32>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Command {
+pub struct CommandIntent {
     pub sequence: u32,
     pub action: CommandAction,
 }
 
+#[deprecated(note = "use CommandIntent; Command remains as a one-release compatibility alias")]
+pub type Command = CommandIntent;
+
 // ── Custom action constructors (方案β: typed helpers) ──
 
-impl CommandAction {
-    /// Melee attack target
-    pub fn attack(object_id: u64, target_id: u64) -> Self {
-        CommandAction::Attack {
-            object_id,
-            target_id,
-        }
-    }
-
-    /// Ranged attack target
-    pub fn rangedattack(object_id: u64, target_id: u64) -> Self {
-        CommandAction::RangedAttack {
-            object_id,
-            target_id,
-        }
-    }
-
-    /// Repair or heal target
-    pub fn heal(object_id: u64, target_id: u64) -> Self {
-        CommandAction::Heal {
-            object_id,
-            target_id,
-        }
-    }
-
-    /// 5-stage intrusion attack
-    pub fn hack(object_id: u64, target_id: u64) -> Self {
-        CommandAction::Hack {
-            object_id,
-            target_id,
-            damage_type: None,
-            cooldown: None,
-        }
-    }
-
-    /// Continuously drain resources from target
-    pub fn drain(object_id: u64, target_id: u64) -> Self {
-        CommandAction::Drain {
-            object_id,
-            target_id,
-            damage_type: None,
-            cooldown: None,
-        }
-    }
-
-    /// Reduce target player fuel budget
-    pub fn overload(object_id: u64, target_id: u64) -> Self {
-        CommandAction::Overload {
-            object_id,
-            target_id,
-            damage_type: None,
-            cooldown: None,
-        }
-    }
-
-    /// Apply vulnerability to a target damage type for 50 ticks
-    pub fn debilitate(object_id: u64, target_id: u64) -> Self {
-        CommandAction::Debilitate {
-            object_id,
-            target_id,
-            damage_type: None,
-            cooldown: None,
-        }
-    }
-
-    /// Interrupt target current continuous action
-    pub fn disrupt(object_id: u64, target_id: u64) -> Self {
-        CommandAction::Disrupt {
-            object_id,
-            target_id,
-            damage_type: None,
-            cooldown: None,
-        }
-    }
-
-    /// Shield and cleanse self or an ally
-    pub fn fortify(object_id: u64, target_id: u64) -> Self {
-        CommandAction::Fortify {
-            object_id,
-            target_id,
-            cooldown: None,
-        }
-    }
-
-    /// Kinetic attack that heals the attacker for 50% of dealt damage
-    pub fn leech(object_id: u64, target_id: u64) -> Self {
-        CommandAction::Leech {
-            object_id,
-            target_id,
-            damage_type: None,
-            cooldown: None,
-        }
-    }
-
-    /// Convert enemy drone into an owned structure
-    pub fn fabricate(object_id: u64, target_id: u64) -> Self {
-        CommandAction::Fabricate {
-            object_id,
-            target_id,
-            cooldown: None,
-        }
-    }
-}
+impl CommandAction {}
 
 // ── Constants ──
 

@@ -4,7 +4,7 @@
 //! mod types from world.toml runtime registries — as a machine-readable JSON IDL.
 //! SDK code for both Rust and TypeScript is generated from this IDL.
 
-use crate::command::CANONICAL_REJECTION_REASONS;
+use crate::command::{CANONICAL_REJECTION_REASONS, command_schema_branches};
 use crate::components::{
     BodyPartRegistry, CustomActionRegistry, SpecialEffectRegistry, StructureTypeRegistry,
 };
@@ -40,6 +40,8 @@ pub struct CommandDef {
     pub name: String,
     /// field_name → type_name ("ObjectId", "ResourceName?", "BodyPart[]", "u32", etc.)
     pub fields: IndexMap<String, String>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,101 +132,35 @@ fn extract_core(_body_parts: &BodyPartRegistry) -> CoreIdl {
 }
 
 fn core_commands() -> Vec<CommandDef> {
-    let def = |name: &str, fields: &[(&str, &str)]| CommandDef {
-        name: name.into(),
-        fields: fields
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-    };
-    let commands = vec![
-        def(
-            "Move",
-            &[("object_id", "ObjectId"), ("direction", "Direction")],
-        ),
-        def(
-            "Harvest",
-            &[
-                ("object_id", "ObjectId"),
-                ("target_id", "ObjectId"),
-                ("resource", "ResourceName?"),
-            ],
-        ),
-        def(
-            "Transfer",
-            &[
-                ("object_id", "ObjectId"),
-                ("target_id", "ObjectId"),
-                ("resource", "ResourceName"),
-                ("amount", "ResourceAmount"),
-            ],
-        ),
-        def(
-            "Withdraw",
-            &[
-                ("object_id", "ObjectId"),
-                ("target_id", "ObjectId"),
-                ("resource", "ResourceName"),
-                ("amount", "ResourceAmount"),
-            ],
-        ),
-        def(
-            "Action",
-            &[
-                ("action_type", "String"),
-                ("object_id", "ObjectId"),
-                ("target_id", "ObjectId?"),
-                ("payload", "JsonValue"),
-            ],
-        ),
-        def(
-            "ClaimController",
-            &[("object_id", "ObjectId"), ("target_id", "ObjectId")],
-        ),
-        def(
-            "Spawn",
-            &[
-                ("object_id", "ObjectId"),
-                ("spawn_id", "ObjectId"),
-                ("body_parts", "BodyPart[]"),
-            ],
-        ),
-        def("Recycle", &[("object_id", "ObjectId")]),
-        def(
-            "Build",
-            &[
-                ("object_id", "ObjectId"),
-                ("x", "i32"),
-                ("y", "i32"),
-                ("structure", "StructureType"),
-            ],
-        ),
-        def(
-            "Repair",
-            &[("object_id", "ObjectId"), ("target_id", "ObjectId")],
-        ),
-        def(
-            "UpgradeController",
-            &[("object_id", "ObjectId"), ("target_id", "ObjectId")],
-        ),
-        def(
-            "TransferToGlobal",
-            &[("resource", "ResourceName"), ("amount", "ResourceAmount")],
-        ),
-        def(
-            "TransferFromGlobal",
-            &[("resource", "ResourceName"), ("amount", "ResourceAmount")],
-        ),
-        def(
-            "AlliedTransfer",
-            &[
-                ("target_player", "PlayerId"),
-                ("resource", "ResourceName"),
-                ("amount", "ResourceAmount"),
-            ],
-        ),
-    ];
-    commands
+    command_schema_branches()
+        .into_iter()
+        .filter(|branch| !branch.custom_wildcard)
+        .map(|branch| {
+            let mut metadata = BTreeMap::new();
+            if let Some(kind) = branch.metadata.settlement_kind {
+                metadata.insert("settlement_kind".to_string(), serde_json::json!(kind));
+            }
+            if let Some(phase) = branch.metadata.settlement_phase {
+                metadata.insert("settlement_phase".to_string(), serde_json::json!(phase));
+            }
+            CommandDef {
+                name: branch.name.to_string(),
+                fields: branch
+                    .fields
+                    .into_iter()
+                    .map(|field| {
+                        let ty = if field.required {
+                            field.type_name.to_string()
+                        } else {
+                            format!("{}?", field.type_name)
+                        };
+                        (field.name.to_string(), ty)
+                    })
+                    .collect(),
+                metadata,
+            }
+        })
+        .collect()
 }
 
 fn core_enums() -> EnumDefs {

@@ -20,7 +20,7 @@ mod tests {
 
     #[test]
     fn spawn_serializes_with_spawn_type() {
-        let command = Command {
+        let command = CommandIntent {
             sequence: 7,
             action: CommandAction::Spawn {
                 object_id: 42,

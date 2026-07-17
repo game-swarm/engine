@@ -6,7 +6,7 @@ import type { ValidationIssue, WorldConfig, WorldMode } from "./types_template.j
 export function createDefaultWorldConfig(mode: WorldMode = "persistent"): WorldConfig {
   const arena = mode === "arena";
   return {
-    world: { name: arena ? "Swarm Arena" : "World of Swarm", mode, tick_interval_ms: 1000 },
+    world: { name: arena ? "Swarm Arena" : "World of Swarm", mode, tick_interval_ms: mode === "tutorial" ? 1000 : 3000 },
     spawn: { policy: arena ? "FixedSpawn" : "RandomRoom", respawn: "NewRoom", cooldown: 0 },
     code: { update_cost: {}, update_cooldown: arena ? 0 : 5, update_window: { every: 0, duration: 0 }, propagation_speed: 0, propagation_source: "Spawn" },
     drone: {
@@ -45,8 +45,8 @@ export function validateWorldConfig(config: WorldConfig): ValidationIssue[] {
   if (config.drone.memory_size > 65536) push(issues, "drone.memory_size", "memory size must not exceed 64KB", "MemoryTooLarge");
   if (config.drone.max_body_parts > MAX_BODY_PARTS) push(issues, "drone.max_body_parts", "max body parts must not exceed 50", "BodyTooLarge");
   if (config.combat.damage_multiplier <= 0) push(issues, "combat.damage_multiplier", "damage multiplier must be positive", "InvalidDamageMultiplier");
-  if (config.world.mode === "persistent" && config.visibility.public_spectate && config.visibility.spectate_delay < 50) {
-    push(issues, "visibility.spectate_delay", "persistent public spectate requires at least 50 tick delay", "SpectateDelayTooLow");
+  if (config.world.mode !== "arena" && config.visibility.public_spectate && config.visibility.spectate_delay < 50) {
+    push(issues, "visibility.spectate_delay", "non-arena public spectate requires at least 50 tick delay", "SpectateDelayTooLow");
   }
   if (config.resources.global_storage_enabled && (config.resources.transfer_to_global_time <= 0 || config.resources.transfer_from_global_time <= 0)) {
     push(issues, "resources.transfer_time", "global/local transfer times must be positive", "InvalidTransferTime");

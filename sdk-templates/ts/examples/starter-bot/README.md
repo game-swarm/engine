@@ -51,17 +51,41 @@ tick(snapshot_ptr, snapshot_len) -> result_ptr
 result_len() -> len
 ```
 
-The engine ABI is still being finalized in the P0 notes, so `src/bot.ts` is the reference SDK bot and `assembly/tick.ts` proves the example can compile to deployable WASM today.
+The generated SDK and `assembly/tick.ts` use the current Engine ABI. The deploy CLI appends the signed target-manifest section required by Engine validation before upload.
 
 ## 4. Deploy
 
-When the Phase 1 CLI is available, deploy the generated module:
+Create an owner-only deploy auth file containing the certificate bundle, its 32-byte Ed25519 private key, and the target defaults. On Unix, the CLI rejects auth files with group/world permissions.
 
-```bash
-swarm deploy ./examples/starter-bot
+```json
+{
+  "version": 1,
+  "private_key_hex": "<64 hex characters>",
+  "certificate_bundle": {
+    "cert_id": "<client cert>",
+    "player_id": 1,
+    "client_auth_cert": "<serialized issued client certificate>",
+    "code_signing_cert": "<serialized issued code-signing certificate>"
+  },
+  "gateway_url": "https://gateway.example.com",
+  "world_id": "tutorial",
+  "room_id": 0,
+  "drone_id": 1,
+  "target_manifest_hash": "blake3:<manifest hash>",
+  "engine_abi_version": 1,
+  "language": "typescript"
+}
 ```
 
-Until then, use the unit tests as the local contract check.
+Deploy the project:
+
+```bash
+swarm deploy ./examples/starter-bot --auth-file ~/.config/swarm/deploy-auth.json
+```
+
+For a project directory, the CLI runs `npm run build`, selects the sole regular `build/*.wasm` artifact, signs both the deploy payload and Gateway request, and reports the accepted module ID and activation status. A prebuilt `.wasm` path can be deployed directly; use `--artifact` when a project emits more than one WASM file.
+
+Copy the issued certificate bundle without altering its serialized certificate fields. Production gateways require HTTPS. Local loopback HTTP is rejected unless the command includes the explicit `--allow-insecure-loopback` test flag.
 
 ## 5. Experiment
 

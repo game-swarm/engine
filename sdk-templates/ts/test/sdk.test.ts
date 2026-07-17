@@ -93,14 +93,14 @@ describe("command intents", () => {
       actions.attack(1, 2),
       actions.rangedAttack(1, 2),
       actions.heal(1, 2),
-      actions.hack(1, 2, "EMP", 3),
-      actions.drain(1, 2, "Corrosive", 3),
-      actions.overload(1, 2, "Thermal", 3),
-      actions.debilitate(1, 2, "Sonic", 3),
-      actions.disrupt(1, 2, "Psionic", 3),
-      actions.fortify(1, 2, 3),
-      actions.leech(1, 2, "Kinetic", 3),
-      actions.fabricate(1, 2, 3),
+      actions.hack(1, 2, { damage_type: "EMP", cooldown: 3 }),
+      actions.drain(1, 2, { damage_type: "Corrosive", cooldown: 3 }),
+      actions.overload(1, 2, { damage_type: "Thermal", cooldown: 3 }),
+      actions.debilitate(1, 2, { damage_type: "Sonic", cooldown: 3 }),
+      actions.disrupt(1, 2, { damage_type: "Psionic", cooldown: 3 }),
+      actions.fortify(1, 2, { cooldown: 3 }),
+      actions.leech(1, 2, { damage_type: "Kinetic", cooldown: 3 }),
+      actions.fabricate(1, 2, { cooldown: 3 }),
       actions.alliedTransfer(7, "Energy", 10)
     ];
 
@@ -155,7 +155,10 @@ describe("visibility", () => {
 describe("world rules", () => {
   it("creates valid default world and arena configs", () => {
     expect(validateWorldConfig(createDefaultWorldConfig("persistent"))).toEqual([]);
+    expect(createDefaultWorldConfig("tutorial").world.tick_interval_ms).toBe(1000);
+    expect(createDefaultWorldConfig("novice").world.tick_interval_ms).toBe(3000);
     const arena = createDefaultWorldConfig("arena");
+    expect(arena.world.tick_interval_ms).toBe(3000);
     expect(arena.visibility.fog_of_war).toBe(false);
     expect(canPublicSpectate(arena)).toBe(true);
   });
@@ -165,6 +168,15 @@ describe("world rules", () => {
     config.visibility.public_spectate = true;
     config.visibility.replay_privacy = "world";
     config.visibility.spectate_delay = 0;
+    expect(canPublicSpectate(config)).toBe(false);
+    expect(validateWorldConfig(config).map((issue) => issue.code)).toContain("SpectateDelayTooLow");
+  });
+
+  it("rejects unsafe public spectate in novice worlds", () => {
+    const config = createDefaultWorldConfig("novice");
+    config.visibility.public_spectate = true;
+    config.visibility.replay_privacy = "world";
+
     expect(canPublicSpectate(config)).toBe(false);
     expect(validateWorldConfig(config).map((issue) => issue.code)).toContain("SpectateDelayTooLow");
   });

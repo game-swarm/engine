@@ -1,4 +1,4 @@
-use crate::commands::{BodyPart, Command, CommandAction, Direction, StructureType};
+use crate::commands::{BodyPart, CommandAction, CommandIntent, Direction, StructureType};
 use crate::types_template::{
     ObjectKind, ObjectSnapshot, Position, ResourceMap, Snapshot, TickResult,
 };
@@ -89,8 +89,8 @@ pub fn has_enough_energy_for_worker(snapshot: &Snapshot) -> bool {
         >= WORKER_COST
 }
 
-fn command(sequence: u32, action: CommandAction) -> Command {
-    Command { sequence, action }
+fn command(sequence: u32, action: CommandAction) -> CommandIntent {
+    CommandIntent { sequence, action }
 }
 
 fn find_my_spawn(snapshot: &Snapshot) -> Option<&ObjectSnapshot> {
@@ -177,7 +177,7 @@ fn drone_carry_capacity(object: &ObjectSnapshot) -> Option<u32> {
     }
 }
 
-fn move_toward(sequence: u32, actor: &ObjectSnapshot, target: &Position) -> Command {
+fn move_toward(sequence: u32, actor: &ObjectSnapshot, target: &Position) -> CommandIntent {
     let direction = direction_toward(&actor.position, target).unwrap_or(Direction::BottomRight);
     command(
         sequence,

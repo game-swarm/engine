@@ -1,14 +1,16 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::command::{ObjectId, Tick};
 use crate::components::PlayerId;
 use crate::mcp::{VisibleEntity, visible_entities_for_player};
 use crate::world::SwarmWorld;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct RealtimeDelta {
     pub tick: Tick,
     pub last_tick: Tick,
@@ -20,7 +22,7 @@ pub struct RealtimeDelta {
     pub state_checksum: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct RealtimeEnvelope {
     pub schema: String,
     pub payload: RealtimeDelta,
