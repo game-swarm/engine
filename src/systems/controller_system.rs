@@ -185,23 +185,121 @@ pub fn controller_system(
                 controller.progress_total = rcl_progress_total((controller.level + 1).min(8));
                 controller.downgrade_timer = DEFAULT_CONTROLLER_DOWNGRADE_TIMER;
             }
-        } else if let Some(owner) = controller.owner
-            && config.empire_upkeep.controller_passive_income > 0
-        {
-            *global_storage
+        } else if let Some(owner) = controller.owner {
+            let passive_income = config
+                .empire_upkeep
+                .controller_passive_income_for_rcl(controller.level);
+            if passive_income == 0 {
+                continue;
+            }
+
+            let resource = config.empire_upkeep.resource.clone();
+            let balance = global_storage
                 .0
                 .entry(owner)
                 .or_default()
-                .entry(config.empire_upkeep.resource.clone())
-                .or_default() += config.empire_upkeep.controller_passive_income;
-            ledger.record(
-                current_tick.0,
-                None,
-                Some(owner),
-                &config.empire_upkeep.resource,
-                i64::from(config.empire_upkeep.controller_passive_income),
-                ResourceOperation::ControllerPassiveIncome,
-            );
+                .entry(resource.clone())
+                .or_default();
+            let previous = *balance;
+            *balance = balance.saturating_add(passive_income);
+            let delivered = balance.saturating_sub(previous);
+            if delivered > 0 {
+                ledger.record(
+                    current_tick.0,
+                    None,
+                    Some(owner),
+                    &resource,
+                    i64::from(delivered),
+                    ResourceOperation::ControllerPassiveIncome,
+                );
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::{Controller, PlayerId};
+    use crate::resources::CurrentTick;
+    use bevy::prelude::{App, Update};
+
+    fn test_controller(level: u8, owner: Option<PlayerId>) -> Controller {
+        Controller {
+            owner,
+            level,
+            progress: 0,
+            progress_total: rcl_progress_total((level + 1).min(8)),
+            downgrade_timer: DEFAULT_CONTROLLER_DOWNGRADE_TIMER,
+            safe_mode: 0,
+            safe_mode_available: 0,
+            safe_mode_cooldown: 0,
+            repair_capacity: 0,
+            repair_range: 0,
+            repair_per_drone: 0,
+        }
+    }
+
+    fn app_with_controller(config: WorldConfig, controller: Controller) -> App {
+        let mut app = App::new();
+        app.insert_resource(PendingControllerUpgrade::default());
+        app.insert_resource(config);
+        app.insert_resource(CurrentTick(77));
+        app.insert_resource(PlayerGlobalStorage::default());
+        app.insert_resource(ResourceLedger::default());
+        app.world_mut().spawn(controller);
+        app.add_systems(Update, controller_system);
+        app
+    }
+
+    #[test]
+    fn controller_income_uses_base_plus_rcl_bonus_and_records_ledger() {
+        let mut app = app_with_controller(WorldConfig::default(), test_controller(3, Some(7)));
+
+        app.update();
+
+        let storage = app.world().resource::<PlayerGlobalStorage>();
+        assert_eq!(storage.0.get(&7).unwrap().get("Energy"), Some(&55));
+
+        let ledger = app.world().resource::<ResourceLedger>();
+        assert_eq!(ledger.ops.len(), 1);
+        let entry = &ledger.ops[0];
+        assert_eq!(entry.tick, 77);
+        assert_eq!(entry.source_player, None);
+        assert_eq!(entry.target_player, Some(7));
+        assert_eq!(entry.resource, "Energy");
+        assert_eq!(entry.amount, 55);
+        assert_eq!(entry.amount_requested, 55);
+        assert_eq!(entry.amount_delivered, 55);
+        assert_eq!(entry.operation, ResourceOperation::ControllerPassiveIncome);
+        assert_eq!(
+            ledger.balance_delta.get(&7).unwrap().get("Energy"),
+            Some(&55)
+        );
+    }
+
+    #[test]
+    fn controller_income_saturates_storage_and_ledgers_delivered_amount() {
+        let mut app = app_with_controller(WorldConfig::default(), test_controller(1, Some(7)));
+        app.world_mut()
+            .resource_mut::<PlayerGlobalStorage>()
+            .0
+            .entry(7)
+            .or_default()
+            .insert("Energy".to_string(), u32::MAX - 2);
+
+        app.update();
+
+        let storage = app.world().resource::<PlayerGlobalStorage>();
+        assert_eq!(storage.0.get(&7).unwrap().get("Energy"), Some(&u32::MAX));
+
+        let ledger = app.world().resource::<ResourceLedger>();
+        assert_eq!(ledger.ops.len(), 1);
+        assert_eq!(ledger.ops[0].amount, 2);
+        assert_eq!(ledger.ops[0].amount_delivered, 2);
+        assert_eq!(
+            ledger.balance_delta.get(&7).unwrap().get("Energy"),
+            Some(&2)
+        );
     }
 }

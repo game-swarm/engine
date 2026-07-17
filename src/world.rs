@@ -1,6 +1,9 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::BTreeSet,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use crate::arena_admin::ArenaRoomAdmin;
 use crate::command::Tick;
@@ -21,7 +24,7 @@ use crate::onboarding::{
     OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
     send_onboarding_event,
 };
-use crate::plugins::{load_default_plugin_lock, register_mods};
+use crate::plugins::{apply_lock_to_world_config, load_default_plugin_lock, register_mods};
 use crate::pve::{
     DifficultyZone, PveBudget, PveBudgetConfig, WorldPveConfig, ZoneDefinition,
     zone_definition_for_room, zone_for_room,
@@ -32,7 +35,8 @@ use crate::resource_ledger::{ResourceLedger, resource_ledger_system};
 use crate::resources::{
     AlliedTransferCooldowns, AlliedTransferDailyTick, AlliedTransferDailyUsage, CurrentTick,
     GlobalStorageConfig, PendingAlliedTransfers, PendingGlobalTransfers, PlayerGlobalStorage,
-    PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SourceDef,
+    PlayerLocalStorage, PveOutputTracker, ResourceDef, ResourceRegistry, SettlementState,
+    SourceDef,
 };
 use crate::scheduler::SystemSchedulerManifest;
 use crate::systems::*;
@@ -73,6 +77,7 @@ pub struct WorldConfig {
     pub pve_budget: PveBudgetConfig,
     pub resources: WorldResourceConfig,
     pub combat: WorldCombatConfig,
+    #[serde(alias = "retention")]
     pub replay: ReplayRetentionConfig,
     pub damage_types: Vec<crate::components::DamageTypeDef>,
     pub body_part_types: Vec<crate::components::BodyPartTypeDef>,
@@ -83,6 +88,25 @@ pub struct WorldConfig {
     pub special_effects: Vec<crate::components::SpecialEffectDef>,
     #[serde(default)]
     pub custom_actions: Vec<crate::components::CustomActionDef>,
+    #[serde(skip)]
+    pub explicit_fields: ExplicitWorldConfigFields,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExplicitWorldConfigFields {
+    paths: BTreeSet<String>,
+}
+
+impl ExplicitWorldConfigFields {
+    pub fn contains(&self, path: &str) -> bool {
+        self.paths.contains(path)
+    }
+
+    fn from_toml_value(value: &toml::Value) -> Self {
+        let mut fields = Self::default();
+        collect_explicit_toml_paths(None, value, &mut fields.paths);
+        fields
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,7 +183,9 @@ pub struct EmpireUpkeepConfig {
     pub enabled: bool,
     pub base_upkeep: u32,
     pub room_soft_cap: u32,
+    #[serde(alias = "controller_passive_income_base")]
     pub controller_passive_income: u32,
+    pub controller_passive_income_rcl_bonus: u32,
     pub resource: String,
     pub repair_cap: u32,
     pub distance_decay_bp: u32,
@@ -171,18 +197,18 @@ pub struct EmpireUpkeepConfig {
 impl EmpireUpkeepConfig {
     pub fn standard() -> Self {
         Self {
-            base_upkeep: 30,
-            room_soft_cap: 20,
-            controller_passive_income: 25,
+            base_upkeep: 50,
+            room_soft_cap: 10,
+            controller_passive_income: 40,
+            controller_passive_income_rcl_bonus: 5,
             ..Self::default()
         }
     }
 
     pub fn vanilla() -> Self {
         Self {
-            base_upkeep: 20,
-            room_soft_cap: 25,
-            controller_passive_income: 20,
+            base_upkeep: 30,
+            room_soft_cap: 15,
             ..Self::default()
         }
     }
@@ -191,9 +217,13 @@ impl EmpireUpkeepConfig {
         Self {
             base_upkeep: 10,
             room_soft_cap: 20,
-            controller_passive_income: 10,
             ..Self::default()
         }
+    }
+
+    pub fn controller_passive_income_for_rcl(&self, rcl: u8) -> u32 {
+        self.controller_passive_income
+            .saturating_add(u32::from(rcl).saturating_mul(self.controller_passive_income_rcl_bonus))
     }
 
     pub fn upkeep_cost(&self, rooms: u32) -> u32 {
@@ -312,8 +342,10 @@ pub struct WorldCombatConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReplayRetentionConfig {
+    #[serde(alias = "deterministic_replay_retention_ticks")]
     pub deterministic_retention_ticks: Tick,
     pub rich_artifact_retention_ticks: Tick,
+    pub keyframe_backup_copies: u32,
 }
 impl Default for WorldConfig {
     fn default() -> Self {
@@ -338,7 +370,38 @@ impl Default for WorldConfig {
             source_types: Vec::new(),
             special_effects: default_special_effects(),
             custom_actions: default_custom_actions(),
+            explicit_fields: ExplicitWorldConfigFields::default(),
         }
+    }
+}
+
+fn collect_explicit_toml_paths(
+    prefix: Option<&str>,
+    value: &toml::Value,
+    paths: &mut BTreeSet<String>,
+) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    for (key, child) in table {
+        let raw = match prefix {
+            Some(prefix) => format!("{prefix}.{key}"),
+            None => key.clone(),
+        };
+        let canonical = canonical_world_config_path(&raw);
+        paths.insert(canonical);
+        collect_explicit_toml_paths(Some(&raw), child, paths);
+    }
+}
+
+fn canonical_world_config_path(path: &str) -> String {
+    match path {
+        "empire_upkeep.controller_passive_income_base" => {
+            "empire_upkeep.controller_passive_income".to_string()
+        }
+        "retention" => "replay".to_string(),
+        path if path.starts_with("retention.") => path.replacen("retention", "replay", 1),
+        _ => path.to_string(),
     }
 }
 
@@ -603,9 +666,10 @@ impl Default for EmpireUpkeepConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            base_upkeep: 30,
-            room_soft_cap: 20,
-            controller_passive_income: 25,
+            base_upkeep: 50,
+            room_soft_cap: 10,
+            controller_passive_income: 40,
+            controller_passive_income_rcl_bonus: 5,
             resource: "Energy".to_string(),
             repair_cap: 3_500,
             distance_decay_bp: 500,
@@ -667,6 +731,7 @@ impl Default for ReplayRetentionConfig {
         Self {
             deterministic_retention_ticks: 30 * 24 * 60,
             rich_artifact_retention_ticks: 180 * 24 * 60,
+            keyframe_backup_copies: 2,
         }
     }
 }
@@ -674,7 +739,15 @@ impl WorldConfig {
     pub fn from_toml_str(contents: &str) -> Result<Self, toml::de::Error> {
         use serde::de::Error as _;
 
+        let explicit_value: toml::Value = toml::from_str(contents)?;
+        let explicit_fields = ExplicitWorldConfigFields::from_toml_value(&explicit_value);
         let mut config: Self = toml::from_str(contents)?;
+        config.explicit_fields = explicit_fields;
+        if config.visibility.public_spectate {
+            return Err(toml::de::Error::custom(
+                "visibility.public_spectate is not allowed in world.toml",
+            ));
+        }
         for action in &config.custom_actions {
             if crate::components::is_vanilla_action_name(&action.name) {
                 return Err(toml::de::Error::custom(format!(
@@ -745,6 +818,7 @@ impl WorldConfig {
             self.resources.max_pve_output_per_tick,
         ));
         app.insert_resource(PveBudget::new(self.pve_budget.clone()));
+        app.insert_resource(SettlementState::default());
         app.insert_resource(LatestCodeVersions::default());
         app.insert_resource(RepairTracker {
             per_player: Default::default(),
@@ -1290,6 +1364,9 @@ pub fn create_world_with_mode(mode: WorldMode) -> SwarmWorld {
 
 pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -> SwarmWorld {
     let mut config = config;
+    let plugin_lock = load_default_plugin_lock().expect("invalid mods.lock runtime configuration");
+    apply_lock_to_world_config(&plugin_lock, &mut config, mode)
+        .expect("invalid mods.lock runtime configuration");
     if mode == WorldMode::Arena {
         config.replay.deterministic_retention_ticks = 180 * 24 * 60;
         config.replay.rich_artifact_retention_ticks = 180 * 24 * 60;
@@ -1327,7 +1404,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
     app.init_resource::<OnboardingProgress>();
     app.add_message::<OnboardingEvent>();
     app.add_message::<OnboardingSwarmEvent>();
-    register_mods(&mut app, &load_default_plugin_lock());
+    register_mods(&mut app, &plugin_lock);
 
     let namespace = match mode {
         WorldMode::Default => "default".to_string(),
@@ -1335,6 +1412,7 @@ pub fn create_world_with_mode_and_config(mode: WorldMode, config: WorldConfig) -
             "tutorial_{}",
             NEXT_TUTORIAL_WORLD_ID.fetch_add(1, Ordering::Relaxed)
         ),
+        WorldMode::Novice => "novice".to_string(),
         WorldMode::Arena => "arena".to_string(),
     };
     let mut settings = WorldSettings::new(mode, namespace.clone());
@@ -1688,6 +1766,20 @@ pub fn state_checksum(world: &mut World) -> u64 {
     tag(&mut hasher, "player_global_storage");
     hash_player_storage(&mut hasher, &world.resource::<PlayerGlobalStorage>().0);
 
+    tag(&mut hasher, "settlement_state");
+    if let Some(settlements) = world.get_resource::<SettlementState>() {
+        if let Ok(bytes) = serde_json::to_vec(settlements) {
+            hash_bytes(&mut hasher, &bytes);
+        }
+    }
+
+    tag(&mut hasher, "resource_ledger");
+    if let Some(resource_ledger) = world.get_resource::<ResourceLedger>() {
+        if let Ok(bytes) = serde_json::to_vec(resource_ledger) {
+            hash_bytes(&mut hasher, &bytes);
+        }
+    }
+
     tag(&mut hasher, "pending_global_transfers");
     let mut transfers = world.resource::<PendingGlobalTransfers>().0.clone();
     transfers.sort_by_key(|transfer| {
@@ -1830,6 +1922,14 @@ mod shard_tests {
         assert_eq!(config.drone.min_lifespan, MIN_LIFESPAN);
         assert_eq!(config.drone.max_body_parts, 50);
         assert_eq!(config.drone.max_drones_per_player, 500);
+        assert_eq!(config.empire_upkeep.base_upkeep, 50);
+        assert_eq!(config.empire_upkeep.room_soft_cap, 10);
+        assert_eq!(config.empire_upkeep.controller_passive_income, 40);
+        assert_eq!(config.empire_upkeep.controller_passive_income_rcl_bonus, 5);
+        assert_eq!(
+            config.empire_upkeep.controller_passive_income_for_rcl(1),
+            45
+        );
         assert!(config.combat.pvp_enabled);
         assert!(!config.combat.friendly_fire);
         assert_eq!(config.resources.source_regeneration_rate, 10_000);
@@ -1842,6 +1942,7 @@ mod shard_tests {
         assert!(!config.visibility.public_spectate);
         assert_eq!(config.visibility.spectate_delay, 0);
         assert_eq!(config.visibility.replay_privacy, ReplayPrivacy::Private);
+        assert_eq!(config.replay.keyframe_backup_copies, 2);
         assert!(!config.propagation_system_enabled());
         assert_eq!(config.damage_types.len(), 5);
         assert_eq!(
@@ -1888,6 +1989,58 @@ mod shard_tests {
                 .map(|effect| effect.duration),
             Some(3)
         );
+    }
+
+    #[test]
+    fn novice_world_uses_default_tick_and_deterministic_namespace() {
+        let world = create_world_with_mode(WorldMode::Novice);
+        let settings = world.app.world().resource::<WorldSettings>();
+        let storage = world.app.world().resource::<GlobalStorageConfig>();
+        let onboarding = world.app.world().resource::<OnboardingConfig>();
+        let rankings = world.app.world().resource::<RankingState>();
+
+        assert_eq!(settings.mode, WorldMode::Novice);
+        assert_eq!(settings.tick_interval_ms, DEFAULT_TICK_INTERVAL_MS);
+        assert_eq!(settings.namespace, "novice");
+        assert_eq!(storage.namespace, "novice");
+        assert!(!onboarding.enabled);
+        assert_eq!(rankings.mode, WorldMode::Novice);
+    }
+
+    #[test]
+    fn empire_upkeep_profiles_match_resource_ledger_defaults() {
+        let standard = EmpireUpkeepConfig::standard();
+        assert_eq!(standard.base_upkeep, 50);
+        assert_eq!(standard.room_soft_cap, 10);
+        assert_eq!(standard.upkeep_cost(1), 55);
+        assert_eq!(standard.upkeep_cost(10), 1_000);
+        assert_eq!(standard.controller_passive_income_for_rcl(1), 45);
+        assert_eq!(standard.controller_passive_income_for_rcl(8), 80);
+
+        let vanilla = EmpireUpkeepConfig::vanilla();
+        assert_eq!(vanilla.base_upkeep, 30);
+        assert_eq!(vanilla.room_soft_cap, 15);
+        assert_eq!(vanilla.upkeep_cost(1), 32);
+        assert_eq!(vanilla.upkeep_cost(15), 900);
+        assert_eq!(vanilla.controller_passive_income_for_rcl(1), 45);
+
+        let tutorial = EmpireUpkeepConfig::tutorial();
+        assert_eq!(tutorial.base_upkeep, 10);
+        assert_eq!(tutorial.room_soft_cap, 20);
+        assert_eq!(tutorial.upkeep_cost(1), 10);
+        assert_eq!(tutorial.upkeep_cost(20), 400);
+        assert_eq!(tutorial.controller_passive_income_for_rcl(1), 45);
+    }
+
+    #[test]
+    fn controller_passive_income_saturates_rcl_bonus() {
+        let upkeep = EmpireUpkeepConfig {
+            controller_passive_income: u32::MAX - 4,
+            controller_passive_income_rcl_bonus: 5,
+            ..EmpireUpkeepConfig::default()
+        };
+
+        assert_eq!(upkeep.controller_passive_income_for_rcl(1), u32::MAX);
     }
 
     #[test]
@@ -2023,7 +2176,6 @@ max_drones_per_player = 25
 [visibility]
 fog_of_war = false
 player_view = "full"
-public_spectate = true
 spectate_delay = 100
 replay_privacy = "public"
 [resources]
@@ -2054,7 +2206,7 @@ rich_artifact_retention_ticks = 456
         assert_eq!(config.drone.max_drones_per_player, 25);
         assert!(!config.visibility.fog_of_war);
         assert_eq!(config.visibility.player_view, PlayerViewMode::Full);
-        assert!(config.visibility.public_spectate);
+        assert!(!config.visibility.public_spectate);
         assert_eq!(config.visibility.spectate_delay, 100);
         assert_eq!(config.visibility.replay_privacy, ReplayPrivacy::Public);
         assert_eq!(config.resources.max_pve_output_per_tick, 1234);
@@ -2063,7 +2215,58 @@ rich_artifact_retention_ticks = 456
         assert_eq!(config.combat_damage_multiplier_fixed(), 15_000);
         assert_eq!(config.replay.deterministic_retention_ticks, 123);
         assert_eq!(config.replay.rich_artifact_retention_ticks, 456);
+        assert_eq!(config.replay.keyframe_backup_copies, 2);
         assert!(config.propagation_system_enabled());
+    }
+
+    #[test]
+    fn world_config_rejects_public_spectate() {
+        let error = WorldConfig::from_toml_str(
+            r#"
+[visibility]
+public_spectate = true
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("visibility.public_spectate is not allowed"));
+    }
+
+    #[test]
+    fn world_config_parses_retention_section_aliases() {
+        let config = WorldConfig::from_toml_str(
+            r#"
+[retention]
+deterministic_replay_retention_ticks = 789
+rich_artifact_retention_ticks = 456
+keyframe_backup_copies = 3
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.replay.deterministic_retention_ticks, 789);
+        assert_eq!(config.replay.rich_artifact_retention_ticks, 456);
+        assert_eq!(config.replay.keyframe_backup_copies, 3);
+    }
+
+    #[test]
+    fn world_config_parses_controller_income_base_alias() {
+        let config = WorldConfig::from_toml_str(
+            r#"
+[empire_upkeep]
+controller_passive_income_base = 12
+controller_passive_income_rcl_bonus = 3
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.empire_upkeep.controller_passive_income, 12);
+        assert_eq!(config.empire_upkeep.controller_passive_income_rcl_bonus, 3);
+        assert_eq!(
+            config.empire_upkeep.controller_passive_income_for_rcl(4),
+            24
+        );
     }
 
     #[test]

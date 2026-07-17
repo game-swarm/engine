@@ -344,8 +344,13 @@ mod tests {
 
     #[test]
     fn fog_of_war_disabled_reveals_full_map() {
-        let mut config = WorldConfig::default();
-        config.visibility.fog_of_war = false;
+        let config = WorldConfig::from_toml_str(
+            r#"
+[visibility]
+fog_of_war = false
+"#,
+        )
+        .unwrap();
         let mut world = create_world_with_mode_and_config(WorldMode::Default, config);
         let enemy = world.spawn_drone(2, 40, 40, vec![BodyPart::Move]);
 
@@ -363,8 +368,13 @@ mod tests {
 
     #[test]
     fn full_player_view_reveals_full_map_with_fog_enabled() {
-        let mut config = WorldConfig::default();
-        config.visibility.player_view = PlayerViewMode::Full;
+        let config = WorldConfig::from_toml_str(
+            r#"
+[visibility]
+player_view = "full"
+"#,
+        )
+        .unwrap();
         let mut world = create_world_with_mode_and_config(WorldMode::Default, config);
         let enemy = world.spawn_drone(2, 40, 40, vec![BodyPart::Move]);
 

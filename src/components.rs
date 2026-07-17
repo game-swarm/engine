@@ -3,7 +3,9 @@ use std::fmt;
 
 use bevy::prelude::{Component, Resource as BevyResource};
 use indexmap::IndexMap;
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use ts_rs::TS;
 
 pub const DEFAULT_DRONE_LIFESPAN: u32 = 1500;
 pub const MIN_LIFESPAN: u32 = 100;
@@ -27,10 +29,11 @@ pub type PlayerId = u32;
 pub const DEFAULT_TICK_INTERVAL_MS: u64 = 3_000;
 pub const TUTORIAL_TICK_INTERVAL_MS: u64 = 1_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 pub enum WorldMode {
     Default,
     Tutorial,
+    Novice,
     Arena,
 }
 
@@ -47,7 +50,9 @@ impl WorldSettings {
             mode,
             tick_interval_ms: match mode {
                 WorldMode::Tutorial => TUTORIAL_TICK_INTERVAL_MS,
-                WorldMode::Default | WorldMode::Arena => DEFAULT_TICK_INTERVAL_MS,
+                WorldMode::Default | WorldMode::Novice | WorldMode::Arena => {
+                    DEFAULT_TICK_INTERVAL_MS
+                }
             },
             namespace,
         }
@@ -194,7 +199,7 @@ pub struct Position {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Owner(pub PlayerId);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 pub enum BodyPart {
     Move,
     Work,
@@ -1329,7 +1334,9 @@ impl Default for FabricateBuffer {
 
 pub const DEFAULT_ROOM_SIZE: i32 = 50;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema, TS,
+)]
 pub enum TerrainType {
     Plain,
     Swamp,

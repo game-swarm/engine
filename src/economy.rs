@@ -628,13 +628,16 @@ mod tests {
             .world_mut()
             .resource_mut::<PlayerGlobalStorage>()
             .0
-            .insert(7, [("Energy".to_string(), 60_000)].into_iter().collect());
+            .insert(7, [("Energy".to_string(), 750_000)].into_iter().collect());
 
         let snapshot = get_economy(&mut world, 7, EconomyParams { player_id: None });
 
         assert_eq!(snapshot.player_id, 7);
         assert_eq!(snapshot.income.get("Energy"), Some(&1));
         assert_eq!(snapshot.maintenance.get("Energy"), Some(&2));
+        assert_eq!(snapshot.storage_tax.capacity, 1_000_000);
+        assert_eq!(snapshot.storage_tax.utilization_pct, 75);
+        assert!(snapshot.storage_tax.estimated_tax_per_tick > 0);
         assert!(snapshot.storage_tax.effective_rate > 0);
     }
 
