@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Fetch pinned mods
+        run: ./scripts/fetch-mods.sh
       - name: Run release load profile
         run: timeout 25m cargo test -q -p swarm-engine --release --test load release_load_profile_100_players_500_ticks -- --ignored --exact
 
