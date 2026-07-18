@@ -3,3 +3,4 @@ mods/
 .github/
 .dockerignore
 .git
+sdk-templates/ts/examples/starter-bot/build/

@@ -8,3 +8,4 @@ target/
 .env.*
 mods/
 .tmp/
+sdk-templates/ts/examples/starter-bot/build/
