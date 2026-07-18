@@ -8,11 +8,11 @@
 #         name = { path = "/path/to/local/checkout" }
 
 [mods]
-combat-core = { git = "https://github.com/game-swarm/mod-combat-core.git", rev = "d387f29ff6a2b658a14d9c9fe210ddaa249e2f44" }
-empire-upkeep = { git = "https://github.com/game-swarm/mod-empire-upkeep.git", rev = "38dc10f17cf5238eec4333706e3f2b10a3c443c9" }
-fog-of-war = { git = "https://github.com/game-swarm/mod-fog-of-war.git", rev = "33f015c045be4b4d70657e7b28a49cd1f67061be" }
-pve-spawning = { git = "https://github.com/game-swarm/mod-pve-spawning.git", rev = "a610570372572aecf451e70449e1da120746a020" }
-resource-decay = { git = "https://github.com/game-swarm/mod-resource-decay.git", rev = "3da39d3b842efec97da3cd3b49939e5fd22bb6a9" }
-special-attacks = { git = "https://github.com/game-swarm/mod-special-attacks.git", rev = "cf85a1be3522b1412d25ed3ad5f41c1dfe092c1c" }
-depot-storage = { git = "https://github.com/game-swarm/mod-depot-storage.git", rev = "d5cea15f8460ae91f0164a3862dc554e4e738539" }
-vanilla-boss = { git = "https://github.com/game-swarm/mod-vanilla-boss.git", rev = "ff25b16a6bdd244d5e00ea2fcab313cb163fcbed" }
+combat-core = { git = "https://github.com/game-swarm/mod-combat-core.git", rev = "149fb7cb82761682870c4a232d42b837d944c924" }
+empire-upkeep = { git = "https://github.com/game-swarm/mod-empire-upkeep.git", rev = "6ac10e3069281c97335c4e3298b12a2320c4e3d7" }
+fog-of-war = { git = "https://github.com/game-swarm/mod-fog-of-war.git", rev = "0e5a5579fd346d2ee74f30fc23e819ba2fed6e07" }
+pve-spawning = { git = "https://github.com/game-swarm/mod-pve-spawning.git", rev = "14137a44b0e6d42676fd834b488fed428d53613d" }
+resource-decay = { git = "https://github.com/game-swarm/mod-resource-decay.git", rev = "d8698f90f7c639f084eff03116e67b2537e95a21" }
+special-attacks = { git = "https://github.com/game-swarm/mod-special-attacks.git", rev = "cfc585a5a278ab3893a3459defee2bb79ff67ae4" }
+depot-storage = { git = "https://github.com/game-swarm/mod-depot-storage.git", rev = "8ab8b6a66315188debf39b882c1ecdc6b4c3df0b" }
+vanilla-boss = { git = "https://github.com/game-swarm/mod-vanilla-boss.git", rev = "2bfc145968ba93564bf71fe5ac5aeec019d87a2c" }
