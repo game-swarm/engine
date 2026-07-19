@@ -1,11 +1,11 @@
 #!/bin/bash
-# Fetch the engine API and mod sources for an engine build.
-# The sibling layout matches the path dependencies in Cargo.toml:
-#   ../engine-api
+# Fetch mod sources for an engine build.
+# Cargo resolves the engine API and plugin SDK directly from their Git release tag.
+# The sibling mod layout matches the path dependencies in Cargo.toml:
 #   ../mods/<mod-name>
 #
 # Usage:
-#   ./scripts/fetch-mods.sh              # Fetch missing API/mod repositories
+#   ./scripts/fetch-mods.sh              # Fetch missing mod repositories
 #   ./scripts/fetch-mods.sh --local      # Prefer local mod paths from mods.toml
 #   ALLOW_MUTABLE_REFS=true MOD_REV=develop ./scripts/fetch-mods.sh
 #       # Explicitly opt in to mutable revisions for coordinated development
@@ -17,9 +17,6 @@ ENGINE_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$ENGINE_DIR/mods.toml"
 WORKSPACE_DIR="$(dirname "$ENGINE_DIR")"
 MODS_DIR="$WORKSPACE_DIR/mods"
-ENGINE_API_DIR="$WORKSPACE_DIR/engine-api"
-ENGINE_API_GIT="${ENGINE_API_GIT:-https://github.com/game-swarm/engine-api.git}"
-ENGINE_API_REV="${ENGINE_API_REV:-ec9db43db3893f154eefded5e5995b23ac9aecb4}"
 USE_LOCAL="${USE_LOCAL:-false}"
 MOD_REV="${MOD_REV:-}"
 ALLOW_MUTABLE_REFS="${ALLOW_MUTABLE_REFS:-false}"
@@ -106,18 +103,6 @@ fetch_repository() {
   fi
 }
 
-fetch_repository "engine-api" "$ENGINE_API_DIR" "$ENGINE_API_GIT" "$ENGINE_API_REV"
-
-for manifest in \
-  "$ENGINE_API_DIR/Cargo.toml" \
-  "$ENGINE_API_DIR/crates/swarm-engine-api/Cargo.toml" \
-  "$ENGINE_API_DIR/crates/swarm-engine-plugin-sdk/Cargo.toml"; do
-  if [ ! -f "$manifest" ]; then
-    echo "[engine-api] ERROR: expected manifest not found: $manifest" >&2
-    exit 1
-  fi
-done
-
 # Simple TOML parser for mods.toml
 # Handles: name = { git = "url", rev = "branch" }
 #          name = { path = "/path" }
@@ -189,4 +174,4 @@ parse_mods | while IFS='|' read -r type name url rev; do
   esac
 done
 
-echo "[deps] Engine API and mods are ready in $WORKSPACE_DIR."
+echo "[mods] Mod sources are ready in $MODS_DIR."
