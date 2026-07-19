@@ -51,6 +51,11 @@ require_immutable_revision() {
   return 1
 }
 
+normalize_git_url() {
+  local url="${1%/}"
+  echo "${url%.git}"
+}
+
 fetch_repository() {
   local name="$1"
   local target="$2"
@@ -66,7 +71,7 @@ fetch_repository() {
     fi
     local actual_url
     actual_url="$(git -C "$target" remote get-url origin)"
-    if [ "$actual_url" != "$url" ]; then
+    if [ "$(normalize_git_url "$actual_url")" != "$(normalize_git_url "$url")" ]; then
       echo "[$name] ERROR: origin mismatch for $target" >&2
       echo "[$name] expected: $url" >&2
       echo "[$name] actual:   $actual_url" >&2
