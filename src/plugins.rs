@@ -1122,13 +1122,13 @@ mod tests {
     #[test]
     fn manifests_match_canonical_runtime_schema_keys() {
         for (plugin, keys) in CANONICAL_PLUGIN_CONFIG_KEYS {
-            let path = format!("mods/{plugin}/mod.toml");
+            let path = plugin_manifest_path(plugin);
             let manifest = std::fs::read_to_string(&path).unwrap();
             let manifest: toml::Value = toml::from_str(&manifest).unwrap();
             let config = manifest
                 .get("config")
                 .and_then(toml::Value::as_table)
-                .unwrap_or_else(|| panic!("missing [config] in {path}"));
+                .unwrap_or_else(|| panic!("missing [config] in {}", path.display()));
             let actual = config.keys().map(String::as_str).collect::<BTreeSet<_>>();
             let expected = keys.iter().copied().collect::<BTreeSet<_>>();
             assert_eq!(actual, expected, "{plugin} manifest keys differ");
@@ -1138,13 +1138,13 @@ mod tests {
     #[test]
     fn manifests_match_canonical_runtime_schema_types() {
         for (plugin, types) in CANONICAL_PLUGIN_CONFIG_TYPES {
-            let path = format!("mods/{plugin}/mod.toml");
+            let path = plugin_manifest_path(plugin);
             let manifest = std::fs::read_to_string(&path).unwrap();
             let manifest: toml::Value = toml::from_str(&manifest).unwrap();
             let config = manifest
                 .get("config")
                 .and_then(toml::Value::as_table)
-                .unwrap_or_else(|| panic!("missing [config] in {path}"));
+                .unwrap_or_else(|| panic!("missing [config] in {}", path.display()));
             for (key, expected_type) in *types {
                 let actual_type = config
                     .get(*key)
@@ -1255,13 +1255,13 @@ mod tests {
     }
 
     fn manifest_default_config(plugin: &str) -> HashMap<String, Value> {
-        let path = format!("mods/{plugin}/mod.toml");
+        let path = plugin_manifest_path(plugin);
         let manifest = std::fs::read_to_string(&path).unwrap();
         let manifest: toml::Value = toml::from_str(&manifest).unwrap();
         manifest
             .get("config")
             .and_then(toml::Value::as_table)
-            .unwrap_or_else(|| panic!("missing [config] in {path}"))
+            .unwrap_or_else(|| panic!("missing [config] in {}", path.display()))
             .iter()
             .map(|(key, metadata)| {
                 let default = metadata
@@ -1270,5 +1270,14 @@ mod tests {
                 (key.clone(), serde_json::to_value(default).unwrap())
             })
             .collect()
+    }
+
+    fn plugin_manifest_path(plugin: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("engine manifest must have a workspace parent")
+            .join("mods")
+            .join(plugin)
+            .join("mod.toml")
     }
 }
