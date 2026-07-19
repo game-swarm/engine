@@ -4724,6 +4724,7 @@ dependencies = [
 [[package]]
 name = "swarm-engine-api"
 version = "0.1.0"
+source = "git+https://github.com/game-swarm/engine-api.git?tag=v0.1.0#ec9db43db3893f154eefded5e5995b23ac9aecb4"
 dependencies = [
  "blake3",
  "schemars",
@@ -4736,6 +4737,7 @@ dependencies = [
 [[package]]
 name = "swarm-engine-plugin-sdk"
 version = "0.1.0"
+source = "git+https://github.com/game-swarm/engine-api.git?tag=v0.1.0#ec9db43db3893f154eefded5e5995b23ac9aecb4"
 dependencies = [
  "bevy",
  "blake3",

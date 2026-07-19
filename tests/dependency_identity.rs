@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Deserialize;
@@ -15,7 +14,6 @@ struct Package {
     version: String,
     id: String,
     source: Option<String>,
-    manifest_path: String,
 }
 
 #[test]
@@ -36,56 +34,27 @@ fn shared_dependencies_resolve_to_single_expected_packages() {
     let metadata: Metadata = serde_json::from_slice(&output.stdout)
         .expect("cargo metadata returned invalid JSON for format version 1");
 
-    assert_single_package(&metadata, "swarm-engine-api", "0.1.0", None);
-    assert_single_package(&metadata, "swarm-engine-plugin-sdk", "0.1.0", None);
-    assert_single_package(
-        &metadata,
-        "bevy",
-        "0.19.0",
-        Some("registry+https://github.com/rust-lang/crates.io-index"),
-    );
-
-    let swarm_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("engine manifest must have a workspace parent");
-    assert_canonical_path_package(
+    assert_single_package(&metadata, "swarm-engine-api", "0.1.0");
+    assert_single_package(&metadata, "swarm-engine-plugin-sdk", "0.1.0");
+    assert_single_package(&metadata, "bevy", "0.19.0");
+    assert_source_prefix(
         &metadata,
         "swarm-engine-api",
-        &swarm_root.join("engine-api/crates/swarm-engine-api/Cargo.toml"),
+        "git+https://github.com/game-swarm/engine-api.git?tag=v0.1.0#",
     );
-    assert_canonical_path_package(
+    assert_source_prefix(
         &metadata,
         "swarm-engine-plugin-sdk",
-        &swarm_root.join("engine-api/crates/swarm-engine-plugin-sdk/Cargo.toml"),
+        "git+https://github.com/game-swarm/engine-api.git?tag=v0.1.0#",
+    );
+    assert_source_prefix(
+        &metadata,
+        "bevy",
+        "registry+https://github.com/rust-lang/crates.io-index",
     );
 }
 
-fn assert_canonical_path_package(metadata: &Metadata, package_name: &str, expected: &Path) {
-    let package = metadata
-        .packages
-        .iter()
-        .find(|package| package.name == package_name)
-        .unwrap_or_else(|| panic!("missing resolved package {package_name}"));
-    let actual = PathBuf::from(&package.manifest_path)
-        .canonicalize()
-        .unwrap_or_else(|error| {
-            panic!("failed to canonicalize {}: {error}", package.manifest_path)
-        });
-    let expected = expected
-        .canonicalize()
-        .unwrap_or_else(|error| panic!("failed to canonicalize {}: {error}", expected.display()));
-    assert_eq!(
-        actual, expected,
-        "resolved {package_name} manifest is not the canonical sibling path"
-    );
-}
-
-fn assert_single_package(
-    metadata: &Metadata,
-    package_name: &str,
-    expected_version: &str,
-    expected_source: Option<&str>,
-) {
+fn assert_single_package(metadata: &Metadata, package_name: &str, expected_version: &str) {
     let matches: Vec<&Package> = metadata
         .packages
         .iter()
@@ -113,9 +82,20 @@ fn assert_single_package(
         package.version, expected_version,
         "unexpected {package_name} version in resolved package: {package:#?}"
     );
-    assert_eq!(
-        package.source.as_deref(),
-        expected_source,
-        "unexpected {package_name} source in resolved package: {package:#?}"
+}
+
+fn assert_source_prefix(metadata: &Metadata, package_name: &str, expected_prefix: &str) {
+    let package = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == package_name)
+        .unwrap_or_else(|| panic!("missing resolved package {package_name}"));
+    let source = package
+        .source
+        .as_deref()
+        .unwrap_or_else(|| panic!("resolved {package_name} does not have a package source"));
+    assert!(
+        source.starts_with(expected_prefix),
+        "unexpected {package_name} source {source:?}; expected prefix {expected_prefix:?}"
     );
 }
