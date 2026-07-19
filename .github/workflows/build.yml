@@ -21,12 +21,6 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: engine
-      - name: Check out engine API v0.1.0
-        uses: actions/checkout@v7
-        with:
-          repository: game-swarm/engine-api
-          ref: ec9db43db3893f154eefded5e5995b23ac9aecb4
-          path: engine-api
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -49,12 +43,6 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: engine
-      - name: Check out engine API v0.1.0
-        uses: actions/checkout@v7
-        with:
-          repository: game-swarm/engine-api
-          ref: ec9db43db3893f154eefded5e5995b23ac9aecb4
-          path: engine-api
       - name: Fetch pinned mods
         working-directory: engine
         run: ./scripts/fetch-mods.sh

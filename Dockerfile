@@ -9,7 +9,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app/engine
-COPY engine-api/ /app/engine-api/
 COPY mods/ /app/mods/
 COPY engine/ /app/engine/
 RUN cargo build --release --locked --features vanilla_mods
