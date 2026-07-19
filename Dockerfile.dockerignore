@@ -1,0 +1,7 @@
+**/.git
+**/.git/**
+**/target
+**/target/**
+engine/.github
+engine/.dockerignore
+engine/sdk-templates/ts/examples/starter-bot/build
