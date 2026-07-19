@@ -28,6 +28,9 @@ jobs:
       - name: Fetch pinned mods
         working-directory: engine
         run: ./scripts/fetch-mods.sh
+      - name: Verify dependency identity
+        working-directory: engine
+        run: cargo test --locked -p swarm-engine --test dependency_identity --features vanilla_mods
       - name: Run release load profile
         working-directory: engine
         run: timeout 25m cargo test -q -p swarm-engine --release --test load release_load_profile_100_players_500_ticks -- --ignored --exact
