@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
 
 use bevy::prelude::{Component, Resource as BevyResource};
 use indexmap::IndexMap;
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::{BodyPart, DamageType, PlayerId, RoomId};
+use swarm_engine_plugin_sdk::components::{
+    BodyPartRegistry, Position, StableEntityId, Structure, StructureType,
+};
 use ts_rs::TS;
 
 pub const DEFAULT_DRONE_LIFESPAN: u32 = 1500;
@@ -23,8 +26,6 @@ pub const VANILLA_ACTION_NAMES: &[&str] = &[
     "Leech",
     "Fabricate",
 ];
-
-pub type PlayerId = u32;
 
 pub const DEFAULT_TICK_INTERVAL_MS: u64 = 3_000;
 pub const TUTORIAL_TICK_INTERVAL_MS: u64 = 1_000;
@@ -59,199 +60,6 @@ impl WorldSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct RoomId(pub u32);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RoomNameError {
-    Empty,
-    InvalidFormat,
-    CoordinateTooLarge,
-}
-
-impl RoomId {
-    const COORD_BITS: u32 = 13;
-    const COORD_MASK: u32 = (1 << Self::COORD_BITS) - 1;
-    const SECTOR_SHIFT: u32 = Self::COORD_BITS * 2;
-    const MAX_COORD_MAGNITUDE: i32 = (1 << (Self::COORD_BITS - 1)) - 1;
-
-    pub fn from_room_name(name: &str) -> Result<Self, RoomNameError> {
-        let mut chars = name.chars().peekable();
-        let sector = chars.next().ok_or(RoomNameError::Empty)?;
-        if !sector.is_ascii_uppercase() {
-            return Err(RoomNameError::InvalidFormat);
-        }
-
-        let vertical = parse_digits(&mut chars)?;
-        let ns = chars.next().ok_or(RoomNameError::InvalidFormat)?;
-        if !matches!(ns, 'N' | 'S') {
-            return Err(RoomNameError::InvalidFormat);
-        }
-
-        let horizontal = parse_digits(&mut chars)?;
-        let ew = chars.next().ok_or(RoomNameError::InvalidFormat)?;
-        if !matches!(ew, 'E' | 'W') || chars.next().is_some() {
-            return Err(RoomNameError::InvalidFormat);
-        }
-
-        let y = signed_room_coordinate(vertical, ns == 'N')?;
-        let x = signed_room_coordinate(horizontal, ew == 'E')?;
-        Self::from_sector_coordinates(sector, x, y)
-    }
-
-    pub fn from_sector_coordinates(sector: char, x: i32, y: i32) -> Result<Self, RoomNameError> {
-        if !sector.is_ascii_uppercase() {
-            return Err(RoomNameError::InvalidFormat);
-        }
-        if x.abs() > Self::MAX_COORD_MAGNITUDE || y.abs() > Self::MAX_COORD_MAGNITUDE {
-            return Err(RoomNameError::CoordinateTooLarge);
-        }
-        let sector_index = (sector as u32) - ('A' as u32);
-        Ok(Self(
-            (sector_index << Self::SECTOR_SHIFT)
-                | (encode_signed(y) << Self::COORD_BITS)
-                | encode_signed(x),
-        ))
-    }
-
-    pub fn sector_coordinates(self) -> (char, i32, i32) {
-        let sector_index = self.0 >> Self::SECTOR_SHIFT;
-        let sector = char::from_u32(('A' as u32) + sector_index).unwrap_or('A');
-        let y = decode_signed((self.0 >> Self::COORD_BITS) & Self::COORD_MASK);
-        let x = decode_signed(self.0 & Self::COORD_MASK);
-        (sector, x, y)
-    }
-
-    pub fn room_name(self) -> String {
-        let (sector, x, y) = self.sector_coordinates();
-        let ns = if y >= 0 { 'N' } else { 'S' };
-        let ew = if x >= 0 { 'E' } else { 'W' };
-        format!("{sector}{}{}{}{}", y.abs(), ns, x.abs(), ew)
-    }
-
-    pub fn adjacent(self, dx: i32, dy: i32) -> Option<Self> {
-        let (sector, x, y) = self.sector_coordinates();
-        Self::from_sector_coordinates(sector, x.checked_add(dx)?, y.checked_add(dy)?).ok()
-    }
-
-    pub fn is_same_or_adjacent(self, other: Self) -> bool {
-        let (sector_a, x_a, y_a) = self.sector_coordinates();
-        let (sector_b, x_b, y_b) = other.sector_coordinates();
-        sector_a == sector_b && (x_a - x_b).abs() <= 1 && (y_a - y_b).abs() <= 1
-    }
-}
-
-impl fmt::Display for RoomId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.room_name())
-    }
-}
-
-fn parse_digits<I>(chars: &mut std::iter::Peekable<I>) -> Result<i32, RoomNameError>
-where
-    I: Iterator<Item = char>,
-{
-    let mut value = String::new();
-    while let Some(next) = chars.peek() {
-        if next.is_ascii_digit() {
-            value.push(*next);
-            chars.next();
-        } else {
-            break;
-        }
-    }
-    if value.is_empty() {
-        return Err(RoomNameError::InvalidFormat);
-    }
-    value.parse().map_err(|_| RoomNameError::CoordinateTooLarge)
-}
-
-fn signed_room_coordinate(magnitude: i32, positive: bool) -> Result<i32, RoomNameError> {
-    if magnitude > RoomId::MAX_COORD_MAGNITUDE {
-        return Err(RoomNameError::CoordinateTooLarge);
-    }
-    Ok(if positive { magnitude } else { -magnitude })
-}
-
-fn encode_signed(value: i32) -> u32 {
-    if value >= 0 {
-        (value as u32) << 1
-    } else {
-        ((-value as u32) << 1) - 1
-    }
-}
-
-fn decode_signed(value: u32) -> i32 {
-    if value & 1 == 0 {
-        (value >> 1) as i32
-    } else {
-        -(((value + 1) >> 1) as i32)
-    }
-}
-
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Position {
-    pub x: i32,
-    pub y: i32,
-    pub room: RoomId,
-}
-
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Owner(pub PlayerId);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
-pub enum BodyPart {
-    Move,
-    Work,
-    Carry,
-    Attack,
-    RangedAttack,
-    Heal,
-    Claim,
-    Tough,
-}
-
-impl fmt::Display for BodyPart {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Move => "Move",
-            Self::Work => "Work",
-            Self::Carry => "Carry",
-            Self::Attack => "Attack",
-            Self::RangedAttack => "RangedAttack",
-            Self::Heal => "Heal",
-            Self::Claim => "Claim",
-            Self::Tough => "Tough",
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum DamageType {
-    Kinetic,
-    Thermal,
-    EMP,
-    Sonic,
-    Corrosive,
-    Psionic,
-}
-impl DamageType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Kinetic => "Kinetic",
-            Self::Thermal => "Thermal",
-            Self::EMP => "EMP",
-            Self::Sonic => "Sonic",
-            Self::Corrosive => "Corrosive",
-            Self::Psionic => "Psionic",
-        }
-    }
-}
-impl fmt::Display for DamageType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DamageTypeDef {
@@ -266,129 +74,6 @@ impl Default for DamageTypeDef {
             component_multipliers: IndexMap::new(),
             attribute_multipliers: IndexMap::new(),
         }
-    }
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BodyPartTypeDef {
-    pub name: BodyPart,
-    pub weight: u32,
-    pub damage_type: Option<String>,
-    pub base_damage: Option<u32>,
-    pub heal_amount: Option<u32>,
-    pub resistances: IndexMap<String, f64>,
-    pub age_modifier: i32,
-}
-impl Default for BodyPartTypeDef {
-    fn default() -> Self {
-        Self {
-            name: BodyPart::Move,
-            weight: default_body_part_weight(BodyPart::Move),
-            damage_type: None,
-            base_damage: None,
-            heal_amount: None,
-            resistances: IndexMap::new(),
-            age_modifier: 0,
-        }
-    }
-}
-#[derive(BevyResource, Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BodyPartRegistry {
-    pub parts: IndexMap<BodyPart, BodyPartTypeDef>,
-}
-impl Default for BodyPartRegistry {
-    fn default() -> Self {
-        let mut parts = IndexMap::new();
-        for part in [
-            BodyPart::Move,
-            BodyPart::Work,
-            BodyPart::Carry,
-            BodyPart::Attack,
-            BodyPart::RangedAttack,
-            BodyPart::Heal,
-            BodyPart::Claim,
-            BodyPart::Tough,
-        ] {
-            parts.insert(
-                part,
-                BodyPartTypeDef {
-                    name: part,
-                    weight: default_body_part_weight(part),
-                    ..Default::default()
-                },
-            );
-        }
-        parts.get_mut(&BodyPart::Attack).unwrap().damage_type =
-            Some(DamageType::Kinetic.to_string());
-        parts.get_mut(&BodyPart::Attack).unwrap().base_damage = Some(30);
-        parts.get_mut(&BodyPart::RangedAttack).unwrap().damage_type =
-            Some(DamageType::Kinetic.to_string());
-        parts.get_mut(&BodyPart::RangedAttack).unwrap().base_damage = Some(25);
-        parts.get_mut(&BodyPart::Heal).unwrap().heal_amount = Some(12);
-        // age_modifier: Tough lives longer, combat/utility parts reduce lifespan
-        parts.get_mut(&BodyPart::Tough).unwrap().age_modifier = 100;
-        parts.get_mut(&BodyPart::Attack).unwrap().age_modifier = -80;
-        parts.get_mut(&BodyPart::RangedAttack).unwrap().age_modifier = -50;
-        parts.get_mut(&BodyPart::Heal).unwrap().age_modifier = -30;
-        parts.get_mut(&BodyPart::Claim).unwrap().age_modifier = -50;
-        parts
-            .get_mut(&BodyPart::Tough)
-            .unwrap()
-            .resistances
-            .insert(DamageType::Kinetic.to_string(), 0.5);
-        Self { parts }
-    }
-}
-fn default_body_part_weight(part: BodyPart) -> u32 {
-    match part {
-        BodyPart::Move => 50,
-        BodyPart::Work => 20,
-        BodyPart::Carry => 50,
-        BodyPart::Attack => 20,
-        BodyPart::RangedAttack => 50,
-        BodyPart::Heal => 250,
-        BodyPart::Claim => 100,
-        BodyPart::Tough => 10,
-    }
-}
-impl BodyPartRegistry {
-    pub fn from_defs(defs: Vec<BodyPartTypeDef>) -> Self {
-        let mut r = Self::default();
-        for d in defs {
-            r.parts.insert(d.name, d);
-        }
-        r
-    }
-    pub fn damage_type(&self, part: BodyPart) -> String {
-        self.parts
-            .get(&part)
-            .and_then(|d| d.damage_type.clone())
-            .unwrap_or_else(|| DamageType::Kinetic.to_string())
-    }
-    pub fn base_damage(&self, part: BodyPart) -> u32 {
-        self.parts
-            .get(&part)
-            .and_then(|d| d.base_damage)
-            .unwrap_or(0)
-    }
-    pub fn heal_amount(&self, part: BodyPart) -> u32 {
-        self.parts
-            .get(&part)
-            .and_then(|d| d.heal_amount)
-            .unwrap_or(0)
-    }
-    pub fn weight(&self, part: BodyPart) -> u32 {
-        self.parts
-            .get(&part)
-            .map(|d| d.weight)
-            .unwrap_or_else(|| default_body_part_weight(part))
-    }
-    pub fn resistance(&self, part: BodyPart, dt: &str) -> f64 {
-        self.parts
-            .get(&part)
-            .and_then(|d| d.resistances.get(dt).copied())
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0)
     }
 }
 #[derive(BevyResource, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -579,90 +264,6 @@ fn clamp_multiplier(multiplier: f64) -> f64 {
         multiplier.clamp(0.0, 1.0)
     } else {
         1.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct StructureType(pub &'static str);
-
-impl StructureType {
-    pub const SPAWN: Self = Self("Spawn");
-    pub const EXTENSION: Self = Self("Extension");
-    pub const TOWER: Self = Self("Tower");
-    pub const STORAGE: Self = Self("Storage");
-    pub const LINK: Self = Self("Link");
-    pub const EXTRACTOR: Self = Self("Extractor");
-    pub const LAB: Self = Self("Lab");
-    pub const TERMINAL: Self = Self("Terminal");
-    pub const NUKER: Self = Self("Nuker");
-    pub const OBSERVER: Self = Self("Observer");
-    pub const POWER_SPAWN: Self = Self("PowerSpawn");
-    pub const FACTORY: Self = Self("Factory");
-    pub const DEPOT: Self = Self("Depot");
-
-    #[allow(non_upper_case_globals)]
-    pub const Spawn: Self = Self::SPAWN;
-    #[allow(non_upper_case_globals)]
-    pub const Extension: Self = Self::EXTENSION;
-    #[allow(non_upper_case_globals)]
-    pub const Tower: Self = Self::TOWER;
-    #[allow(non_upper_case_globals)]
-    pub const Storage: Self = Self::STORAGE;
-    #[allow(non_upper_case_globals)]
-    pub const Link: Self = Self::LINK;
-    #[allow(non_upper_case_globals)]
-    pub const Extractor: Self = Self::EXTRACTOR;
-    #[allow(non_upper_case_globals)]
-    pub const Lab: Self = Self::LAB;
-    #[allow(non_upper_case_globals)]
-    pub const Terminal: Self = Self::TERMINAL;
-    #[allow(non_upper_case_globals)]
-    pub const Nuker: Self = Self::NUKER;
-    #[allow(non_upper_case_globals)]
-    pub const Observer: Self = Self::OBSERVER;
-    #[allow(non_upper_case_globals)]
-    pub const PowerSpawn: Self = Self::POWER_SPAWN;
-    #[allow(non_upper_case_globals)]
-    pub const Factory: Self = Self::FACTORY;
-    #[allow(non_upper_case_globals)]
-    pub const Depot: Self = Self::DEPOT;
-
-    pub fn new(name: impl Into<String>) -> Self {
-        Self(Box::leak(name.into().into_boxed_str()))
-    }
-
-    pub fn as_str(self) -> &'static str {
-        self.0
-    }
-}
-
-impl Default for StructureType {
-    fn default() -> Self {
-        Self::SPAWN
-    }
-}
-
-impl fmt::Display for StructureType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-impl Serialize for StructureType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for StructureType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer).map(Self::new)
     }
 }
 
@@ -1426,85 +1027,11 @@ impl RoomTerrains {
     }
 }
 
-#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Drone {
-    pub owner: PlayerId,
-    pub body: Vec<BodyPart>,
-    pub carry: IndexMap<String, u32>,
-    pub carry_capacity: u32,
-    pub fatigue: u32,
-    pub hits: u32,
-    pub hits_max: u32,
-    pub spawning: bool,
-    pub age: u32,
-    pub last_action_tick: crate::command::Tick,
-    pub lifespan: u32,
-}
-
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpawningGrace {
-    pub remaining: u32,
-}
-
-impl Drone {
-    pub fn new(owner: PlayerId, body: Vec<BodyPart>, registry: &BodyPartRegistry) -> Self {
-        Self::new_with_lifespan(owner, body, registry, DEFAULT_DRONE_LIFESPAN)
-    }
-
-    pub fn new_with_lifespan(
-        owner: PlayerId,
-        body: Vec<BodyPart>,
-        registry: &BodyPartRegistry,
-        base_lifespan: u32,
-    ) -> Self {
-        let carry_capacity = body
-            .iter()
-            .filter(|part| matches!(part, BodyPart::Carry))
-            .count() as u32
-            * 50;
-        let lifespan_mod: i32 = body
-            .iter()
-            .filter_map(|part| registry.parts.get(part))
-            .map(|def| def.age_modifier)
-            .sum();
-        let lifespan = base_lifespan.saturating_add_signed(lifespan_mod);
-        Self {
-            owner,
-            body,
-            carry: IndexMap::new(),
-            carry_capacity,
-            fatigue: 0,
-            hits: 100,
-            hits_max: 100,
-            spawning: false,
-            age: 0,
-            last_action_tick: u64::MAX,
-            lifespan,
-        }
-    }
-}
-
 /// Per-drone environment variables accessible from WASM modules.
 /// Managed by drone_env_var_system according to DroneConfig.env_vars.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DroneEnv {
     pub vars: indexmap::IndexMap<String, String>,
-}
-
-#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Structure {
-    pub structure_type: StructureType,
-    pub owner: Option<PlayerId>,
-    pub hits: u32,
-    pub hits_max: u32,
-    pub energy: Option<u32>,
-    pub energy_capacity: Option<u32>,
-    pub cooldown: u32,
-}
-
-#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Resource {
-    pub amounts: IndexMap<String, u32>,
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1523,34 +1050,6 @@ pub struct Source {
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Terrain(pub TerrainType);
-
-#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Controller {
-    pub owner: Option<PlayerId>,
-    pub level: u8,
-    pub progress: u32,
-    pub progress_total: u32,
-    pub downgrade_timer: u32,
-    pub safe_mode: u32,
-    pub safe_mode_available: u32,
-    pub safe_mode_cooldown: u32,
-    pub repair_capacity: u32,
-    pub repair_range: u32,
-    pub repair_per_drone: u32,
-}
-
-/// Tracks the deployed code version for a drone. Updated by
-/// code_propagation_system when a new code version propagates to this drone.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-pub struct CodeVersion(pub u64);
-
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-pub struct DeathMark;
-
-#[derive(
-    Component, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
-pub struct StableEntityId(pub u64);
 
 #[derive(BevyResource, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StableEntityIdAllocator {
@@ -1603,11 +1102,6 @@ pub struct Action {
     pub payload: serde_json::Value,
 }
 
-#[derive(BevyResource, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActionRegistry {
-    pub handlers: BTreeMap<String, String>,
-}
-
 /// Shared resource tracking per-player age repair totals across Controller and Depot systems.
 /// Combined repair cannot exceed 50% of natural growth per tick per drone.
 /// Per-player latest deployed code version. Set by MCP deploy; read by
@@ -1624,6 +1118,7 @@ pub struct RepairTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swarm_engine_plugin_sdk::components::Drone;
 
     #[test]
     fn custom_action_registry_keeps_vanilla_actions_immutable() {

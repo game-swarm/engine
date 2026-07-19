@@ -4703,6 +4703,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "swarm-engine-api",
+ "swarm-engine-plugin-sdk",
  "swarm-mod-combat-core",
  "swarm-mod-depot-storage",
  "swarm-mod-empire-upkeep",
@@ -4720,11 +4722,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "swarm-engine-api"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "schemars",
+ "semver",
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
+name = "swarm-engine-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "blake3",
+ "indexmap",
+ "serde",
+ "serde_json",
+ "swarm-engine-api",
+]
+
+[[package]]
 name = "swarm-mod-combat-core"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "swarm-engine",
+ "serde_json",
+ "swarm-engine-api",
+ "swarm-engine-plugin-sdk",
 ]
 
 [[package]]
@@ -4732,7 +4760,8 @@ name = "swarm-mod-depot-storage"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "swarm-engine",
+ "swarm-engine-api",
+ "swarm-engine-plugin-sdk",
 ]
 
 [[package]]
@@ -4740,7 +4769,9 @@ name = "swarm-mod-empire-upkeep"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "swarm-engine",
+ "serde_json",
+ "swarm-engine-api",
+ "swarm-engine-plugin-sdk",
 ]
 
 [[package]]
@@ -4748,7 +4779,8 @@ name = "swarm-mod-fog-of-war"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "swarm-engine",
+ "swarm-engine-api",
+ "swarm-engine-plugin-sdk",
 ]
 
 [[package]]
@@ -4756,7 +4788,9 @@ name = "swarm-mod-pve-spawning"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "swarm-engine",
+ "serde_json",
+ "swarm-engine-api",
+ "swarm-engine-plugin-sdk",
 ]
 
 [[package]]
@@ -4764,7 +4798,9 @@ name = "swarm-mod-resource-decay"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "swarm-engine",
+ "serde_json",
+ "swarm-engine-api",
+ "swarm-engine-plugin-sdk",
 ]
 
 [[package]]
@@ -4772,7 +4808,9 @@ name = "swarm-mod-special-attacks"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "swarm-engine",
+ "serde_json",
+ "swarm-engine-api",
+ "swarm-engine-plugin-sdk",
 ]
 
 [[package]]
@@ -4781,7 +4819,9 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "serde",
- "swarm-engine",
+ "serde_json",
+ "swarm-engine-api",
+ "swarm-engine-plugin-sdk",
 ]
 
 [[package]]

@@ -1,6 +1,5 @@
 use bevy::prelude::*;
-
-use crate::components::{DeathMark, Drone};
+use swarm_engine_plugin_sdk::components::{DeathMark, Drone};
 
 /// Aging system (S23) — increments drone age each tick.
 /// On the NEXT tick, S07 death_marker catches `age >= lifespan` and inserts

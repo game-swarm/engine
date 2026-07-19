@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 
 use indexmap::{IndexMap, IndexSet};
+use swarm_engine_api::ids::PlayerId;
+use swarm_engine_plugin_sdk::components::{Drone, Position};
 
-use crate::components::{Drone, PlayerId, Position};
 use crate::resource_ledger::{ResourceLedger, ResourceOperation};
 use crate::resources::PlayerGlobalStorage;
 use crate::systems::starting_resources_system::PlayerFirstSpawnTick;

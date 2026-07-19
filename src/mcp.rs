@@ -9,6 +9,11 @@ use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use swarm_engine_api::ids::{BodyPart, PlayerId, RoomId};
+use swarm_engine_plugin_sdk::components::{
+    Controller, DeathMark, Drone, Owner, Position, Resource, Structure, StructureType,
+};
+use swarm_engine_plugin_sdk::resources::ActionRegistry;
 use ts_rs::TS;
 
 use crate::arena::{
@@ -41,7 +46,6 @@ use crate::visibility::{
 };
 use crate::world::{SwarmWorld, WorldConfig};
 
-#[path = "mcp_statistics.rs"]
 mod mcp_statistics;
 
 use self::mcp_statistics::{WorldStatsParams, swarm_get_world_stats, world_stats_tool_info};
@@ -1292,7 +1296,7 @@ pub struct FullEntityState {
     pub drone: Option<Drone>,
     pub structure: Option<Structure>,
     pub source: Option<Source>,
-    pub resource: Option<crate::components::Resource>,
+    pub resource: Option<Resource>,
     pub terrain: Option<TerrainType>,
     pub controller: Option<Controller>,
     pub marked_for_death: bool,
@@ -3987,7 +3991,7 @@ pub fn swarm_get_drone(
             entity_ref.get::<Drone>().cloned(),
             entity_ref.get::<Structure>().cloned(),
             entity_ref.get::<Source>().cloned(),
-            entity_ref.get::<crate::components::Resource>().cloned(),
+            entity_ref.get::<Resource>().cloned(),
             entity_ref.get::<Terrain>().copied(),
             entity_ref.get::<Controller>().cloned(),
             entity_ref.contains::<DeathMark>(),
@@ -5026,9 +5030,7 @@ fn visible_entities(
         }
     }
 
-    for (entity, position, resource) in world
-        .query::<(Entity, &Position, &crate::components::Resource)>()
-        .iter(world)
+    for (entity, position, resource) in world.query::<(Entity, &Position, &Resource)>().iter(world)
     {
         if visible_positions.contains(&(position.room, position.x, position.y)) {
             entities.push(VisibleEntity::Resource(VisibleResource {
@@ -5859,14 +5861,10 @@ pub fn swarm_get_room(
     let mut structure_count = 0u32;
     let mut controller_owner = None;
 
-    let room = crate::components::RoomId(params.room_id);
+    let room = RoomId(params.room_id);
 
     // Count drones in room that are visible
-    let mut drones = world_inner.query::<(
-        Entity,
-        &crate::components::Drone,
-        &crate::components::Position,
-    )>();
+    let mut drones = world_inner.query::<(Entity, &Drone, &Position)>();
     for (_e, _d, pos) in drones.iter(world_inner) {
         if pos.room == room && visible.contains(&(pos.room, pos.x, pos.y)) {
             drone_count += 1;
@@ -5874,11 +5872,7 @@ pub fn swarm_get_room(
     }
 
     // Count structures in room
-    let mut structures = world_inner.query::<(
-        Entity,
-        &crate::components::Structure,
-        &crate::components::Position,
-    )>();
+    let mut structures = world_inner.query::<(Entity, &Structure, &Position)>();
     for (_e, _s, pos) in structures.iter(world_inner) {
         if pos.room == room && visible.contains(&(pos.room, pos.x, pos.y)) {
             structure_count += 1;
@@ -5886,11 +5880,7 @@ pub fn swarm_get_room(
     }
 
     // Find controller
-    let mut controllers = world_inner.query::<(
-        Entity,
-        &crate::components::Controller,
-        &crate::components::Position,
-    )>();
+    let mut controllers = world_inner.query::<(Entity, &Controller, &Position)>();
     for (_e, c, pos) in controllers.iter(world_inner) {
         if pos.room == room && visible.contains(&(pos.room, pos.x, pos.y)) {
             controller_owner = c.owner;
@@ -6094,8 +6084,9 @@ fn set_replay_visibility_tick_override(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CommandAction, Structure, StructureType, create_world};
+    use crate::{CommandAction, create_world};
     use ed25519_dalek::Signer;
+    use swarm_engine_plugin_sdk::components::{Structure, StructureType};
 
     fn spawn_structure(world: &mut SwarmWorld, owner: Option<PlayerId>, x: i32, y: i32) {
         world.app.world_mut().spawn((
@@ -6105,7 +6096,7 @@ mod tests {
                 room: RoomId(0),
             },
             Structure {
-                structure_type: StructureType::Spawn,
+                structure_type: StructureType::SPAWN,
                 owner,
                 hits: 5_000,
                 hits_max: 5_000,
@@ -7327,7 +7318,7 @@ mod tests {
                 }),
                 VisibleEntity::Structure(VisibleStructure {
                     id: 43,
-                    structure_type: StructureType::Spawn,
+                    structure_type: StructureType::SPAWN,
                     owner: Some(1),
                     position: VisiblePosition {
                         x: 11,

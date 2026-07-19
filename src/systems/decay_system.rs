@@ -1,6 +1,5 @@
 use bevy::prelude::*;
-
-use crate::components::{Drone, Structure};
+use swarm_engine_plugin_sdk::components::{Drone, Structure};
 
 /// Decay system — handles fatigue/cooldown reduction and structure maintenance.
 /// Drone aging has been moved to aging_system (W13).

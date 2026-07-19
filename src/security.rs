@@ -1,6 +1,6 @@
-use crate::components::PlayerId;
 use crate::tick::{ReplayError, TickTrace, replay_tick};
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::PlayerId;
 
 #[derive(Debug, Clone)]
 pub struct SecurityAuditor {

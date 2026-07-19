@@ -1,7 +1,6 @@
 use bevy::prelude::*;
-
-use crate::components::{DeathMark, Drone};
-use crate::systems::PendingHeal;
+use swarm_engine_plugin_sdk::buffers::PendingHeal;
+use swarm_engine_plugin_sdk::components::{DeathMark, Drone};
 
 /// Phase 2b regeneration system — recovers drone body hits naturally each tick.
 ///
@@ -25,8 +24,10 @@ pub fn regeneration_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{DEFAULT_DRONE_LIFESPAN, Position, RoomId};
+    use crate::components::DEFAULT_DRONE_LIFESPAN;
     use indexmap::IndexMap;
+    use swarm_engine_api::ids::RoomId;
+    use swarm_engine_plugin_sdk::components::Position;
 
     fn spawn_drone(app: &mut App, owner: u32, hits: u32, hits_max: u32) -> Entity {
         app.world_mut()

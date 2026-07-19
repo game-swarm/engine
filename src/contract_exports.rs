@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use schemars::schema_for;
+use swarm_engine_api::ids::BodyPart;
 use ts_rs::{Config as TsConfig, TS};
 
 use crate::command::{CommandAction, CommandIntent, Direction};
-use crate::components::{BodyPart, TerrainType};
+use crate::components::TerrainType;
 use crate::mcp::{
     VisibleController, VisibleDrone, VisibleEntity, VisiblePendingGlobalTransfer, VisiblePosition,
     VisibleResource, VisibleSource, VisibleStructure, VisibleTile, VisibleWorldSnapshot,
@@ -87,9 +88,10 @@ fn write_if_changed(path: std::path::PathBuf, contents: &str) -> Result<(), Stri
 mod tests {
     use super::*;
     use crate::command::CommandAction;
-    use crate::components::{StructureType, TerrainType};
+    use crate::components::TerrainType;
     use crate::mcp::{VisiblePosition, VisibleTile};
     use serde_json::json;
+    use swarm_engine_plugin_sdk::components::StructureType;
 
     #[test]
     fn exports_runtime_contract_artifacts_without_wire_dtos_or_bigint() {
@@ -149,7 +151,7 @@ mod tests {
                 object_id: 7,
                 x: 3,
                 y: 4,
-                structure: StructureType::Extension,
+                structure: StructureType::EXTENSION,
             },
         };
         assert_eq!(

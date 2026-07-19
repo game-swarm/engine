@@ -1,9 +1,9 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
+use swarm_engine_api::ids::PlayerId;
+use swarm_engine_plugin_sdk::components::{Drone, Position, Structure, StructureType};
 
-use crate::components::{
-    Drone, PlayerId, Position, RepairTracker, Structure, StructureType, StructureTypeRegistry,
-};
+use crate::components::{RepairTracker, StructureTypeRegistry};
 
 /// Depot repair system — runs after controller_repair_system.
 /// Depots within range consume stored energy to reduce drone age.
@@ -100,8 +100,9 @@ pub fn depot_repair_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{DEFAULT_DRONE_LIFESPAN, RoomId};
+    use crate::components::DEFAULT_DRONE_LIFESPAN;
     use crate::world::create_world;
+    use swarm_engine_api::ids::RoomId;
 
     #[test]
     fn depot_repairs_drone_in_range() {

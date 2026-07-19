@@ -7,10 +7,15 @@ use std::hint::black_box;
 
 use bevy::prelude::*;
 use criterion::{Criterion, criterion_group, criterion_main};
-use swarm_engine::components::*;
+use swarm_engine::components::{Attributes, DroneEnv, EntityFlags, RoomTerrains};
 use swarm_engine::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use swarm_engine::systems::{PendingCombat, PendingSpawnQueue, Projectile, RoomDroneCounts};
+use swarm_engine::systems::{PlayerFirstSpawnTick, StartingResourcesGranted};
 use swarm_engine::tick::WorldSnapshot;
+use swarm_engine_api::ids::{BodyPart, PlayerId, RoomId};
+use swarm_engine_plugin_sdk::components::{
+    CodeVersion, DeathMark, Drone, Owner, Position, SpawningGrace,
+};
 
 /// Build a world with `n` entities, each carrying a random subset of all tracked components.
 fn build_populated_world(n: usize) -> World {
@@ -23,8 +28,8 @@ fn build_populated_world(n: usize) -> World {
     world.init_resource::<PlayerLocalStorage>();
     world.init_resource::<PlayerGlobalStorage>();
     world.init_resource::<PendingGlobalTransfers>();
-    world.init_resource::<swarm_engine::systems::StartingResourcesGranted>();
-    world.init_resource::<swarm_engine::systems::PlayerFirstSpawnTick>();
+    world.init_resource::<StartingResourcesGranted>();
+    world.init_resource::<PlayerFirstSpawnTick>();
 
     for i in 0..n {
         let mut entity = world.spawn_empty();

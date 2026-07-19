@@ -12,9 +12,9 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use swarm_engine_api::ids::{PlayerId, RoomId};
 
 use crate::command::ObjectId;
-use crate::components::{PlayerId, RoomId};
 
 const DEFAULT_COLLECT_TIMEOUT_MS: u64 = 2_500;
 const AUTH_FRESHNESS_MS: u64 = 60_000;

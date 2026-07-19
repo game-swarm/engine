@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
+use swarm_engine_plugin_sdk::components::{DeathMark, Drone, Position};
 
-use crate::components::{DeathMark, Drone, Position, Wreckage};
+use crate::components::Wreckage;
 use crate::resources::ResourceRegistry;
 
 pub const WRECKAGE_RATE_BP: u32 = 800;
@@ -45,7 +46,8 @@ pub fn wreckage_decay_system(mut commands: Commands, mut wreckage: Query<(Entity
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{BodyPart, DEFAULT_DRONE_LIFESPAN, RoomId};
+    use crate::components::DEFAULT_DRONE_LIFESPAN;
+    use swarm_engine_api::ids::{BodyPart, RoomId};
 
     #[test]
     fn destroyed_drone_spawns_low_value_wreckage() {

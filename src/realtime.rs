@@ -3,10 +3,10 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::PlayerId;
 use ts_rs::TS;
 
 use crate::command::{ObjectId, Tick};
-use crate::components::PlayerId;
 use crate::mcp::{VisibleEntity, visible_entities_for_player};
 use crate::world::SwarmWorld;
 
@@ -264,9 +264,9 @@ pub fn entity_id(entity: &VisibleEntity) -> ObjectId {
 #[cfg(test)]
 mod tests {
     use crate::command::{CommandAction, CommandIntent, CommandSource, Direction, object_id};
-    use crate::components::BodyPart;
     use crate::mcp::visible_entities_for_player;
     use crate::{RealtimeGateway, WebSocketMessage, create_world, replay_visible_entities};
+    use swarm_engine_api::ids::BodyPart;
 
     use super::{InMemoryNats, NatsRealtimePublisher, compute_realtime_delta, entity_id};
 

@@ -1,13 +1,14 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::collections::HashMap;
+use swarm_engine_plugin_sdk::buffers::SpecialAttackKind;
 
 use crate::command::CustomActionCooldowns;
 use crate::components::{
     Attributes, DebilitateState, DisruptState, DrainState, EntityFlags, FabricateState,
     FortifyState, HackState, LeechState, OverloadState,
 };
-use crate::systems::{PendingIntents, SpecialAttackKind};
+use crate::systems::PendingIntents;
 
 /// S22 status_advance_system — UNIQUE WRITER for all StatusState components.
 ///
@@ -242,8 +243,8 @@ fn add_attribute(attributes: &mut Vec<String>, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::systems::PendingDamage;
     use crate::systems::ResolvedIntent;
+    use swarm_engine_plugin_sdk::buffers::PendingDamage;
 
     #[test]
     fn status_advance_resets_hack_intent() {

@@ -2,12 +2,13 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-
-use crate::components::{
-    Attributes, BodyPart, BodyPartRegistry, DamageTypeRegistry, Drone, EntityFlags, Owner,
-    Position, ResistanceRegistry, SpawningGrace, Structure,
+use swarm_engine_api::ids::BodyPart;
+use swarm_engine_plugin_sdk::buffers::{PendingDamage, PendingHeal};
+use swarm_engine_plugin_sdk::components::{
+    BodyPartRegistry, Drone, Owner, Position, SpawningGrace, Structure,
 };
-use crate::systems::{PendingDamage, PendingHeal};
+
+use crate::components::{Attributes, DamageTypeRegistry, EntityFlags, ResistanceRegistry};
 
 pub const DEFAULT_ATTACK_DAMAGE: u32 = 30;
 pub const DEFAULT_RANGED_ATTACK_DAMAGE: u32 = 25;

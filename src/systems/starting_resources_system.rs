@@ -1,9 +1,10 @@
 use bevy::prelude::*;
 use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::PlayerId;
+use swarm_engine_plugin_sdk::components::{Controller, Drone, Owner};
 
 use crate::command::Tick;
-use crate::components::{Controller, Drone, Owner, PlayerId};
 use crate::resource_ledger::{ResourceLedger, ResourceOperation};
 use crate::resources::PlayerGlobalStorage;
 use crate::world::WorldConfig;

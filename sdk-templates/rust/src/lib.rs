@@ -95,7 +95,7 @@ mod tests {
                 object_id: 8,
                 x: 20,
                 y: 30,
-                structure: StructureType::Spawn,
+                structure: StructureType::SPAWN,
             },
             CommandAction::Spawn {
                 object_id: 9,

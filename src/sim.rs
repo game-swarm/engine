@@ -2,9 +2,11 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::{BodyPart, PlayerId};
+use swarm_engine_plugin_sdk::components::{Controller, Drone, Owner, Position, Structure};
 
 use crate::command::{Tick, object_id};
-use crate::components::{BodyPart, Controller, Drone, PlayerId, Source, Structure};
+use crate::components::Source;
 use crate::visibility::{VisibilitySet, is_visible_to, visible_positions};
 use crate::world::{SwarmWorld, create_world};
 
@@ -180,7 +182,7 @@ pub fn fog_of_war_filter(
     tick: Tick,
 ) -> bool {
     // Critical: own entities always visible
-    if let Some(owner) = world.get::<crate::components::Owner>(target_entity)
+    if let Some(owner) = world.get::<Owner>(target_entity)
         && owner.0 == player_id
     {
         return true;
@@ -194,7 +196,7 @@ pub fn fog_of_war_filter(
 }
 
 /// Compute hex distance between two positions
-fn hex_distance(a: &crate::components::Position, b: &crate::components::Position) -> f64 {
+fn hex_distance(a: &Position, b: &Position) -> f64 {
     let dx = (a.x - b.x).unsigned_abs() as f64;
     let dy = (a.y - b.y).unsigned_abs() as f64;
     let dz = ((a.x + a.y) - (b.x + b.y)).unsigned_abs() as f64;
@@ -204,9 +206,7 @@ fn hex_distance(a: &crate::components::Position, b: &crate::components::Position
 /// Classify an entity into a SnapshotEntity
 fn classify_entity(world: &World, entity: Entity) -> Option<SnapshotEntity> {
     let entity_id = object_id(entity).to_string();
-    let position = world
-        .get::<crate::components::Position>(entity)
-        .map(|p| (p.room.0, p.x, p.y));
+    let position = world.get::<Position>(entity).map(|p| (p.room.0, p.x, p.y));
 
     if let Some(drone) = world.get::<Drone>(entity) {
         Some(SnapshotEntity {
@@ -265,9 +265,7 @@ pub fn build_snapshot(
     tick: Tick,
     config: &SnapshotConfig,
 ) -> PerDroneSnapshot {
-    let drone_pos = world
-        .get::<crate::components::Position>(drone_entity)
-        .copied();
+    let drone_pos = world.get::<Position>(drone_entity).copied();
 
     // Collect all visible entities with distance bucket + entity_id sort key
     let mut sortable_entities: Vec<(SortKey, SnapshotEntity)> = Vec::new();
@@ -284,7 +282,7 @@ pub fn build_snapshot(
             let bucket = if entity == drone_entity {
                 DistanceBucket::Self_
             } else if let Some(ref pos) = drone_pos {
-                if let Some(ep) = world.get::<crate::components::Position>(entity) {
+                if let Some(ep) = world.get::<Position>(entity) {
                     DistanceBucket::from_distance(hex_distance(pos, ep))
                 } else {
                     DistanceBucket::OutOfSight
@@ -416,7 +414,7 @@ pub fn build_player_snapshot(
         .iter()
         .filter_map(|entity| {
             world
-                .get::<crate::components::Position>(*entity)
+                .get::<Position>(*entity)
                 .copied()
                 .map(|position| (*entity, position))
         })
@@ -436,7 +434,7 @@ pub fn build_player_snapshot(
         if let Some(snapshot_entity) = classify_entity(world, entity) {
             let bucket = if owned_drones.contains(&entity) {
                 DistanceBucket::Self_
-            } else if let Some(entity_position) = world.get::<crate::components::Position>(entity) {
+            } else if let Some(entity_position) = world.get::<Position>(entity) {
                 drone_positions
                     .iter()
                     .map(|(_, drone_position)| {
@@ -539,7 +537,7 @@ fn is_visible_with_precomputed_positions(
     visible: &VisibilitySet,
 ) -> bool {
     if world
-        .get::<crate::components::Owner>(entity)
+        .get::<Owner>(entity)
         .is_some_and(|owner| owner.0 == player_id)
         || world.get::<Controller>(entity).is_some()
     {
@@ -547,7 +545,7 @@ fn is_visible_with_precomputed_positions(
     }
 
     world
-        .get::<crate::components::Position>(entity)
+        .get::<Position>(entity)
         .is_some_and(|position| visible.contains(&(position.room, position.x, position.y)))
 }
 
@@ -631,7 +629,8 @@ pub fn summarize_local_simulation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{BodyPart, Drone};
+    use swarm_engine_api::ids::BodyPart;
+    use swarm_engine_plugin_sdk::components::Drone;
 
     #[test]
     fn local_simulation_runs_ticks_and_reports_summary() {

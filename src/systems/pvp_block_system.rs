@@ -21,9 +21,10 @@ pub fn pvp_block_system(config: Res<WorldConfig>, mut combat: ResMut<PendingComb
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{DEFAULT_DRONE_LIFESPAN, Drone};
+    use crate::components::DEFAULT_DRONE_LIFESPAN;
     use crate::world::create_world;
     use indexmap::IndexMap;
+    use swarm_engine_plugin_sdk::components::Drone;
 
     fn spawn_test_drone(world: &mut crate::SwarmWorld, owner: u32) -> Entity {
         world

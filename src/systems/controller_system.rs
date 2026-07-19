@@ -1,6 +1,6 @@
 use bevy::prelude::*;
+use swarm_engine_plugin_sdk::components::{Controller, StructureType};
 
-use crate::components::{Controller, StructureType};
 use crate::resource_ledger::{ResourceLedger, ResourceOperation};
 use crate::resources::PlayerGlobalStorage;
 use crate::world::WorldConfig;
@@ -18,68 +18,68 @@ pub struct RclLevel {
     pub max_drones: u32,
 }
 
-const RCL1: &[StructureType] = &[StructureType::Spawn];
-const RCL2: &[StructureType] = &[StructureType::Spawn, StructureType::Extension];
+const RCL1: &[StructureType] = &[StructureType::SPAWN];
+const RCL2: &[StructureType] = &[StructureType::SPAWN, StructureType::EXTENSION];
 const RCL3: &[StructureType] = &[
-    StructureType::Spawn,
-    StructureType::Extension,
-    StructureType::Tower,
-    StructureType::Storage,
+    StructureType::SPAWN,
+    StructureType::EXTENSION,
+    StructureType::TOWER,
+    StructureType::STORAGE,
 ];
 const RCL4: &[StructureType] = &[
-    StructureType::Spawn,
-    StructureType::Extension,
-    StructureType::Tower,
-    StructureType::Storage,
-    StructureType::Link,
+    StructureType::SPAWN,
+    StructureType::EXTENSION,
+    StructureType::TOWER,
+    StructureType::STORAGE,
+    StructureType::LINK,
 ];
 const RCL5: &[StructureType] = &[
-    StructureType::Spawn,
-    StructureType::Extension,
-    StructureType::Tower,
-    StructureType::Storage,
-    StructureType::Link,
-    StructureType::Terminal,
-    StructureType::Observer,
+    StructureType::SPAWN,
+    StructureType::EXTENSION,
+    StructureType::TOWER,
+    StructureType::STORAGE,
+    StructureType::LINK,
+    StructureType::TERMINAL,
+    StructureType::OBSERVER,
 ];
 const RCL6: &[StructureType] = &[
-    StructureType::Spawn,
-    StructureType::Extension,
-    StructureType::Tower,
-    StructureType::Storage,
-    StructureType::Link,
-    StructureType::Terminal,
-    StructureType::Observer,
-    StructureType::Extractor,
-    StructureType::Lab,
-    StructureType::Factory,
+    StructureType::SPAWN,
+    StructureType::EXTENSION,
+    StructureType::TOWER,
+    StructureType::STORAGE,
+    StructureType::LINK,
+    StructureType::TERMINAL,
+    StructureType::OBSERVER,
+    StructureType::EXTRACTOR,
+    StructureType::LAB,
+    StructureType::FACTORY,
 ];
 const RCL7: &[StructureType] = &[
-    StructureType::Spawn,
-    StructureType::Extension,
-    StructureType::Tower,
-    StructureType::Storage,
-    StructureType::Link,
-    StructureType::Terminal,
-    StructureType::Observer,
-    StructureType::Extractor,
-    StructureType::Lab,
-    StructureType::Factory,
-    StructureType::PowerSpawn,
+    StructureType::SPAWN,
+    StructureType::EXTENSION,
+    StructureType::TOWER,
+    StructureType::STORAGE,
+    StructureType::LINK,
+    StructureType::TERMINAL,
+    StructureType::OBSERVER,
+    StructureType::EXTRACTOR,
+    StructureType::LAB,
+    StructureType::FACTORY,
+    StructureType::POWER_SPAWN,
 ];
 const RCL8: &[StructureType] = &[
-    StructureType::Spawn,
-    StructureType::Extension,
-    StructureType::Tower,
-    StructureType::Storage,
-    StructureType::Link,
-    StructureType::Terminal,
-    StructureType::Observer,
-    StructureType::Extractor,
-    StructureType::Lab,
-    StructureType::Factory,
-    StructureType::PowerSpawn,
-    StructureType::Nuker,
+    StructureType::SPAWN,
+    StructureType::EXTENSION,
+    StructureType::TOWER,
+    StructureType::STORAGE,
+    StructureType::LINK,
+    StructureType::TERMINAL,
+    StructureType::OBSERVER,
+    StructureType::EXTRACTOR,
+    StructureType::LAB,
+    StructureType::FACTORY,
+    StructureType::POWER_SPAWN,
+    StructureType::NUKER,
 ];
 
 pub const RCL_TABLE: [RclLevel; 8] = [
@@ -220,9 +220,10 @@ pub fn controller_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{Controller, PlayerId};
     use crate::resources::CurrentTick;
     use bevy::prelude::{App, Update};
+    use swarm_engine_api::ids::PlayerId;
+    use swarm_engine_plugin_sdk::components::Controller;
 
     fn test_controller(level: u8, owner: Option<PlayerId>) -> Controller {
         Controller {

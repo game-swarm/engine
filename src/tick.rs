@@ -3,6 +3,11 @@ use std::{collections::HashMap, time::Instant};
 use bevy::prelude::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::PlayerId;
+use swarm_engine_plugin_sdk::components::{
+    CodeVersion, Controller, DeathMark, Drone, Owner, Position, SpawningGrace, Structure,
+};
+use swarm_engine_plugin_sdk::resources::ActionRegistry;
 
 use crate::command::{
     CommandAction, CommandIntent, CommandRejection, CommandSource, ObjectId, RawCommand,
@@ -183,6 +188,8 @@ impl DegradedModeState {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModsLock {
     pub modules: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub descriptor_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -215,13 +222,24 @@ impl ReplayEnvironment {
                     .collect()
             })
             .unwrap_or_default();
+        let descriptor_hash = world
+            .get_resource::<swarm_engine_plugin_sdk::resources::InstalledPluginDescriptors>()
+            .map(|descriptors| {
+                descriptors
+                    .deterministic_hash()
+                    .expect("installed plugin descriptors must serialize")
+            })
+            .unwrap_or_default();
         let config = world
             .get_resource::<WorldConfig>()
             .cloned()
             .unwrap_or_default();
 
         Self {
-            mods_lock: ModsLock { modules },
+            mods_lock: ModsLock {
+                modules,
+                descriptor_hash,
+            },
             world_config: WorldConfigSnapshot { config },
             collect_snapshot_hash: [0; 32],
             rng_context: RngContext::default(),
@@ -2491,7 +2509,7 @@ pub struct EntitySnapshot {
     owner: Option<Owner>,
     drone: Option<Drone>,
     structure: Option<Structure>,
-    resource: Option<crate::components::Resource>,
+    resource: Option<swarm_engine_plugin_sdk::components::Resource>,
     source: Option<Source>,
     terrain: Option<Terrain>,
     controller: Option<Controller>,
@@ -2598,7 +2616,7 @@ impl WorldSnapshot {
                     structure: world.entity(entity).get::<Structure>().cloned(),
                     resource: world
                         .entity(entity)
-                        .get::<crate::components::Resource>()
+                        .get::<swarm_engine_plugin_sdk::components::Resource>()
                         .cloned(),
                     source: world.entity(entity).get::<Source>().cloned(),
                     terrain: world.entity(entity).get::<Terrain>().copied(),
@@ -2772,7 +2790,7 @@ impl WorldSnapshot {
                     || world.entity(entity).get::<Structure>().is_some()
                     || world
                         .entity(entity)
-                        .get::<crate::components::Resource>()
+                        .get::<swarm_engine_plugin_sdk::components::Resource>()
                         .is_some()
                     || world.entity(entity).get::<Source>().is_some()
                     || world.entity(entity).get::<Terrain>().is_some()
@@ -2885,9 +2903,11 @@ fn restore_component<T: Component>(entity: &mut EntityWorldMut<'_>, component: O
 mod tests {
     use crate::command::{CommandAction, CommandAuth, Direction, RejectionReason, object_id};
     use crate::systems::PendingSpawnQueue;
-    use crate::{BodyPart, CommandIntent, Structure, StructureType, create_world, energy_cost};
+    use crate::{CommandIntent, create_world, energy_cost};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
+    use swarm_engine_api::ids::{BodyPart, RoomId};
+    use swarm_engine_plugin_sdk::components::{Structure, StructureType};
 
     use super::*;
 
@@ -3237,6 +3257,73 @@ mod tests {
     }
 
     #[test]
+    fn replay_manifest_hash_binds_deterministic_installed_descriptor_hash() {
+        use std::collections::BTreeMap;
+
+        use swarm_engine_api::descriptor::PluginDescriptor;
+        use swarm_engine_plugin_sdk::resources::InstalledPluginDescriptors;
+
+        fn descriptor(id: &str, version: &str) -> PluginDescriptor {
+            PluginDescriptor {
+                id: id.to_string(),
+                version: version.to_string(),
+                api_version: swarm_engine_api::version::API_VERSION.to_string(),
+                dependencies: Vec::new(),
+                config: Vec::new(),
+                systems: Vec::new(),
+                actions: Vec::new(),
+                descriptor_schema_version: swarm_engine_api::version::DESCRIPTOR_SCHEMA_VERSION
+                    .to_string(),
+            }
+        }
+
+        let alpha = descriptor("alpha", "0.1.0");
+        let beta = descriptor("beta", "0.1.0");
+        let mut first_world = create_world();
+        first_world.app.insert_resource(InstalledPluginDescriptors {
+            descriptors: BTreeMap::from([
+                (beta.id.clone(), beta.clone()),
+                (alpha.id.clone(), alpha.clone()),
+            ]),
+        });
+        let mut second_world = create_world();
+        second_world
+            .app
+            .insert_resource(InstalledPluginDescriptors {
+                descriptors: BTreeMap::from([
+                    (alpha.id.clone(), alpha),
+                    (beta.id.clone(), beta.clone()),
+                ]),
+            });
+
+        let first = ReplayEnvironment::capture(first_world.app.world());
+        let second = ReplayEnvironment::capture(second_world.app.world());
+        assert_eq!(
+            first.mods_lock.descriptor_hash,
+            second.mods_lock.descriptor_hash
+        );
+
+        let mut changed_world = create_world();
+        let changed_beta = descriptor("beta", "0.2.0");
+        changed_world
+            .app
+            .insert_resource(InstalledPluginDescriptors {
+                descriptors: BTreeMap::from([(changed_beta.id.clone(), changed_beta)]),
+            });
+        let changed = ReplayEnvironment::capture(changed_world.app.world());
+        assert_ne!(
+            first.mods_lock.descriptor_hash,
+            changed.mods_lock.descriptor_hash
+        );
+
+        let trace = sample_trace();
+        assert_ne!(
+            replay_manifest_hash(&trace, &first),
+            replay_manifest_hash(&trace, &changed)
+        );
+    }
+
+    #[test]
     fn tick_commit_record_serializes_per_player_fuel_and_resource_ledger_snapshot() {
         let mut trace = sample_trace();
         trace.commands = vec![raw_harvest(7, 1, 42, 100, 200)];
@@ -3518,7 +3605,7 @@ mod tests {
                     room: RoomId(0),
                 },
                 Structure {
-                    structure_type: StructureType::Spawn,
+                    structure_type: StructureType::SPAWN,
                     owner: Some(owner),
                     hits: 5_000,
                     hits_max: 5_000,
@@ -5066,7 +5153,7 @@ mod tests {
                 object_id,
                 x,
                 y,
-                structure: StructureType::Extension,
+                structure: StructureType::EXTENSION,
             },
         }
     }

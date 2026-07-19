@@ -22,6 +22,7 @@ pub mod sandbox_transport;
 pub mod scheduler;
 pub mod sdk_gen;
 pub mod security;
+pub mod shard;
 pub mod sim;
 pub mod swarm_cli;
 pub mod swarm_deploy;
@@ -63,6 +64,11 @@ pub use world::{SwarmWorld, create_world, create_world_with_mode};
 #[cfg(test)]
 mod tests {
     use indexmap::IndexMap;
+    use swarm_engine_api::ids::{BodyPart, PlayerId, RoomId};
+    use swarm_engine_plugin_sdk::components::{
+        BodyPartRegistry, Controller, Drone, Position, Resource, SpawningGrace, Structure,
+        StructureType,
+    };
 
     use crate::{
         command::*, components::*, create_world, create_world_with_mode, onboarding::*,
@@ -91,7 +97,7 @@ mod tests {
 
     fn default_structure(cooldown: u32) -> Structure {
         Structure {
-            structure_type: StructureType::Spawn,
+            structure_type: StructureType::SPAWN,
             owner: Some(1),
             hits: 5_000,
             hits_max: 5_000,
@@ -120,7 +126,7 @@ mod tests {
                     room: RoomId(0),
                 },
                 Structure {
-                    structure_type: StructureType::Spawn,
+                    structure_type: StructureType::SPAWN,
                     owner,
                     hits: 5_000,
                     hits_max: 5_000,
@@ -1103,7 +1109,7 @@ mod tests {
                 object_id: object_id(builder),
                 x: 23,
                 y: 24,
-                structure: StructureType::Extension,
+                structure: StructureType::EXTENSION,
             },
         )
         .unwrap();
@@ -2416,7 +2422,7 @@ mod tests {
                     object_id: object_id(mover),
                     x: 13,
                     y: 10,
-                    structure: StructureType::Extension,
+                    structure: StructureType::EXTENSION,
                 }
             ),
             Err(RejectionReason::MissingBodyPart {
@@ -2434,7 +2440,7 @@ mod tests {
                     object_id: object_id(builder),
                     x: 10,
                     y: 11,
-                    structure: StructureType::Extension,
+                    structure: StructureType::EXTENSION,
                 }
             ),
             Err(RejectionReason::InvalidTerrain)
@@ -2449,7 +2455,7 @@ mod tests {
                     object_id: object_id(builder),
                     x: 25,
                     y: 25,
-                    structure: StructureType::Extension,
+                    structure: StructureType::EXTENSION,
                 }
             ),
             Err(RejectionReason::TileOccupied)
@@ -2464,7 +2470,7 @@ mod tests {
                     object_id: object_id(builder),
                     x: 11,
                     y: 10,
-                    structure: StructureType::Extension,
+                    structure: StructureType::EXTENSION,
                 }
             ),
             Ok(())
@@ -2483,14 +2489,14 @@ mod tests {
                         y: 10,
                         room: RoomId(0),
                     }
-                    && structure.structure_type == StructureType::Extension
+                    && structure.structure_type == StructureType::EXTENSION
             })
             .map(|(_, structure)| structure.clone());
 
         assert_eq!(
             built,
             Some(Structure {
-                structure_type: StructureType::Extension,
+                structure_type: StructureType::EXTENSION,
                 owner: Some(1),
                 hits: 1,
                 hits_max: 5_000,

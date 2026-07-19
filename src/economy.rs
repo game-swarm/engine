@@ -2,9 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::Entity;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::{PlayerId, RoomId};
+use swarm_engine_plugin_sdk::components::{Controller, Drone, Position};
 
 use crate::command::{ObjectId, Tick, object_id};
-use crate::components::{Controller, Drone, PlayerId, Position, RoomId, Source};
+use crate::components::Source;
 use crate::mcp::{McpError, StoredModule};
 use crate::ranking::RankingState;
 use crate::resource_ledger::{compute_continuous_storage_tax, marginal_storage_tax_rate_bp};
@@ -616,8 +618,8 @@ fn resource_total(resources: &ResourceCost) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::BodyPart;
     use crate::create_world;
+    use swarm_engine_api::ids::BodyPart;
 
     #[test]
     fn economy_snapshot_counts_owned_room_income_and_maintenance() {

@@ -1,6 +1,7 @@
 use bevy::prelude::*;
+use swarm_engine_plugin_sdk::components::{Drone, Owner, Position};
 
-use crate::components::{Drone, HackState, Owner, Position};
+use crate::components::HackState;
 
 /// S16 hack_system — per-tick effects of Hack status on drones.
 ///
@@ -77,7 +78,7 @@ mod tests {
                 Position {
                     x: 0,
                     y: 0,
-                    room: crate::components::RoomId(0),
+                    room: swarm_engine_api::ids::RoomId(0),
                 },
             ))
             .id();
@@ -110,7 +111,7 @@ mod tests {
                 Position {
                     x: 0,
                     y: 0,
-                    room: crate::components::RoomId(0),
+                    room: swarm_engine_api::ids::RoomId(0),
                 },
             ))
             .id();

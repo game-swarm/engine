@@ -1,6 +1,7 @@
 use bevy::prelude::*;
+use swarm_engine_plugin_sdk::components::{Controller, Drone, Position};
 
-use crate::components::{Controller, Drone, Position, RepairTracker};
+use crate::components::RepairTracker;
 use crate::resource_ledger::{ResourceLedger, ResourceOperation};
 use crate::resources::{PlayerGlobalStorage, ResourceRegistry};
 use crate::tick::{TickTraceEvent, TickTraceEventLog};
@@ -114,9 +115,10 @@ pub fn controller_repair_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{BodyPart, DEFAULT_DRONE_LIFESPAN, RoomId};
+    use crate::components::DEFAULT_DRONE_LIFESPAN;
     use crate::world::create_world;
     use indexmap::IndexMap;
+    use swarm_engine_api::ids::{BodyPart, RoomId};
 
     #[test]
     fn controller_repairs_body_hits_in_range() {

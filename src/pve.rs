@@ -1,9 +1,9 @@
 use bevy::prelude::Resource as BevyResource;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::{PlayerId, RoomId};
 
 use crate::command::Tick;
-use crate::components::{PlayerId, RoomId};
 
 const BASIS_POINTS_DENOMINATOR: u64 = 10_000;
 const DEFAULT_GLOBAL_REGEN_LIMIT_BP: u32 = 3_000;

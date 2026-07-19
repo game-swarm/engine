@@ -1,6 +1,6 @@
 use bevy::prelude::*;
+use swarm_engine_plugin_sdk::components::{Drone, Owner, Position};
 
-use crate::components::{Drone, Owner, Position};
 use crate::resource_ledger::{ResourceLedger, ResourceOperation, compute_continuous_storage_tax};
 use crate::resources::{
     GlobalStorageConfig, GlobalTransferDirection, PendingAlliedTransfers, PendingGlobalTransfers,
@@ -87,7 +87,7 @@ pub fn global_storage_system(
 }
 
 fn transfer_intercepted(
-    player_id: crate::components::PlayerId,
+    player_id: swarm_engine_api::ids::PlayerId,
     start: Position,
     end: Position,
     range: u32,

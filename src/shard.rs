@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use bevy::prelude::Resource as BevyResource;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::PlayerId;
 
 use crate::command::{CommandIntent, CommandSource, RawCommand, Tick, source_gate};
-use crate::components::PlayerId;
 use crate::realtime::{NatsPublisher, RealtimeError};
 use crate::world::{SwarmWorld, create_world_with_shard_config};
 

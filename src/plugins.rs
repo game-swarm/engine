@@ -6,9 +6,11 @@ use std::{
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use swarm_engine_api::ids::{BodyPart, RoomId};
+use swarm_engine_plugin_sdk::buffers::SpecialAttackKind;
+use swarm_engine_plugin_sdk::components::Position;
 
-use crate::components::{BodyPart, Position, RoomId, WorldMode};
-use crate::systems::SpecialAttackKind;
+use crate::components::WorldMode;
 use crate::world::{PlayerViewMode, WorldConfig};
 
 #[derive(Resource, Debug, Clone, Default)]

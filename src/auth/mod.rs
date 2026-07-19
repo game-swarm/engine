@@ -2,8 +2,8 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::components::PlayerId;
 use crate::mcp::{McpError, decode_ed25519_public_key, decode_ed25519_signature, encode_base64};
+use swarm_engine_api::ids::PlayerId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

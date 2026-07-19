@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::command::Tick;
-use crate::components::PlayerId;
 use crate::mcp::VisibleWorldSnapshot;
+use swarm_engine_api::ids::PlayerId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SnapshotKey {

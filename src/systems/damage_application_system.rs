@@ -1,9 +1,8 @@
 use bevy::prelude::*;
 
 use indexmap::IndexMap;
-
-use crate::components::{DeathMark, Drone, SpawningGrace, Structure};
-use crate::systems::special_attack_reducer::{PendingDamage, PendingHeal};
+use swarm_engine_plugin_sdk::buffers::{PendingDamage, PendingHeal};
+use swarm_engine_plugin_sdk::components::{DeathMark, Drone, SpawningGrace, Structure};
 
 /// S15: Damage Application System
 ///
@@ -84,8 +83,11 @@ pub fn damage_application_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{DEFAULT_DRONE_LIFESPAN, Position, RoomId};
+    use crate::components::DEFAULT_DRONE_LIFESPAN;
     use indexmap::IndexMap;
+    use swarm_engine_api::ids::RoomId;
+    use swarm_engine_plugin_sdk::buffers::PendingDamageEntry;
+    use swarm_engine_plugin_sdk::components::Position;
 
     fn spawn_test_drone(app: &mut App, owner: u32, hits: u32, hits_max: u32) -> Entity {
         app.world_mut()
@@ -118,7 +120,11 @@ mod tests {
         app.add_systems(Update, damage_application_system);
         let drone = spawn_test_drone(&mut app, 1, 100, 100);
         app.insert_resource(PendingDamage {
-            entries: vec![(drone, 30, "Kinetic".into()).into()],
+            entries: vec![PendingDamageEntry {
+                target: drone,
+                amount: 30,
+                damage_type: "Kinetic".into(),
+            }],
         });
         app.insert_resource(PendingHeal::default());
 
@@ -134,7 +140,11 @@ mod tests {
         app.add_systems(Update, damage_application_system);
         let drone = spawn_test_drone(&mut app, 1, 10, 100);
         app.insert_resource(PendingDamage {
-            entries: vec![(drone, 10, "Kinetic".into()).into()],
+            entries: vec![PendingDamageEntry {
+                target: drone,
+                amount: 10,
+                damage_type: "Kinetic".into(),
+            }],
         });
         app.insert_resource(PendingHeal::default());
 
@@ -157,7 +167,11 @@ mod tests {
             .entity_mut(drone)
             .insert(SpawningGrace { remaining: 1 });
         app.insert_resource(PendingDamage {
-            entries: vec![(drone, 30, "Kinetic".into()).into()],
+            entries: vec![PendingDamageEntry {
+                target: drone,
+                amount: 30,
+                damage_type: "Kinetic".into(),
+            }],
         });
         app.insert_resource(PendingHeal::default());
 

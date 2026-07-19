@@ -2,9 +2,10 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use swarm_engine_api::ids::RoomId;
+use swarm_engine_plugin_sdk::components::{Controller, Drone, Position};
 
 use super::{AuthMode, McpContext, ToolInfo};
-use crate::components::{Controller, Drone, Position, RoomId};
 use crate::world::SwarmWorld;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

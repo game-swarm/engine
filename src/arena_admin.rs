@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bevy::prelude::Resource as BevyResource;
 use serde::{Deserialize, Serialize};
 
-use crate::components::PlayerId;
+use swarm_engine_api::ids::PlayerId;
 
 /// Arena room mode per spec §9.1.5
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

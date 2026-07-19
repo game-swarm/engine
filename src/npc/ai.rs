@@ -1,9 +1,14 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::{BodyPart, DamageType, RoomId};
+use swarm_engine_plugin_sdk::buffers::{
+    PendingSpecialAttack, SpecialAttackKind, StatusActionIntent,
+};
+use swarm_engine_plugin_sdk::components::{BodyPartRegistry, Drone, Position};
 
-use crate::components::{BodyPart, BodyPartRegistry, DamageType, Drone, Position, RoomTerrains};
+use crate::components::RoomTerrains;
 use crate::resources::CurrentTick;
-use crate::systems::{CombatRules, PendingCombat, PendingSpecialAttack, StatusActionIntent};
+use crate::systems::{CombatRules, PendingCombat};
 
 pub const DEFAULT_NPC_AGGRO_RANGE: u32 = 5;
 pub const DEFAULT_NPC_ATTACK_RANGE: u32 = 1;
@@ -95,7 +100,7 @@ impl NpcBehavior {
         let home = points.first().copied().unwrap_or(Position {
             x: 0,
             y: 0,
-            room: crate::components::RoomId(0),
+            room: RoomId(0),
         });
         Self {
             mode: NpcMode::Patrol,
@@ -246,12 +251,12 @@ pub fn npc_combat_system(
         {
             special_attacks.intents.push(StatusActionIntent {
                 kind: match special {
-                    NpcSpecialAttack::Hack => crate::systems::SpecialAttackKind::Hack,
-                    NpcSpecialAttack::Drain => crate::systems::SpecialAttackKind::Drain,
-                    NpcSpecialAttack::Overload => crate::systems::SpecialAttackKind::Overload,
-                    NpcSpecialAttack::Debilitate => crate::systems::SpecialAttackKind::Debilitate,
-                    NpcSpecialAttack::Disrupt => crate::systems::SpecialAttackKind::Disrupt,
-                    NpcSpecialAttack::Fortify => crate::systems::SpecialAttackKind::Fortify,
+                    NpcSpecialAttack::Hack => SpecialAttackKind::Hack,
+                    NpcSpecialAttack::Drain => SpecialAttackKind::Drain,
+                    NpcSpecialAttack::Overload => SpecialAttackKind::Overload,
+                    NpcSpecialAttack::Debilitate => SpecialAttackKind::Debilitate,
+                    NpcSpecialAttack::Disrupt => SpecialAttackKind::Disrupt,
+                    NpcSpecialAttack::Fortify => SpecialAttackKind::Fortify,
                 },
                 source: npc_entity,
                 target,
@@ -387,9 +392,10 @@ fn hex_distance(a: Position, b: Position) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{BodyPart, RoomId};
     use crate::create_world;
     use crate::systems::PendingIntents;
+    use swarm_engine_api::ids::{BodyPart, RoomId};
+    use swarm_engine_plugin_sdk::components::SpawningGrace;
 
     fn position(x: i32, y: i32) -> Position {
         Position {
@@ -435,7 +441,7 @@ mod tests {
             .app
             .world_mut()
             .entity_mut(drone)
-            .remove::<crate::components::SpawningGrace>();
+            .remove::<SpawningGrace>();
 
         world.run_tick();
 
@@ -452,7 +458,7 @@ mod tests {
             .app
             .world_mut()
             .entity_mut(drone)
-            .remove::<crate::components::SpawningGrace>();
+            .remove::<SpawningGrace>();
         world.app.world_mut().spawn((
             position(10, 10),
             Npc::new(NpcType::Guardian),
@@ -473,7 +479,7 @@ mod tests {
             .app
             .world_mut()
             .entity_mut(drone)
-            .remove::<crate::components::SpawningGrace>();
+            .remove::<SpawningGrace>();
         world.app.world_mut().spawn((
             position(10, 10),
             Npc::new(NpcType::Guardian).with_special(NpcSpecialAttack::Hack, 5),
@@ -501,7 +507,7 @@ mod tests {
             .app
             .world_mut()
             .entity_mut(drone)
-            .remove::<crate::components::SpawningGrace>();
+            .remove::<SpawningGrace>();
         let npc_entity = world
             .app
             .world_mut()

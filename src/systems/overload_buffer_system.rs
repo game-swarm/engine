@@ -1,7 +1,7 @@
 use bevy::prelude::*;
+use swarm_engine_plugin_sdk::buffers::{PendingSpecialAttack, SpecialAttackKind};
 
 use crate::components::OverloadBuffer;
-use crate::systems::{PendingSpecialAttack, SpecialAttackKind};
 
 pub fn overload_buffer_system(
     mut commands: Commands,

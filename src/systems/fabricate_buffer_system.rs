@@ -1,7 +1,7 @@
 use bevy::prelude::*;
+use swarm_engine_plugin_sdk::buffers::{PendingSpecialAttack, SpecialAttackKind};
 
 use crate::components::FabricateBuffer;
-use crate::systems::{PendingSpecialAttack, SpecialAttackKind};
 
 pub fn fabricate_buffer_system(
     mut commands: Commands,

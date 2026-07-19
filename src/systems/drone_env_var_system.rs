@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
+use swarm_engine_plugin_sdk::components::Drone;
 
 use crate::command::{ObjectId, entity, object_id};
-use crate::components::{Drone, DroneEnv};
+use crate::components::DroneEnv;
 use crate::world::WorldConfig;
 
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]

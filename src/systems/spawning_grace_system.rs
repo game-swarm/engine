@@ -1,6 +1,5 @@
 use bevy::prelude::*;
-
-use crate::components::SpawningGrace;
+use swarm_engine_plugin_sdk::components::SpawningGrace;
 
 /// Asserts all drones with SpawningGrace still have remaining > 0.
 /// The SpawningGrace component is written by spawn_system during entity creation
@@ -29,8 +28,9 @@ pub fn spawning_grace_expiry_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{BodyPartRegistry, Drone, Position, RoomId};
     use crate::world::create_world;
+    use swarm_engine_api::ids::RoomId;
+    use swarm_engine_plugin_sdk::components::{BodyPartRegistry, Drone, Position};
 
     #[test]
     fn spawning_grace_present_on_new_drone() {

@@ -1,9 +1,10 @@
 use bevy::prelude::Resource as BevyResource;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::{BodyPart, PlayerId};
+use swarm_engine_plugin_sdk::components::{Position, StructureType};
 
 use crate::command::Tick;
-use crate::components::{BodyPart, PlayerId, StructureType};
 
 pub type ResourceName = String;
 pub type ResourceAmount = u32;
@@ -242,8 +243,8 @@ pub struct PendingGlobalTransfer {
     pub amount: ResourceAmount,
     pub deliver_amount: ResourceAmount,
     pub remaining_ticks: Tick,
-    pub start: crate::components::Position,
-    pub end: crate::components::Position,
+    pub start: Position,
+    pub end: Position,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

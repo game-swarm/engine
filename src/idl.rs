@@ -5,12 +5,11 @@
 //! SDK code for both Rust and TypeScript is generated from this IDL.
 
 use crate::command::{CANONICAL_REJECTION_REASONS, command_schema_branches};
-use crate::components::{
-    BodyPartRegistry, CustomActionRegistry, SpecialEffectRegistry, StructureTypeRegistry,
-};
+use crate::components::{CustomActionRegistry, SpecialEffectRegistry, StructureTypeRegistry};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use swarm_engine_plugin_sdk::components::BodyPartRegistry;
 
 // ── IDL data types ──────────────────────────────────────────────────
 

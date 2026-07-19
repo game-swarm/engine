@@ -14,9 +14,9 @@ use std::{
 use bevy::prelude::Resource;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use swarm_engine_api::ids::PlayerId;
 
 use crate::command::{ObjectId, Tick};
-use crate::components::PlayerId;
 use crate::hot_cache::{CachedSnapshot, RedbSnapshotStore, SnapshotKey};
 use crate::mcp::VisibleWorldSnapshot;
 use crate::tick::{
@@ -2641,13 +2641,13 @@ fn committed_ticks(db: &Database) -> Result<Vec<Tick>, RedbError> {
 mod tests {
     use super::*;
     use crate::command::{CommandAction, CommandAuth, CommandSource, RawCommand};
-    use crate::components::PlayerId;
     use crate::realtime::{RealtimeDelta, RealtimeEnvelope};
     use crate::tick::{
         TickCommitRecord, TickFuelLedger, TickMetrics, TickTrace, WorldSnapshot, commands_hash,
         tick_trace_writes,
     };
     use crate::world::create_world;
+    use swarm_engine_api::ids::PlayerId;
 
     fn visible_snapshot(tick: Tick, player_id: PlayerId, room_id: u32) -> VisibleWorldSnapshot {
         VisibleWorldSnapshot {

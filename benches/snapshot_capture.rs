@@ -2,9 +2,9 @@
 // Measure: 50 entity world snapshot < 20ms capture, < 30ms restore
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use swarm_engine::components::BodyPart;
 use swarm_engine::create_world;
 use swarm_engine::tick::WorldSnapshot;
+use swarm_engine_api::ids::BodyPart;
 
 fn bench_snapshot_capture(c: &mut Criterion) {
     let mut group = c.benchmark_group("snapshot");

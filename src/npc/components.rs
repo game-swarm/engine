@@ -1,9 +1,9 @@
 use bevy::prelude::Component;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use swarm_engine_plugin_sdk::components::Position;
 
 use crate::command::Tick;
-use crate::components::Position;
 use crate::resources::ResourceCost;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -2,9 +2,10 @@
 // Measure: 100-tick loop with 10 drones + 2 NPCs
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use swarm_engine::components::{BodyPart, Position, RoomId};
 use swarm_engine::create_world;
 use swarm_engine::npc::ai::{Npc, NpcBehavior, NpcSpecialAttack, NpcType};
+use swarm_engine_api::ids::{BodyPart, RoomId};
+use swarm_engine_plugin_sdk::components::Position;
 
 fn bench_tick_loop(c: &mut Criterion) {
     let mut group = c.benchmark_group("tick_loop");

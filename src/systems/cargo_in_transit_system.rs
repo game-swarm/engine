@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
-
-use crate::components::{Drone, PlayerId, Position, RoomId};
+use swarm_engine_api::ids::{PlayerId, RoomId};
+use swarm_engine_plugin_sdk::components::{Drone, Position};
 
 /// Cargo in transit between global and local storage.
 /// Represents resources being transported, vulnerable to enemy interception.

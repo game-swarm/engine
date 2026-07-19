@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
 use bevy::prelude::*;
+use swarm_engine_api::ids::{PlayerId, RoomId};
+use swarm_engine_plugin_sdk::components::{Controller, Drone, Owner, Position, Structure};
 
 use crate::command::{ObjectId, Tick, object_id};
 use crate::components::*;
@@ -273,6 +275,8 @@ mod tests {
     use crate::components::WorldMode;
     use crate::create_world;
     use crate::world::{WorldConfig, create_world_with_mode_and_config};
+    use swarm_engine_api::ids::BodyPart;
+    use swarm_engine_plugin_sdk::components::BodyPartRegistry;
 
     #[test]
     fn own_entities_always_visible() {

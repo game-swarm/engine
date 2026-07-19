@@ -6,11 +6,11 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use swarm_engine::command::{
     CommandAction, CommandIntent, Direction, object_id, parse_tick_output,
 };
-use swarm_engine::components::BodyPart;
 use swarm_engine::{
     BroadcastError, CommitError, MultiPlayerTickScheduler, PlayerExecutor, TickBroadcast,
     TickBroadcaster, TickCommitter, TickReport, TickSnapshot, TickTrace, create_world,
 };
+use swarm_engine_api::ids::BodyPart;
 
 const COMMAND_BATCH_SIZE: usize = 100;
 

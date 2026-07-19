@@ -1,6 +1,7 @@
 use bevy::prelude::*;
+use swarm_engine_plugin_sdk::components::{DeathMark, Drone, Position};
 
-use crate::components::{DeathMark, Drone, Position, Source};
+use crate::components::Source;
 
 type DeathCleanupItem<'a> = (Entity, Option<&'a Drone>, Option<&'a Position>);
 type DeathCleanupFilter = With<DeathMark>;
@@ -71,7 +72,7 @@ mod tests {
                 Position {
                     x,
                     y,
-                    room: crate::components::RoomId(0),
+                    room: swarm_engine_api::ids::RoomId(0),
                 },
                 DeathMark,
             ))
@@ -117,7 +118,7 @@ mod tests {
             Position {
                 x: 10,
                 y: 10,
-                room: crate::components::RoomId(0),
+                room: swarm_engine_api::ids::RoomId(0),
             },
             Source {
                 produces: IndexMap::new(),
@@ -145,7 +146,7 @@ mod tests {
             Position {
                 x: 10,
                 y: 10,
-                room: crate::components::RoomId(0),
+                room: swarm_engine_api::ids::RoomId(0),
             },
             DeathMark,
         ));

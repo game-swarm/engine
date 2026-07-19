@@ -1,9 +1,10 @@
 use bevy::prelude::Resource as BevyResource;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::PlayerId;
 
 use crate::command::Tick;
-use crate::components::{PlayerId, WorldMode};
+use crate::components::WorldMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum LeagueTier {

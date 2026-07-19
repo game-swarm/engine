@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
-
-use crate::components::{Controller, PlayerId, Position, RoomId};
+use swarm_engine_api::ids::{PlayerId, RoomId};
+use swarm_engine_plugin_sdk::components::{Controller, Position};
 
 pub const DEFAULT_RESERVATION_TIMEOUT: u32 = 1000;
 pub const DEFAULT_ABANDONED_TIMEOUT: u32 = 5000;

@@ -4,6 +4,13 @@ use std::{
     collections::BTreeSet,
     sync::atomic::{AtomicU64, Ordering},
 };
+use swarm_engine_api::ids::{BodyPart, DamageType, PlayerId, RoomId};
+use swarm_engine_plugin_sdk::buffers::{PendingDamage, PendingHeal, PendingSpecialAttack};
+use swarm_engine_plugin_sdk::components::{
+    BodyPartRegistry, CodeVersion, Controller, Drone, Owner, Position, Resource, SpawningGrace,
+    Structure,
+};
+use swarm_engine_plugin_sdk::resources::ActionRegistry;
 
 use crate::arena_admin::ArenaRoomAdmin;
 use crate::command::Tick;
@@ -39,12 +46,9 @@ use crate::resources::{
     SourceDef,
 };
 use crate::scheduler::SystemSchedulerManifest;
+use crate::shard::*;
 use crate::systems::*;
 use crate::tick::{DroneMessageOutbox, ReplayStore, TickTraceEventLog};
-
-#[path = "shard.rs"]
-pub mod shard;
-pub use shard::*;
 
 static NEXT_TUTORIAL_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -80,7 +84,7 @@ pub struct WorldConfig {
     #[serde(alias = "retention")]
     pub replay: ReplayRetentionConfig,
     pub damage_types: Vec<crate::components::DamageTypeDef>,
-    pub body_part_types: Vec<crate::components::BodyPartTypeDef>,
+    pub body_part_types: Vec<swarm_engine_plugin_sdk::components::BodyPartTypeDef>,
     pub structure_types: Vec<crate::components::StructureTypeDef>,
     pub resource_types: Vec<ResourceDef>,
     pub source_types: Vec<SourceDef>,
@@ -1740,7 +1744,7 @@ pub fn state_checksum(world: &mut World) -> u64 {
     // --- Dropped resources ---
     tag(&mut hasher, "resources");
     let mut resources = world
-        .query::<(&Position, &crate::components::Resource)>()
+        .query::<(&Position, &Resource)>()
         .iter(world)
         .map(|(p, r)| {
             let mut amounts: Vec<(String, u32)> =

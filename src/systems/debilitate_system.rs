@@ -1,6 +1,7 @@
 use bevy::prelude::*;
+use swarm_engine_plugin_sdk::components::Drone;
 
-use crate::components::{DebilitateState, Drone};
+use crate::components::DebilitateState;
 
 /// S19 debilitate_system — per-tick debilitate effects.
 ///

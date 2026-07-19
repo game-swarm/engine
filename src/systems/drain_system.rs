@@ -1,6 +1,7 @@
 use bevy::prelude::*;
+use swarm_engine_plugin_sdk::components::Owner;
 
-use crate::components::{DrainState, Owner};
+use crate::components::DrainState;
 use crate::resource_ledger::{ResourceLedger, ResourceOperation};
 use crate::resources::CurrentTick;
 use crate::resources::PlayerLocalStorage;
@@ -47,8 +48,9 @@ pub fn drain_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::Position;
     use indexmap::IndexMap;
+    use swarm_engine_api::ids::RoomId;
+    use swarm_engine_plugin_sdk::components::Position;
 
     #[test]
     fn drain_reduces_player_local_storage() {
@@ -71,7 +73,7 @@ mod tests {
             Position {
                 x: 0,
                 y: 0,
-                room: crate::components::RoomId(0),
+                room: RoomId(0),
             },
         ));
 
@@ -108,7 +110,7 @@ mod tests {
             Position {
                 x: 0,
                 y: 0,
-                room: crate::components::RoomId(0),
+                room: RoomId(0),
             },
         ));
 

@@ -19,11 +19,13 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use swarm_engine_api::ids::{BodyPart, PlayerId, RoomId};
+#[cfg(all(test, feature = "mod_special_attacks"))]
+use swarm_engine_plugin_sdk::buffers::SpecialAttackKind;
 
 use swarm_engine::{
-    BodyPart, CommandIntent, ExecutorError, PlayerCollectMetrics, PlayerCollectOutput,
-    PlayerExecutor, PlayerId, RoomId, TickBroadcaster, TickSnapshot, WorldMode,
-    create_world_with_mode,
+    CommandIntent, ExecutorError, PlayerCollectMetrics, PlayerCollectOutput, PlayerExecutor,
+    TickBroadcaster, TickSnapshot, WorldMode, create_world_with_mode,
     sandbox_transport::{
         ActiveDeployment, ActiveDeployments, SandboxBackend, execute_tick_remote, hex_encode,
         nats_auth_secret_from_env, register_recovered_module_fetch_artifact,
@@ -32,36 +34,6 @@ use swarm_engine::{
 };
 
 mod metrics;
-
-#[cfg(feature = "mod_combat_core")]
-#[allow(dead_code)]
-#[path = "../mods/combat-core/src/lib.rs"]
-mod swarm_mod_combat_core;
-#[cfg(feature = "mod_depot_storage")]
-#[path = "../mods/depot-storage/src/lib.rs"]
-mod swarm_mod_depot_storage;
-#[cfg(feature = "mod_empire_upkeep")]
-#[allow(dead_code)]
-#[path = "../mods/empire-upkeep/src/lib.rs"]
-mod swarm_mod_empire_upkeep;
-#[cfg(feature = "mod_fog_of_war")]
-#[allow(dead_code)]
-#[path = "../mods/fog-of-war/src/lib.rs"]
-mod swarm_mod_fog_of_war;
-#[cfg(feature = "mod_pve_spawning")]
-#[allow(dead_code)]
-#[path = "../mods/pve-spawning/src/lib.rs"]
-mod swarm_mod_pve_spawning;
-#[cfg(feature = "mod_resource_decay")]
-#[path = "../mods/resource-decay/src/lib.rs"]
-mod swarm_mod_resource_decay;
-#[cfg(feature = "mod_special_attacks")]
-#[allow(dead_code)]
-#[path = "../mods/special-attacks/src/lib.rs"]
-mod swarm_mod_special_attacks;
-#[cfg(feature = "mod_vanilla_boss")]
-#[path = "../mods/vanilla-boss/src/lib.rs"]
-mod swarm_mod_vanilla_boss;
 
 const DEFAULT_HEALTH_ADDR: &str = "127.0.0.1:8080";
 const MAX_PRE_AUTH_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -494,7 +466,12 @@ fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) -> Result<(), Str
         let mut config = swarm_mod_combat_core::CombatConfig::default();
         config.damage_multiplier_bp = combat.damage_multiplier;
         app.insert_resource(config);
-        app.add_plugins(swarm_mod_combat_core::CombatCoreModPlugin);
+        install_builtin_plugin(
+            app,
+            &lock,
+            "combat-core",
+            swarm_mod_combat_core::CombatCoreModPlugin,
+        )?;
     }
     #[cfg(feature = "mod_depot_storage")]
     if let Some(depot) = &runtime.depot_storage {
@@ -504,18 +481,33 @@ fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) -> Result<(), Str
             depot_hits: depot.depot_hits,
             depot_capacity: depot.depot_capacity,
         });
-        app.add_plugins(swarm_mod_depot_storage::DepotStorageModPlugin);
+        install_builtin_plugin(
+            app,
+            &lock,
+            "depot-storage",
+            swarm_mod_depot_storage::DepotStorageModPlugin,
+        )?;
     }
     #[cfg(feature = "mod_empire_upkeep")]
     if runtime.empire_upkeep.is_some() {
-        app.add_plugins(swarm_mod_empire_upkeep::EmpireUpkeepModPlugin);
+        install_builtin_plugin(
+            app,
+            &lock,
+            "empire-upkeep",
+            swarm_mod_empire_upkeep::EmpireUpkeepModPlugin,
+        )?;
     }
     #[cfg(feature = "mod_fog_of_war")]
     if let Some(fog) = &runtime.fog_of_war {
         app.insert_resource(swarm_mod_fog_of_war::VisibilityConfig {
             fog_of_war: fog.fog_of_war,
         });
-        app.add_plugins(swarm_mod_fog_of_war::FogOfWarModPlugin);
+        install_builtin_plugin(
+            app,
+            &lock,
+            "fog-of-war",
+            swarm_mod_fog_of_war::FogOfWarModPlugin,
+        )?;
     }
     #[cfg(feature = "mod_pve_spawning")]
     if let Some(pve) = &runtime.pve_spawning {
@@ -525,7 +517,12 @@ fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) -> Result<(), Str
             npc_drone_body: pve.npc_drone_body.clone(),
             npc_drop_table: pve.npc_drop_table.clone(),
         });
-        app.add_plugins(swarm_mod_pve_spawning::PveSpawningModPlugin);
+        install_builtin_plugin(
+            app,
+            &lock,
+            "pve-spawning",
+            swarm_mod_pve_spawning::PveSpawningModPlugin,
+        )?;
     }
     #[cfg(feature = "mod_resource_decay")]
     if let Some(decay) = &runtime.resource_decay {
@@ -533,7 +530,12 @@ fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) -> Result<(), Str
             decay_rate_ppm: decay.decay_rate_ppm,
             per_resource_decay_rate_ppm: decay.per_resource_decay_rate_ppm.clone(),
         });
-        app.add_plugins(swarm_mod_resource_decay::ResourceDecayModPlugin);
+        install_builtin_plugin(
+            app,
+            &lock,
+            "resource-decay",
+            swarm_mod_resource_decay::ResourceDecayModPlugin,
+        )?;
     }
     #[cfg(feature = "mod_special_attacks")]
     if let Some(special) = &runtime.special_attacks {
@@ -541,7 +543,12 @@ fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) -> Result<(), Str
             enabled: special.runtime_kinds_for_mode(mode),
             damage_multiplier: special.damage_multiplier,
         });
-        app.add_plugins(swarm_mod_special_attacks::SpecialAttacksModPlugin);
+        install_builtin_plugin(
+            app,
+            &lock,
+            "special-attacks",
+            swarm_mod_special_attacks::SpecialAttacksModPlugin,
+        )?;
     }
     #[cfg(feature = "mod_vanilla_boss")]
     if let Some(boss) = &runtime.vanilla_boss {
@@ -573,7 +580,74 @@ fn add_feature_gated_mod_plugins(app: &mut bevy::prelude::App) -> Result<(), Str
             arena_bosses_enabled: boss.arena_bosses_enabled,
             boss_spawn_interval: boss.boss_spawn_interval,
         });
-        app.add_plugins(plugin);
+        install_builtin_plugin(app, &lock, "vanilla-boss", plugin)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(
+    test,
+    feature = "mod_combat_core",
+    feature = "mod_depot_storage",
+    feature = "mod_empire_upkeep",
+    feature = "mod_fog_of_war",
+    feature = "mod_pve_spawning",
+    feature = "mod_resource_decay",
+    feature = "mod_special_attacks",
+    feature = "mod_vanilla_boss",
+))]
+fn install_builtin_plugin<P>(
+    app: &mut bevy::prelude::App,
+    lock: &swarm_engine::plugins::PluginLock,
+    lock_id: &str,
+    plugin: P,
+) -> Result<(), String>
+where
+    P: swarm_engine_plugin_sdk::traits::SwarmPlugin,
+{
+    let descriptor = P::descriptor();
+    validate_locked_plugin_descriptor(lock, lock_id, &descriptor)?;
+    let plugin_id = descriptor.id.clone();
+    swarm_engine_plugin_sdk::install::install_swarm_plugin_with_descriptor(app, plugin, descriptor)
+        .map_err(|error| format!("failed to install plugin '{plugin_id}': {error}"))
+}
+
+#[cfg(any(
+    test,
+    feature = "mod_combat_core",
+    feature = "mod_depot_storage",
+    feature = "mod_empire_upkeep",
+    feature = "mod_fog_of_war",
+    feature = "mod_pve_spawning",
+    feature = "mod_resource_decay",
+    feature = "mod_special_attacks",
+    feature = "mod_vanilla_boss",
+))]
+fn validate_locked_plugin_descriptor(
+    lock: &swarm_engine::plugins::PluginLock,
+    lock_id: &str,
+    descriptor: &swarm_engine_api::descriptor::PluginDescriptor,
+) -> Result<(), String> {
+    let entry = lock
+        .plugins
+        .get(lock_id)
+        .ok_or_else(|| format!("compiled plugin '{lock_id}' is missing from mods.lock"))?;
+    if !entry.enabled {
+        return Err(format!(
+            "compiled plugin '{lock_id}' cannot be installed because it is disabled in mods.lock"
+        ));
+    }
+    if descriptor.id != lock_id {
+        return Err(format!(
+            "compiled plugin descriptor ID '{}' does not match mods.lock plugin '{lock_id}'",
+            descriptor.id
+        ));
+    }
+    if entry.version != descriptor.version {
+        return Err(format!(
+            "mods.lock pins plugin '{lock_id}' at version '{}', but the compiled descriptor is version '{}'",
+            entry.version, descriptor.version
+        ));
     }
     Ok(())
 }
@@ -2241,6 +2315,132 @@ fn status(ok: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::prelude::{Plugin, Resource};
+    use swarm_engine_api::descriptor::PluginDescriptor;
+
+    #[derive(Resource)]
+    struct TestPluginInstalled;
+
+    struct CompatibleTestPlugin;
+
+    impl Plugin for CompatibleTestPlugin {
+        fn build(&self, app: &mut bevy::prelude::App) {
+            app.insert_resource(TestPluginInstalled);
+        }
+    }
+
+    impl swarm_engine_plugin_sdk::traits::SwarmPlugin for CompatibleTestPlugin {
+        fn descriptor() -> PluginDescriptor {
+            test_plugin_descriptor(swarm_engine_api::version::API_VERSION)
+        }
+    }
+
+    struct IncompatibleTestPlugin;
+
+    impl Plugin for IncompatibleTestPlugin {
+        fn build(&self, app: &mut bevy::prelude::App) {
+            app.insert_resource(TestPluginInstalled);
+        }
+    }
+
+    impl swarm_engine_plugin_sdk::traits::SwarmPlugin for IncompatibleTestPlugin {
+        fn descriptor() -> PluginDescriptor {
+            test_plugin_descriptor("999.0.0")
+        }
+    }
+
+    fn test_plugin_descriptor(api_version: &str) -> PluginDescriptor {
+        PluginDescriptor {
+            id: "engine-installer-test".to_string(),
+            version: "0.1.0".to_string(),
+            api_version: api_version.to_string(),
+            dependencies: Vec::new(),
+            config: Vec::new(),
+            systems: Vec::new(),
+            actions: Vec::new(),
+            descriptor_schema_version: swarm_engine_api::version::DESCRIPTOR_SCHEMA_VERSION
+                .to_string(),
+        }
+    }
+
+    fn test_plugin_lock(version: &str) -> swarm_engine::plugins::PluginLock {
+        swarm_engine::plugins::PluginLock {
+            plugins: HashMap::from([(
+                "engine-installer-test".to_string(),
+                swarm_engine::plugins::PluginEntry {
+                    version: version.to_string(),
+                    enabled: true,
+                    config: HashMap::new(),
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn typed_installer_accepts_matching_api_version() {
+        let mut app = bevy::prelude::App::new();
+        install_builtin_plugin(
+            &mut app,
+            &test_plugin_lock("0.1.0"),
+            "engine-installer-test",
+            CompatibleTestPlugin,
+        )
+        .unwrap();
+        assert!(app.world().contains_resource::<TestPluginInstalled>());
+    }
+
+    #[test]
+    fn typed_installer_rejects_api_mismatch_before_build() {
+        let mut app = bevy::prelude::App::new();
+        let error = install_builtin_plugin(
+            &mut app,
+            &test_plugin_lock("0.1.0"),
+            "engine-installer-test",
+            IncompatibleTestPlugin,
+        )
+        .unwrap_err();
+        assert!(error.contains("999.0.0"));
+        assert!(error.contains(swarm_engine_api::version::API_VERSION));
+        assert!(!app.world().contains_resource::<TestPluginInstalled>());
+    }
+
+    #[test]
+    fn typed_installer_rejects_duplicate_descriptor_id() {
+        let mut app = bevy::prelude::App::new();
+        let lock = test_plugin_lock("0.1.0");
+        install_builtin_plugin(
+            &mut app,
+            &lock,
+            "engine-installer-test",
+            CompatibleTestPlugin,
+        )
+        .unwrap();
+
+        let error = install_builtin_plugin(
+            &mut app,
+            &lock,
+            "engine-installer-test",
+            CompatibleTestPlugin,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("already installed"));
+    }
+
+    #[test]
+    fn locked_plugin_version_must_exactly_match_compiled_descriptor() {
+        let descriptor = test_plugin_descriptor(swarm_engine_api::version::API_VERSION);
+        for locked_version in ["0.0.9", "0.1.1", "not-a-version"] {
+            let error = validate_locked_plugin_descriptor(
+                &test_plugin_lock(locked_version),
+                "engine-installer-test",
+                &descriptor,
+            )
+            .unwrap_err();
+            assert!(error.contains(locked_version));
+            assert!(error.contains("0.1.0"));
+        }
+    }
 
     fn temp_nonce_path(name: &str) -> PathBuf {
         let mut path = env::temp_dir();
@@ -2403,7 +2603,7 @@ mod tests {
                 .world()
                 .resource::<swarm_mod_special_attacks::SpecialAttacksConfig>()
                 .enabled
-                .contains(&swarm_engine::systems::SpecialAttackKind::Hack)
+                .contains(&SpecialAttackKind::Hack)
         );
         let boss_config = world
             .app

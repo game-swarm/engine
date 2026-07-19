@@ -1,8 +1,10 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::RoomId;
+use swarm_engine_plugin_sdk::components::Position;
 
-use crate::components::{Position, RoomId, RoomTerrains};
+use crate::components::RoomTerrains;
 use crate::resources::{ResourceAmount, ResourceCost, ResourceName};
 
 pub const STRONGHOLD_PROBABILITY_SCALE: u32 = 10_000;

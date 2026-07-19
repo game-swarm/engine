@@ -5,6 +5,8 @@ pub mod loot;
 pub mod strongholds;
 
 use bevy::prelude::*;
+use swarm_engine_api::ids::RoomId;
+use swarm_engine_plugin_sdk::components::Position;
 
 pub use ai::{
     DEFAULT_NPC_AGGRO_RANGE, DEFAULT_NPC_ATTACK_RANGE, DEFAULT_NPC_DAMAGE, Npc, NpcMode,
@@ -12,7 +14,7 @@ pub use ai::{
 };
 pub use components::*;
 
-use crate::components::{Position, RoomId, RoomTerrains};
+use crate::components::RoomTerrains;
 use crate::resources::CurrentTick;
 
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]

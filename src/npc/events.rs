@@ -1,11 +1,13 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::{BodyPart, RoomId};
+use swarm_engine_plugin_sdk::components::{
+    BodyPartRegistry, Drone, Owner, Position, SpawningGrace,
+};
 
 use crate::command::Tick;
-use crate::components::{
-    BodyPart, BodyPartRegistry, Drone, Owner, Position, RoomId, RoomTerrains, Source, SpawningGrace,
-};
+use crate::components::{RoomTerrains, Source};
 use crate::resources::CurrentTick;
 use crate::world::WorldConfig;
 

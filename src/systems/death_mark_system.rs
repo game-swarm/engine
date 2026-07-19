@@ -1,6 +1,6 @@
 use bevy::prelude::*;
+use swarm_engine_plugin_sdk::components::{DeathMark, Drone, Position, Structure};
 
-use crate::components::{DeathMark, Drone, Position, Structure};
 use crate::systems::RoomDroneCounts;
 
 pub fn death_mark_system(

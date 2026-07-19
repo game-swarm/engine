@@ -11,6 +11,7 @@ use crate::{
     },
     idl::{EnumDefs, IdlDoc, ModCustomAction},
 };
+use swarm_engine_plugin_sdk::components::BodyPartRegistry;
 
 // ── TypeScript generation ───────────────────────────────────────────
 
@@ -970,7 +971,7 @@ pub fn cli_dump_idl(world_toml_path: &str) -> Result<String, String> {
         std::fs::read(world_toml_path).map_err(|e| format!("read {world_toml_path}: {e}"))?;
     let world_hash = sha256_hex(&toml_bytes);
 
-    let body_parts = crate::components::BodyPartRegistry::from_defs(config.body_part_types);
+    let body_parts = BodyPartRegistry::from_defs(config.body_part_types);
     let structures = crate::components::StructureTypeRegistry::default();
     let special_effects =
         crate::components::SpecialEffectRegistry::from_defs(config.special_effects);

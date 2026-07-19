@@ -1,11 +1,11 @@
 use bevy::prelude::*;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::ids::{BodyPart, PlayerId, RoomId};
+use swarm_engine_plugin_sdk::components::{Drone, Owner, Position, Structure, StructureType};
 
 use crate::command::{ObjectId, Tick};
-use crate::components::{
-    BodyPart, Drone, Owner, PlayerId, Position, RoomId, Source, Structure, StructureType,
-};
+use crate::components::Source;
 use crate::onboarding::OnboardingEvent;
 use crate::resources::ResourceCost;
 use crate::systems::PendingSpawnQueue;

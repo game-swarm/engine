@@ -97,7 +97,7 @@ fn find_my_spawn(snapshot: &Snapshot) -> Option<&ObjectSnapshot> {
     snapshot.objects.iter().find(|object| match &object.kind {
         ObjectKind::Structure {
             structure, owner, ..
-        } => owner == &Some(snapshot.player_id) && *structure == StructureType::Spawn,
+        } => owner == &Some(snapshot.player_id) && *structure == StructureType::SPAWN,
         _ => false,
     })
 }
@@ -244,7 +244,7 @@ mod tests {
             player_id: 7,
             rooms: vec![],
             objects: vec![
-                structure(10, 0, 0, StructureType::Spawn, Some(7), [(ENERGY, 100)], 0),
+                structure(10, 0, 0, StructureType::SPAWN, Some(7), [(ENERGY, 100)], 0),
                 source(20, 2, 0, [(ENERGY, 300)]),
                 drone(30, 1, 0, 7, vec![BodyPart::Work], 0, false, []),
             ],
@@ -279,7 +279,7 @@ mod tests {
             player_id: 7,
             rooms: vec![],
             objects: vec![
-                structure(10, 0, 0, StructureType::Spawn, Some(7), [], 1),
+                structure(10, 0, 0, StructureType::SPAWN, Some(7), [], 1),
                 source(20, 5, 5, [(ENERGY, 300)]),
                 drone(
                     30,

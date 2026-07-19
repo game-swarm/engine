@@ -5,6 +5,13 @@ use serde::de::DeserializeOwned;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeSet, HashSet};
+use swarm_engine_api::ids::{BodyPart, DamageType, PlayerId, RoomId};
+use swarm_engine_plugin_sdk::buffers::{
+    PendingDamage, PendingHeal, PendingSpecialAttack, SpecialAttackKind, StatusActionIntent,
+};
+use swarm_engine_plugin_sdk::components::{
+    BodyPartRegistry, Controller, Drone, Owner, Position, Resource, Structure, StructureType,
+};
 use ts_rs::TS;
 
 use crate::components::*;
@@ -19,10 +26,7 @@ use crate::resources::{
     ResourceRegistry, SettlementId, SettlementIdNonce, SettlementKey, SettlementKind,
     SettlementPhase, SettlementState, SettlementStatus,
 };
-use crate::systems::{
-    PendingControllerUpgrade, PendingDamage, PendingHeal, PendingSpawn, PendingSpawnQueue,
-    PendingSpecialAttack, RoomDroneCounts, SpecialAttackKind, StatusActionIntent,
-};
+use crate::systems::{PendingControllerUpgrade, PendingSpawn, PendingSpawnQueue, RoomDroneCounts};
 
 pub type ObjectId = u64;
 pub type Tick = u64;
@@ -7081,7 +7085,7 @@ fn target_resource_amount(
     if let Some(structure) = entity_ref.get::<Structure>() {
         return Ok((position, structure_energy(resource, structure.energy)));
     }
-    if let Some(resource_store) = entity_ref.get::<crate::components::Resource>() {
+    if let Some(resource_store) = entity_ref.get::<Resource>() {
         return Ok((
             position,
             *resource_store.amounts.get(resource).unwrap_or(&0),
@@ -7282,7 +7286,7 @@ fn tile_has_any_object(world: &mut World, position: Position) -> bool {
             .iter(world)
             .any(|(object_position, _)| *object_position == position)
         || world
-            .query::<(&Position, &crate::components::Resource)>()
+            .query::<(&Position, &Resource)>()
             .iter(world)
             .any(|(object_position, _)| *object_position == position)
         || world
@@ -7842,10 +7846,7 @@ fn take_from_target(
         *energy -= amount;
         return Ok(());
     }
-    if let Some(mut resource_store) = world
-        .entity_mut(entity)
-        .get_mut::<crate::components::Resource>()
-    {
+    if let Some(mut resource_store) = world.entity_mut(entity).get_mut::<Resource>() {
         let value = resource_store
             .amounts
             .entry(resource.to_string())
@@ -8785,7 +8786,7 @@ mod tests {
                     resource: Some("Energy".to_string()),
                     amount: Some(3),
                     range: Some(2),
-                    structure: Some(StructureType::Tower),
+                    structure: Some(StructureType::TOWER),
                     damage_type: Some("EMP".to_string()),
                     cooldown: Some(5),
                 },
