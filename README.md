@@ -4,32 +4,24 @@ Rust game engine component of Swarm.
 
 ## Local Development
 
-The engine, API/SDK, and mods use sibling path dependencies. Build from this layout:
+Cargo resolves the engine API and plugin SDK from the versioned `v0.1.0` Git release. The engine keeps mod source checkouts as siblings for compile-time composition:
 
 ```text
 swarm/
 ├── engine/
-├── engine-api/
 └── mods/
     ├── combat-core/
     └── ...
 ```
 
-The canonical API repository is `https://github.com/game-swarm/engine-api`. For local API/SDK changes, place the source tree at `../engine-api` and use `--local`:
-
-```bash
-cd engine
-./scripts/fetch-mods.sh --local
-```
-
-A normal engine checkout can fetch the API and every mod at the immutable revisions configured by the engine:
+A normal engine checkout fetches every configured mod. Cargo fetches API/SDK dependencies itself:
 
 ```bash
 cd engine
 ./scripts/fetch-mods.sh
 ```
 
-`ENGINE_API_REV` overrides the default API commit and `MOD_REV` overrides every mod revision for coordinated development. Non-SHA overrides require `ALLOW_MUTABLE_REFS=true`. Release and CI builds should leave these unset so the reviewed API commit and `mods.toml` remain authoritative.
+`MOD_REV` overrides every mod revision for coordinated development. Non-SHA overrides require `ALLOW_MUTABLE_REFS=true`. Release and CI builds should leave it unset so `mods.toml` remains authoritative. API/SDK upgrades are made only by changing their Cargo version and Git tag together.
 
 Then run the engine in development mode with required secrets and paths:
 
@@ -49,7 +41,7 @@ cargo run --features vanilla_mods
 
 ## Container Build
 
-The Docker build context must be the directory that contains all three siblings. Fetch dependencies first, then run Docker from that parent directory:
+The Docker build context must be the directory that contains the engine and sibling mods. Fetch mods first, then run Docker from that parent directory:
 
 ```bash
 cd engine
@@ -58,7 +50,7 @@ cd ..
 docker build -f engine/Dockerfile -t swarm-engine:local .
 ```
 
-Using `engine/` alone as the build context cannot work because Cargo resolves the API and mod crates through sibling paths.
+Using `engine/` alone as the build context cannot work because Cargo resolves mod crates through sibling paths.
 
 The engine starts with:
 
