@@ -1,18 +1,18 @@
 # Engine mod sources
 # Each mod is fetched from its git repository at build time.
-# Local dev: run `scripts/fetch-mods.sh` to populate engine/mods/.
-# Docker build: the Dockerfile runs fetch-mods.sh automatically.
+# Local dev: run `scripts/fetch-mods.sh` to populate the sibling mods/ directory.
+# Container builds must fetch these repositories before invoking Docker.
 #
 # To use a local checkout instead of git, set `path` instead of `git` + `rev`.
 # Format: name = { git = "url", rev = "commit-sha" }
 #         name = { path = "/path/to/local/checkout" }
 
 [mods]
-combat-core = { git = "https://github.com/game-swarm/mod-combat-core.git", rev = "149fb7cb82761682870c4a232d42b837d944c924" }
-empire-upkeep = { git = "https://github.com/game-swarm/mod-empire-upkeep.git", rev = "6ac10e3069281c97335c4e3298b12a2320c4e3d7" }
-fog-of-war = { git = "https://github.com/game-swarm/mod-fog-of-war.git", rev = "0e5a5579fd346d2ee74f30fc23e819ba2fed6e07" }
-pve-spawning = { git = "https://github.com/game-swarm/mod-pve-spawning.git", rev = "14137a44b0e6d42676fd834b488fed428d53613d" }
-resource-decay = { git = "https://github.com/game-swarm/mod-resource-decay.git", rev = "d8698f90f7c639f084eff03116e67b2537e95a21" }
-special-attacks = { git = "https://github.com/game-swarm/mod-special-attacks.git", rev = "cfc585a5a278ab3893a3459defee2bb79ff67ae4" }
-depot-storage = { git = "https://github.com/game-swarm/mod-depot-storage.git", rev = "8ab8b6a66315188debf39b882c1ecdc6b4c3df0b" }
-vanilla-boss = { git = "https://github.com/game-swarm/mod-vanilla-boss.git", rev = "2bfc145968ba93564bf71fe5ac5aeec019d87a2c" }
+combat-core = { git = "https://github.com/game-swarm/mod-combat-core.git", rev = "138749a8ad60a6a8a91be4801c93869ae88053ef" }
+empire-upkeep = { git = "https://github.com/game-swarm/mod-empire-upkeep.git", rev = "b979655b09af1ec0bb5503301b7314d617224955" }
+fog-of-war = { git = "https://github.com/game-swarm/mod-fog-of-war.git", rev = "2f50821f71cb3e1ce23c4b418bb128126be1da82" }
+pve-spawning = { git = "https://github.com/game-swarm/mod-pve-spawning.git", rev = "5d46e47ed0d1fa463af20dc3fc8317ba83448fec" }
+resource-decay = { git = "https://github.com/game-swarm/mod-resource-decay.git", rev = "776cdbcf7ed188b283cc4fbb68266ca28db5efd1" }
+special-attacks = { git = "https://github.com/game-swarm/mod-special-attacks.git", rev = "23878f59968f23bea35e2b12e86fc9009c525be9" }
+depot-storage = { git = "https://github.com/game-swarm/mod-depot-storage.git", rev = "09371a2ff9636b5bde273c89686c6aec519aaf95" }
+vanilla-boss = { git = "https://github.com/game-swarm/mod-vanilla-boss.git", rev = "e1767a061356287e1b8f71ed804dd732bfb90bcf" }

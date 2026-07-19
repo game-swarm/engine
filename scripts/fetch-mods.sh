@@ -1,20 +1,28 @@
 #!/bin/bash
-# Fetch mod sources for engine build.
-# Reads mods.toml and clones/fetches each mod into engine/mods/.
+# Fetch the engine API and mod sources for an engine build.
+# The sibling layout matches the path dependencies in Cargo.toml:
+#   ../engine-api
+#   ../mods/<mod-name>
 #
 # Usage:
-#   ./scripts/fetch-mods.sh              # Fetch all mods from git (default)
-#   ./scripts/fetch-mods.sh --local      # Prefer local paths from mods.toml
-#   MOD_REV=develop ./scripts/fetch-mods.sh  # Override revision for all
+#   ./scripts/fetch-mods.sh              # Fetch missing API/mod repositories
+#   ./scripts/fetch-mods.sh --local      # Prefer local mod paths from mods.toml
+#   ALLOW_MUTABLE_REFS=true MOD_REV=develop ./scripts/fetch-mods.sh
+#       # Explicitly opt in to mutable revisions for coordinated development
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENGINE_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$ENGINE_DIR/mods.toml"
-MODS_DIR="$ENGINE_DIR/mods"
+WORKSPACE_DIR="$(dirname "$ENGINE_DIR")"
+MODS_DIR="$WORKSPACE_DIR/mods"
+ENGINE_API_DIR="$WORKSPACE_DIR/engine-api"
+ENGINE_API_GIT="${ENGINE_API_GIT:-https://github.com/game-swarm/engine-api.git}"
+ENGINE_API_REV="${ENGINE_API_REV:-ec9db43db3893f154eefded5e5995b23ac9aecb4}"
 USE_LOCAL="${USE_LOCAL:-false}"
 MOD_REV="${MOD_REV:-}"
+ALLOW_MUTABLE_REFS="${ALLOW_MUTABLE_REFS:-false}"
 
 # Check for --local flag
 if [ "${1:-}" = "--local" ]; then
@@ -22,6 +30,88 @@ if [ "${1:-}" = "--local" ]; then
 fi
 
 mkdir -p "$MODS_DIR"
+
+is_immutable_revision() {
+  [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]
+}
+
+require_immutable_revision() {
+  local name="$1"
+  local rev="$2"
+
+  if is_immutable_revision "$rev"; then
+    return
+  fi
+  if [ "$ALLOW_MUTABLE_REFS" = "true" ]; then
+    echo "[$name] WARNING: mutable revision explicitly allowed: $rev" >&2
+    return
+  fi
+  echo "[$name] ERROR: revision must be a full 40-character commit SHA: $rev" >&2
+  echo "[$name] Set ALLOW_MUTABLE_REFS=true only for coordinated development." >&2
+  return 1
+}
+
+fetch_repository() {
+  local name="$1"
+  local target="$2"
+  local url="$3"
+  local rev="$4"
+
+  require_immutable_revision "$name" "$rev"
+
+  if [ -d "$target/.git" ]; then
+    if [ "$USE_LOCAL" = "true" ]; then
+      echo "[$name] using local checkout at $target"
+      return
+    fi
+    local actual_url
+    actual_url="$(git -C "$target" remote get-url origin)"
+    if [ "$actual_url" != "$url" ]; then
+      echo "[$name] ERROR: origin mismatch for $target" >&2
+      echo "[$name] expected: $url" >&2
+      echo "[$name] actual:   $actual_url" >&2
+      return 1
+    fi
+    echo "[$name] updating ($rev)..."
+    git -C "$target" fetch --depth 1 origin "$rev"
+  elif [ -e "$target" ]; then
+    if [ "$USE_LOCAL" = "true" ]; then
+      echo "[$name] using local source tree at $target"
+      return
+    fi
+    echo "[$name] ERROR: $target exists but is not a Git checkout" >&2
+    return 1
+  else
+    echo "[$name] fetching ($rev)..."
+    git init -q "$target"
+    git -C "$target" remote add origin "$url"
+    git -C "$target" fetch --depth 1 origin "$rev"
+  fi
+
+  git -C "$target" checkout --detach -q FETCH_HEAD
+  if is_immutable_revision "$rev"; then
+    local actual_rev
+    actual_rev="$(git -C "$target" rev-parse HEAD)"
+    if [ "${actual_rev,,}" != "${rev,,}" ]; then
+      echo "[$name] ERROR: fetched revision mismatch" >&2
+      echo "[$name] expected: $rev" >&2
+      echo "[$name] actual:   $actual_rev" >&2
+      return 1
+    fi
+  fi
+}
+
+fetch_repository "engine-api" "$ENGINE_API_DIR" "$ENGINE_API_GIT" "$ENGINE_API_REV"
+
+for manifest in \
+  "$ENGINE_API_DIR/Cargo.toml" \
+  "$ENGINE_API_DIR/crates/swarm-engine-api/Cargo.toml" \
+  "$ENGINE_API_DIR/crates/swarm-engine-plugin-sdk/Cargo.toml"; do
+  if [ ! -f "$manifest" ]; then
+    echo "[engine-api] ERROR: expected manifest not found: $manifest" >&2
+    exit 1
+  fi
+done
 
 # Simple TOML parser for mods.toml
 # Handles: name = { git = "url", rev = "branch" }
@@ -85,17 +175,7 @@ parse_mods | while IFS='|' read -r type name url rev; do
 
     GIT)
       rev="${rev:-main}"
-      if [ -d "$target/.git" ]; then
-        echo "[mod] $name: updating ($rev)..."
-        git -C "$target" fetch --depth 1 origin "$rev"
-        git -C "$target" checkout --detach -q FETCH_HEAD
-      else
-        echo "[mod] $name: fetching ($rev)..."
-        git init -q "$target"
-        git -C "$target" remote add origin "$url"
-        git -C "$target" fetch --depth 1 origin "$rev"
-        git -C "$target" checkout --detach -q FETCH_HEAD
-      fi
+      fetch_repository "mod:$name" "$target" "$url" "$rev"
       ;;
 
     *)
@@ -104,4 +184,4 @@ parse_mods | while IFS='|' read -r type name url rev; do
   esac
 done
 
-echo "[mod] All mods fetched."
+echo "[deps] Engine API and mods are ready in $WORKSPACE_DIR."
