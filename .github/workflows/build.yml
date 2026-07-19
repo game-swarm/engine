@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   IMAGE_NAME: ghcr.io/game-swarm/engine
@@ -18,19 +17,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out engine
+        uses: actions/checkout@v7
+        with:
+          path: engine
+      - name: Check out engine API v0.1.0
+        uses: actions/checkout@v7
+        with:
+          repository: game-swarm/engine-api
+          ref: ec9db43db3893f154eefded5e5995b23ac9aecb4
+          path: engine-api
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
       - name: Fetch pinned mods
+        working-directory: engine
         run: ./scripts/fetch-mods.sh
       - name: Run release load profile
+        working-directory: engine
         run: timeout 25m cargo test -q -p swarm-engine --release --test load release_load_profile_100_players_500_ticks -- --ignored --exact
 
   build:
     needs: release-load-profile
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out engine
+        uses: actions/checkout@v7
+        with:
+          path: engine
+      - name: Check out engine API v0.1.0
+        uses: actions/checkout@v7
+        with:
+          repository: game-swarm/engine-api
+          ref: ec9db43db3893f154eefded5e5995b23ac9aecb4
+          path: engine-api
+      - name: Fetch pinned mods
+        working-directory: engine
+        run: ./scripts/fetch-mods.sh
       - uses: docker/setup-buildx-action@v4
       - id: meta
         uses: docker/metadata-action@v6
@@ -48,6 +75,7 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
+          file: engine/Dockerfile
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
