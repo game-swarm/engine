@@ -6,6 +6,6 @@ target/
 *.cert
 .env
 .env.*
-mods/
+/mods/
 .tmp/
 sdk-templates/ts/examples/starter-bot/build/
