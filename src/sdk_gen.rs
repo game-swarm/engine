@@ -11,6 +11,7 @@ use crate::{
     },
     idl::{EnumDefs, IdlDoc, ModCustomAction},
 };
+use swarm_engine_api::abi::ABI_VERSION;
 use swarm_engine_plugin_sdk::components::BodyPartRegistry;
 
 // ── TypeScript generation ───────────────────────────────────────────
@@ -79,14 +80,7 @@ fn ts_enums(enums: &EnumDefs) -> String {
     let mut out = String::new();
 
     // Direction
-    out.push_str("export type Direction = ");
-    for (i, v) in enums.direction.iter().enumerate() {
-        if i > 0 {
-            out.push_str(" | ");
-        }
-        out.push_str(&format!("\"{v}\""));
-    }
-    out.push_str(";\n\n");
+    out.push_str("export type Direction = \"North\" | \"South\" | \"East\" | \"West\";\n\n");
 
     // BodyPart
     out.push_str("export type BodyPart = ");
@@ -274,7 +268,7 @@ fn ts_special_action_payload_type() -> &'static str {
 
 fn ts_command_factories(idl: &IdlDoc) -> String {
     let mut out = String::from(
-        "export interface CommandIntent<A extends Action = Action> {\n  sequence: UInt32;\n  action: A;\n}\n\n",
+        "export interface CommandIntent<A extends Action = Action> {\n  sequence: UInt32;\n  idempotency_key: string;\n  client_trace_id?: string;\n  action: A;\n}\n\nexport interface TickInput {\n  tick: UInt64;\n  player_id: PlayerId;\n  world_id: UInt64;\n  visible_snapshot: Uint8Array;\n  world_config_view: { config_hash: Uint8Array; payload: Uint8Array };\n  fuel_budget_hints: { fuel_remaining: UInt64; host_calls_remaining: UInt32; output_bytes_remaining: UInt32 };\n  message_inbox_cursor: { next_message_id: UInt64 };\n}\n\nexport interface TickResult<A extends Action = Action> {\n  commands: CommandIntent<A>[];\n  messages: PlayerMessage[];\n}\n\nexport interface PlayerMessage {\n  channel: \"Player\" | \"Debug\";\n  text: string;\n}\n\n",
     );
     out.push_str(ts_special_action_payload_type());
     // ---- addCost helper ----
@@ -283,8 +277,8 @@ fn ts_command_factories(idl: &IdlDoc) -> String {
     );
     // ---- command factory ----
 
-    out.push_str("export function command<A extends Action>(sequence: number, action: A): CommandIntent<A> {\n");
-    out.push_str("  return { sequence, action };\n");
+    out.push_str("export function command<A extends Action>(sequence: number, idempotency_key: string, action: A, client_trace_id?: string): CommandIntent<A> {\n");
+    out.push_str("  return client_trace_id === undefined ? { sequence, idempotency_key, action } : { sequence, idempotency_key, client_trace_id, action };\n");
     out.push_str("}\n\n");
 
     out.push_str("export const actions = Object.freeze({\n");
@@ -449,9 +443,11 @@ pub fn generate_command_intent_schema(_idl: &IdlDoc) -> serde_json::Value {
             "CommandIntent": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["sequence", "action"],
+                "required": ["sequence", "idempotency_key", "action"],
                 "properties": {
                     "sequence": { "type": "integer", "minimum": 0, "maximum": 4294967295_u64 },
+                    "idempotency_key": { "type": "string", "minLength": 1 },
+                    "client_trace_id": { "type": "string" },
                     "action": { "$ref": "#/definitions/Action" }
                 }
             },
@@ -524,7 +520,7 @@ fn field_schema(field: &CommandSchemaField) -> serde_json::Value {
             serde_json::json!({"type": "integer", "minimum": 0, "maximum": 4294967295_u64})
         }
         "Direction" => {
-            serde_json::json!({"type": "string", "enum": ["Top", "TopRight", "BottomRight", "Bottom", "BottomLeft", "TopLeft"]})
+            serde_json::json!({"type": "string", "enum": ["North", "South", "East", "West"]})
         }
         "ResourceName" | "StructureType" | "DamageType" => serde_json::json!({"type": "string"}),
         "u64" => serde_json::json!({"type": "integer", "minimum": 0}),
@@ -547,14 +543,14 @@ fn ts_constants(idl: &IdlDoc) -> String {
         "export const IDL_VERSION = \"{}\";\n",
         idl.idl_version
     ));
-    out.push_str("export const ABI_VERSION = 1;\n\n");
+    out.push_str(&format!("export const ABI_VERSION = {ABI_VERSION};\n\n"));
     // AI game data markers (used by tick protocol)
     out.push_str("export const AI_GAME_DATA_START = \"___AI_GAME_DATA_START___\";\n");
     out.push_str("export const AI_GAME_DATA_END = \"___AI_GAME_DATA_END___\";\n\n");
 
     for (name, value) in &idl.core.constants {
         let js_val = match value {
-            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Number(n) => integer_constant(name, n).literal(),
             serde_json::Value::Bool(b) => b.to_string(),
             _ => format!("{value}"),
         };
@@ -801,11 +797,59 @@ fn rust_command_struct() -> String {
 #[serde(deny_unknown_fields)]
 pub struct CommandIntent {
     pub sequence: u32,
+    pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_trace_id: Option<String>,
     pub action: CommandAction,
 }
 
-#[deprecated(note = "use CommandIntent; Command remains as a one-release compatibility alias")]
-pub type Command = CommandIntent;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TickInput {
+    pub tick: u64,
+    pub player_id: u32,
+    pub world_id: u64,
+    pub visible_snapshot: Vec<u8>,
+    pub world_config_view: WorldConfigView,
+    pub fuel_budget_hints: FuelBudgetHints,
+    pub message_inbox_cursor: MessageInboxCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorldConfigView {
+    pub config_hash: [u8; 32],
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FuelBudgetHints {
+    pub fuel_remaining: u64,
+    pub host_calls_remaining: u32,
+    pub output_bytes_remaining: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageInboxCursor {
+    pub next_message_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TickResult {
+    pub commands: Vec<CommandIntent>,
+    #[serde(default)]
+    pub messages: Vec<PlayerMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerMessage {
+    pub topic: String,
+    pub payload: Vec<u8>,
+}
 "#
     .to_string()
 }
@@ -851,10 +895,13 @@ fn rust_constants(idl: &IdlDoc) -> String {
 
     for (name, value) in &idl.core.constants {
         if let serde_json::Value::Number(n) = value {
-            if let Some(i) = n.as_u64() {
-                out.push_str(&format!("pub const {name}: u64 = {i};\n"));
-            } else if let Some(f) = n.as_f64() {
-                out.push_str(&format!("pub const {name}: f64 = {f};\n"));
+            match integer_constant(name, n) {
+                IntegerConstant::Unsigned(value) => {
+                    out.push_str(&format!("pub const {name}: u64 = {value};\n"));
+                }
+                IntegerConstant::Signed(value) => {
+                    out.push_str(&format!("pub const {name}: i64 = {value};\n"));
+                }
             }
         }
     }
@@ -881,6 +928,100 @@ fn rust_constants(idl: &IdlDoc) -> String {
     );
 
     out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntegerConstant {
+    Unsigned(u64),
+    Signed(i64),
+}
+
+impl IntegerConstant {
+    fn literal(self) -> String {
+        match self {
+            Self::Unsigned(value) => value.to_string(),
+            Self::Signed(value) => value.to_string(),
+        }
+    }
+}
+
+fn integer_constant(name: &str, number: &serde_json::Number) -> IntegerConstant {
+    if let Some(value) = number.as_u64() {
+        return IntegerConstant::Unsigned(value);
+    }
+    if let Some(value) = number.as_i64() {
+        return IntegerConstant::Signed(value);
+    }
+
+    decimal_integer_constant(&number.to_string()).unwrap_or_else(|| {
+        panic!("gameplay constant {name} must use a fixed-point integer, got {number}")
+    })
+}
+
+fn decimal_integer_constant(value: &str) -> Option<IntegerConstant> {
+    const MAX_EXACT_INTEGER: u64 = 9_007_199_254_740_991;
+
+    let (negative, unsigned) = value
+        .strip_prefix('-')
+        .map_or((false, value), |value| (true, value));
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
+        None => (unsigned, 0_i32),
+    };
+    let mut digits = String::with_capacity(mantissa.len());
+    let mut fractional_digits = 0_i32;
+    let mut decimal_seen = false;
+    for character in mantissa.chars() {
+        match character {
+            '0'..='9' => {
+                digits.push(character);
+                if decimal_seen {
+                    fractional_digits += 1;
+                }
+            }
+            '.' if !decimal_seen => decimal_seen = true,
+            _ => return None,
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+
+    let scale = exponent.checked_sub(fractional_digits)?;
+    if scale >= 0 {
+        if scale > 20 {
+            return None;
+        }
+        digits.extend(std::iter::repeat_n('0', scale as usize));
+    } else {
+        let removed_digits = scale.unsigned_abs() as usize;
+        if removed_digits > digits.len() {
+            if digits.bytes().any(|digit| digit != b'0') {
+                return None;
+            }
+            digits.clear();
+            digits.push('0');
+        } else {
+            let split = digits.len() - removed_digits;
+            if digits[split..].bytes().any(|digit| digit != b'0') {
+                return None;
+            }
+            digits.truncate(split);
+            if digits.is_empty() {
+                digits.push('0');
+            }
+        }
+    }
+
+    let magnitude = digits.parse::<u64>().ok()?;
+    if magnitude > MAX_EXACT_INTEGER {
+        return None;
+    }
+    if negative && magnitude != 0 {
+        Some(IntegerConstant::Signed(-(magnitude as i64)))
+    } else {
+        Some(IntegerConstant::Unsigned(magnitude))
+    }
 }
 
 // ── SDK cache path helpers ──────────────────────────────────────────
@@ -1069,7 +1210,7 @@ mod tests {
                     metadata: BTreeMap::new(),
                 }],
                 enums: EnumDefs {
-                    direction: vec!["Top".to_string()],
+                    direction: vec!["North".to_string()],
                     body_part: vec!["Move".to_string()],
                     damage_type: vec!["Kinetic".to_string()],
                     rejection_reason: vec![],
@@ -1087,7 +1228,7 @@ mod tests {
                         base_damage: Some(10),
                         range: 3,
                         special_effect: None,
-                        special_param: None,
+                        special_param_micro: None,
                         cooldown: Some(5),
                         cost: BTreeMap::new(),
                     },
@@ -1098,7 +1239,7 @@ mod tests {
                         base_damage: None,
                         range: 3,
                         special_effect: None,
-                        special_param: None,
+                        special_param_micro: None,
                         cooldown: Some(5),
                         cost: BTreeMap::new(),
                     },
@@ -1108,6 +1249,36 @@ mod tests {
                 structure_types: vec![],
             },
         }
+    }
+
+    #[test]
+    fn generated_constants_convert_exact_legacy_float_integers() {
+        let mut idl = minimal_idl();
+        idl.core
+            .constants
+            .insert("LEGACY_LIMIT".to_string(), serde_json::json!(12.0));
+        idl.core
+            .constants
+            .insert("SIGNED_OFFSET".to_string(), serde_json::json!(-3));
+
+        let typescript = generate_typescript(&idl);
+        let rust = generate_rust(&idl);
+
+        assert!(typescript.contains("export const LEGACY_LIMIT = 12;"));
+        assert!(typescript.contains("export const SIGNED_OFFSET = -3;"));
+        assert!(rust.contains("pub const LEGACY_LIMIT: u64 = 12;"));
+        assert!(rust.contains("pub const SIGNED_OFFSET: i64 = -3;"));
+    }
+
+    #[test]
+    #[should_panic(expected = "gameplay constant DAMAGE_MULTIPLIER must use a fixed-point integer")]
+    fn generated_constants_reject_fractional_gameplay_values() {
+        let mut idl = minimal_idl();
+        idl.core
+            .constants
+            .insert("DAMAGE_MULTIPLIER".to_string(), serde_json::json!(1.25));
+
+        let _ = generate_typescript(&idl);
     }
 
     #[test]
@@ -1160,27 +1331,30 @@ mod tests {
         assert!(rust.contains("cooldown: Option<u32>"));
         assert!(rust.contains("CommandAction::Blink"));
         assert!(rust.contains("pub struct CommandIntent"));
-        assert!(rust.contains("pub type Command = CommandIntent"));
+        assert!(rust.contains("pub idempotency_key: String"));
+        assert!(rust.contains("pub struct TickInput"));
+        assert!(rust.contains("pub struct TickResult"));
+        assert!(!rust.contains("pub type Command = CommandIntent"));
         assert!(!rust.contains("    Action {"));
 
         let schema = generate_command_intent_schema(&idl);
         assert_eq!(
-            schema["definitions"]["CommandIntent"]["required"][0],
-            "sequence"
+            schema["definitions"]["CommandIntent"]["required"],
+            serde_json::json!(["sequence", "idempotency_key", "action"])
         );
         assert_eq!(schema["items"]["$ref"], "#/definitions/CommandIntent");
         let branches = schema["definitions"]["Action"]["oneOf"]
             .as_array()
             .expect("schema should expose action oneOf branches");
         assert_eq!(branches.len(), command_schema_branches().len());
-        assert_eq!(branches.len(), 45);
+        assert_eq!(branches.len(), 25);
         let concrete_names = branches
             .iter()
             .filter_map(|branch| branch["properties"]["type"]["const"].as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(concrete_names.len(), 44);
+        assert_eq!(concrete_names.len(), 24);
         assert!(concrete_names.contains("TransferToGlobal"));
-        assert!(concrete_names.contains("DefaultLoan"));
+        assert!(!concrete_names.contains("DefaultLoan"));
         assert!(concrete_names.contains("Hack"));
         let wildcard = branches
             .iter()
@@ -1195,7 +1369,7 @@ mod tests {
         assert_eq!(reserved.len(), concrete_names.len());
         assert!(reserved.contains("Move"));
         assert!(reserved.contains("Hack"));
-        assert!(reserved.contains("DefaultLoan"));
+        assert!(!reserved.contains("DefaultLoan"));
     }
 
     #[test]
@@ -1217,5 +1391,78 @@ mod tests {
         assert!(!output.path().join("dist").exists());
         assert!(!output.path().join("target").exists());
         assert!(!output.path().join("package-lock.json").exists());
+    }
+
+    #[test]
+    fn freshly_generated_typescript_and_rust_sdks_compile() {
+        let output = tempfile::tempdir().unwrap();
+        cli_generate_sdk("world.toml", output.path().to_str().unwrap()).unwrap();
+        let world_dir = std::fs::read_dir(output.path())
+            .unwrap()
+            .next()
+            .expect("generator should create a world hash directory")
+            .unwrap()
+            .path();
+        let generated_ts =
+            std::fs::read_to_string(world_dir.join("sdk-ts/src/commands.ts")).unwrap();
+        assert!(generated_ts.contains("idempotency_key: string"));
+        assert!(generated_ts.contains("\"CapacityExceeded\""));
+        assert!(
+            generated_ts
+                .contains("export type Direction = \"North\" | \"South\" | \"East\" | \"West\"")
+        );
+        assert!(!generated_ts.contains("TopRight"));
+
+        let templates = engine_dir().unwrap();
+        let tsc = templates.join("ts/node_modules/.bin/tsc");
+        assert!(tsc.is_file(), "TypeScript dependencies must be installed");
+        let ts_output = std::process::Command::new(tsc)
+            .args([
+                "-p",
+                world_dir.join("sdk-ts/tsconfig.json").to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            ts_output.status.success(),
+            "fresh TypeScript SDK failed typecheck:\n{}{}",
+            String::from_utf8_lossy(&ts_output.stdout),
+            String::from_utf8_lossy(&ts_output.stderr)
+        );
+        let dist_entrypoint = world_dir.join("sdk-ts/dist/index.js");
+        assert!(
+            dist_entrypoint.is_file(),
+            "TypeScript build must emit the publishable entrypoint"
+        );
+        let import_output = std::process::Command::new("node")
+            .args([
+                "--input-type=module",
+                "--eval",
+                "const sdk = await import(process.argv[1]); const input = { tick: 99n, player_id: 42, world_id: 7n, visible_snapshot: new Uint8Array([1, 2, 3]), world_config_view: { config_hash: new Uint8Array(32).fill(7), payload: new Uint8Array([4, 5]) }, fuel_budget_hints: { fuel_remaining: 12345n, host_calls_remaining: 77, output_bytes_remaining: 262144 }, message_inbox_cursor: { next_message_id: 555n } }; const inputBytes = sdk.encodeTickInput(input); const decodedInput = sdk.decodeTickInput(inputBytes); if (!decodedInput.ok || decodedInput.value.tick !== 99n) throw new Error('TickInput codec binding failed'); const resultBytes = sdk.encodeTickResult({ commands: [], messages: [] }); const decodedResult = sdk.decodeTickResult(resultBytes); if (!decodedResult.ok || decodedResult.value.commands.length !== 0) throw new Error('TickResult codec binding failed');",
+                dist_entrypoint.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            import_output.status.success(),
+            "fresh TypeScript SDK dist entrypoint failed to import:\n{}{}",
+            String::from_utf8_lossy(&import_output.stdout),
+            String::from_utf8_lossy(&import_output.stderr)
+        );
+
+        let rust_output = std::process::Command::new("cargo")
+            .args([
+                "check",
+                "--manifest-path",
+                world_dir.join("sdk-rust/Cargo.toml").to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            rust_output.status.success(),
+            "fresh Rust SDK failed cargo check:\n{}{}",
+            String::from_utf8_lossy(&rust_output.stdout),
+            String::from_utf8_lossy(&rust_output.stderr)
+        );
     }
 }

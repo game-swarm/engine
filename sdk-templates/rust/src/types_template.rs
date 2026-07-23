@@ -3,7 +3,7 @@
 // and command types come from commands.rs which is produced by
 // swarm-engine's IDL codegen.
 
-use crate::commands::{BodyPart, CommandIntent, StructureType};
+use crate::commands::{BodyPart, StructureType};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -32,12 +32,6 @@ pub struct Snapshot {
     pub objects: Vec<ObjectSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player: Option<PlayerSnapshot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TickResult {
-    pub commands: Vec<CommandIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

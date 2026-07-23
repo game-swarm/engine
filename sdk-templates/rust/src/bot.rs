@@ -1,7 +1,7 @@
-use crate::commands::{BodyPart, CommandAction, CommandIntent, Direction, StructureType};
-use crate::types_template::{
-    ObjectKind, ObjectSnapshot, Position, ResourceMap, Snapshot, TickResult,
+use crate::commands::{
+    BodyPart, CommandAction, CommandIntent, Direction, StructureType, TickResult,
 };
+use crate::types_template::{ObjectKind, ObjectSnapshot, Position, ResourceMap, Snapshot};
 
 const ENERGY: &str = "Energy";
 const WORKER_BODY: [BodyPart; 1] = [BodyPart::Work];
@@ -10,10 +10,16 @@ const DEFAULT_CARRY_CAPACITY: u32 = 100;
 
 pub fn tick(snapshot: Snapshot) -> TickResult {
     let Some(spawn) = find_my_spawn(&snapshot) else {
-        return TickResult { commands: vec![] };
+        return TickResult {
+            commands: vec![],
+            messages: vec![],
+        };
     };
     let Some(source) = find_energy_source(&snapshot.objects) else {
-        return TickResult { commands: vec![] };
+        return TickResult {
+            commands: vec![],
+            messages: vec![],
+        };
     };
 
     let mut commands = Vec::new();
@@ -74,7 +80,10 @@ pub fn tick(snapshot: Snapshot) -> TickResult {
         sequence += 1;
     }
 
-    TickResult { commands }
+    TickResult {
+        commands,
+        messages: vec![],
+    }
 }
 
 pub fn has_enough_energy_for_worker(snapshot: &Snapshot) -> bool {
@@ -90,7 +99,12 @@ pub fn has_enough_energy_for_worker(snapshot: &Snapshot) -> bool {
 }
 
 fn command(sequence: u32, action: CommandAction) -> CommandIntent {
-    CommandIntent { sequence, action }
+    CommandIntent {
+        sequence,
+        idempotency_key: format!("bot-command-{sequence}"),
+        client_trace_id: None,
+        action,
+    }
 }
 
 fn find_my_spawn(snapshot: &Snapshot) -> Option<&ObjectSnapshot> {

@@ -22,6 +22,8 @@ mod tests {
     fn spawn_serializes_with_spawn_type() {
         let command = CommandIntent {
             sequence: 7,
+            idempotency_key: "spawn-7".to_string(),
+            client_trace_id: None,
             action: CommandAction::Spawn {
                 object_id: 42,
                 spawn_id: 43,
@@ -35,6 +37,7 @@ mod tests {
             value,
             json!({
                 "sequence": 7,
+                "idempotency_key": "spawn-7",
                 "action": {
                     "type": "Spawn",
                     "object_id": 42,
