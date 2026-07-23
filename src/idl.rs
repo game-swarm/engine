@@ -67,7 +67,7 @@ pub struct ModCustomAction {
     pub base_damage: Option<u32>,
     pub range: u32,
     pub special_effect: Option<String>,
-    pub special_param: Option<f64>,
+    pub special_param_micro: Option<u64>,
     pub cooldown: Option<u32>,
     pub cost: BTreeMap<String, u32>,
 }
@@ -89,6 +89,7 @@ pub struct ModBodyPart {
     pub base_damage: Option<u32>,
     pub heal_amount: Option<u32>,
     pub age_modifier: i32,
+    pub resistances_bps: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,7 +306,7 @@ fn extract_mods(
                 base_damage: a.base_damage,
                 range: a.range,
                 special_effect: a.special_effect.clone(),
-                special_param: a.special_param,
+                special_param_micro: a.special_param_micro,
                 cooldown: a.cooldown,
                 cost: a.cost.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             })
@@ -332,6 +333,11 @@ fn extract_mods(
                 base_damage: p.base_damage,
                 heal_amount: p.heal_amount,
                 age_modifier: p.age_modifier,
+                resistances_bps: p
+                    .resistances_bps
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect(),
             })
             .collect(),
         structure_types: structures

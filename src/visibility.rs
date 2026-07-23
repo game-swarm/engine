@@ -194,8 +194,7 @@ pub fn hint_ladder(reason: &crate::command::RejectionReason) -> HintLevel {
     use crate::command::RejectionReason;
     match reason {
         // Self-state codes — player already knows these
-        RejectionReason::Fatigued
-        | RejectionReason::CooldownActive
+        RejectionReason::CooldownActive
         | RejectionReason::InsufficientEnergy
         | RejectionReason::AlreadyFullHealth
         | RejectionReason::SpawnOnCooldown
@@ -228,7 +227,6 @@ pub fn format_hint(reason: &crate::command::RejectionReason, level: HintLevel) -
                 RejectionReason::NotVisibleOrNotFound => "target not found or not visible".into(),
                 RejectionReason::OutOfRange { .. } => "target is out of range".into(),
                 RejectionReason::InsufficientEnergy => "not enough energy".into(),
-                RejectionReason::Fatigued => "drone is fatigued".into(),
                 RejectionReason::CooldownActive => "action on cooldown".into(),
                 _ => "action rejected".into(),
             }
@@ -445,7 +443,10 @@ player_view = "full"
     #[test]
     fn hint_ladder_safe_for_self_state_codes() {
         use crate::command::RejectionReason;
-        assert_eq!(hint_ladder(&RejectionReason::Fatigued), HintLevel::Safe);
+        assert_eq!(
+            hint_ladder(&RejectionReason::CooldownActive),
+            HintLevel::Safe
+        );
         assert_eq!(
             hint_ladder(&RejectionReason::CooldownActive),
             HintLevel::Safe

@@ -165,6 +165,19 @@ mod tests {
         )
     }
 
+    fn registered_action(
+        action_type: &str,
+        object_id: ObjectId,
+        target_id: ObjectId,
+    ) -> CommandAction {
+        CommandAction::Action {
+            action_type: action_type.to_string(),
+            object_id,
+            target_id: Some(target_id),
+            payload: serde_json::json!({}),
+        }
+    }
+
     fn create_tutorial_world() -> crate::SwarmWorld {
         let mut world = create_world();
         world
@@ -721,28 +734,28 @@ mod tests {
 
     #[test]
     fn command_action_and_rejection_registries_match_api_surface() {
-        assert_eq!(CORE_COMMAND_ACTIONS.len(), 33);
-        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 37);
+        assert_eq!(CORE_COMMAND_ACTIONS.len(), 13);
+        assert_eq!(CANONICAL_REJECTION_REASONS.len(), 38);
         assert_eq!(CANONICAL_REJECTION_REASONS[0], "InvalidJson");
         assert_eq!(CANONICAL_REJECTION_REASONS[2], "ObjectNotFound");
-        assert_eq!(CANONICAL_REJECTION_REASONS[28], "RateLimited");
-        assert_eq!(CANONICAL_REJECTION_REASONS[36], "InternalError");
+        assert_eq!(CANONICAL_REJECTION_REASONS[29], "RateLimited");
+        assert_eq!(CANONICAL_REJECTION_REASONS[37], "InternalError");
 
         let action: CommandAction =
             serde_json::from_str(r#"{"type":"Hack","object_id":1,"target_id":2}"#).unwrap();
-        assert_eq!(
-            action,
-            CommandAction::Hack {
-                object_id: 1,
-                target_id: 2,
-                resource: None,
-                amount: None,
-                range: None,
-                structure: None,
-                damage_type: None,
-                cooldown: None,
-            }
-        );
+        let CommandAction::Action {
+            action_type,
+            object_id,
+            target_id,
+            payload,
+        } = action
+        else {
+            panic!("registered action should normalize to generic Action");
+        };
+        assert_eq!(object_id, 1);
+        assert_eq!(target_id, Some(2));
+        assert_eq!(action_type, "Hack");
+        assert_eq!(payload, serde_json::json!({}));
         assert!(serde_json::from_str::<CommandAction>(r#"{"type":"Hack","object_id":1}"#).is_err());
 
         let legacy: CommandAction = serde_json::from_str(
@@ -751,15 +764,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             legacy,
-            CommandAction::Hack {
+            CommandAction::Action {
+                action_type: "Hack".to_string(),
                 object_id: 1,
-                target_id: 2,
-                resource: None,
-                amount: None,
-                range: None,
-                structure: None,
-                damage_type: Some("EMP".to_string()),
-                cooldown: None,
+                target_id: Some(2),
+                payload: serde_json::json!({"damage_type":"EMP"}),
             }
         );
         assert_eq!(
@@ -869,7 +878,7 @@ mod tests {
         let rust = crate::sdk_gen::generate_rust(&idl);
         assert!(rust.contains("#[serde(tag = \"type\", deny_unknown_fields)]"));
         assert!(rust.contains("target_player: u32"));
-        assert_eq!(idl.core.enums.rejection_reason.len(), 37);
+        assert_eq!(idl.core.enums.rejection_reason.len(), 38);
         assert_eq!(
             idl.core.enums.rejection_reason,
             CANONICAL_REJECTION_REASONS
@@ -890,15 +899,11 @@ mod tests {
         };
         let attack_intent = CommandIntent {
             sequence: 1,
-            action: CommandAction::Attack {
+            action: CommandAction::Action {
+                action_type: "Attack".to_string(),
                 object_id: 1,
-                target_id: 2,
-                resource: None,
-                amount: None,
-                range: None,
-                structure: None,
-                damage_type: None,
-                cooldown: None,
+                target_id: Some(2),
+                payload: serde_json::json!({}),
             },
         };
 
@@ -1248,11 +1253,11 @@ mod tests {
         let mut refunds = RefundAccumulator::default();
 
         assert_eq!(
-            refunds.record_rejection(&raw, &RejectionReason::SourceEmpty, 10_000),
+            refunds.record_rejection(&raw, &RejectionReason::InsufficientResources, 10_000),
             5_000
         );
         assert_eq!(
-            refunds.record_rejection(&raw, &RejectionReason::SourceEmpty, 10_000),
+            refunds.record_rejection(&raw, &RejectionReason::InsufficientResources, 10_000),
             0
         );
         assert_eq!(
@@ -1275,7 +1280,7 @@ mod tests {
                     sequence: 3,
                     ..raw.clone()
                 },
-                &RejectionReason::TargetFull,
+                &RejectionReason::CapacityExceeded,
                 MAX_FUEL * 4
             ),
             MAX_REFUND_PER_TICK - 5_000
@@ -1289,23 +1294,10 @@ mod tests {
 
     #[test]
     fn replay_environment_captures_enabled_plugin_versions() {
-        let mut lock = crate::plugins::PluginLock::default();
-        lock.plugins.insert(
-            "combat-core".to_string(),
-            crate::plugins::PluginEntry {
-                version: "0.2.0".to_string(),
-                enabled: true,
-                config: Default::default(),
-            },
-        );
-        lock.plugins.insert(
-            "disabled-mod".to_string(),
-            crate::plugins::PluginEntry {
-                version: "9.9.9".to_string(),
-                enabled: false,
-                config: Default::default(),
-            },
-        );
+        let mut lock = crate::plugins::PluginLock::vanilla();
+        lock.plugins.get_mut("combat-core").unwrap().version = "0.2.0".to_string();
+        lock.plugins.get_mut("resource-decay").unwrap().version = "9.9.9".to_string();
+        lock.plugins.get_mut("resource-decay").unwrap().enabled = false;
 
         let mut world = create_world();
         crate::plugins::install_plugin_registry(&mut world.app, lock);
@@ -1315,7 +1307,7 @@ mod tests {
             environment.mods_lock.modules.get("combat-core"),
             Some(&"0.2.0".to_string())
         );
-        assert!(!environment.mods_lock.modules.contains_key("disabled-mod"));
+        assert!(!environment.mods_lock.modules.contains_key("resource-decay"));
     }
 
     #[test]
@@ -1354,7 +1346,7 @@ mod tests {
                     direction: Direction::Top
                 }
             ),
-            Err(RejectionReason::Fatigued)
+            Err(RejectionReason::CooldownActive)
         );
 
         {
@@ -1373,7 +1365,7 @@ mod tests {
                     direction: Direction::Top
                 }
             ),
-            Err(RejectionReason::StillSpawning)
+            Err(RejectionReason::CooldownActive)
         );
 
         {
@@ -1392,9 +1384,7 @@ mod tests {
                     direction: Direction::Top
                 }
             ),
-            Err(RejectionReason::MissingBodyPart {
-                part: BodyPart::Move
-            })
+            Err(RejectionReason::InsufficientResources)
         );
 
         world
@@ -1415,7 +1405,7 @@ mod tests {
                     direction: Direction::Top
                 }
             ),
-            Err(RejectionReason::TileBlocked)
+            Err(RejectionReason::PositionOccupied)
         );
 
         assert!(world.set_terrain(RoomId(0), 10, 9, TerrainType::Plain));
@@ -1459,9 +1449,7 @@ mod tests {
                     resource: None
                 }
             ),
-            Err(RejectionReason::MissingBodyPart {
-                part: BodyPart::Work
-            })
+            Err(RejectionReason::InsufficientResources)
         );
 
         world
@@ -1521,7 +1509,7 @@ mod tests {
                     resource: None
                 }
             ),
-            Err(RejectionReason::SourceEmpty)
+            Err(RejectionReason::InsufficientResources)
         );
 
         world
@@ -1751,7 +1739,7 @@ mod tests {
                 .0
                 .get(&1)
                 .and_then(|storage| storage.get("Energy")),
-            Some(&950)
+            Some(&990)
         );
     }
 
@@ -1977,16 +1965,7 @@ mod tests {
                 &mut world,
                 1,
                 1,
-                CommandAction::Attack {
-                    object_id: object_id(attacker),
-                    target_id: object_id(target),
-                    resource: None,
-                    amount: None,
-                    range: None,
-                    structure: None,
-                    damage_type: None,
-                    cooldown: None,
-                }
+                registered_action("Attack", object_id(attacker), object_id(target))
             ),
             Ok(())
         );
@@ -2021,16 +2000,7 @@ mod tests {
                 &mut world,
                 2,
                 2,
-                CommandAction::Heal {
-                    object_id: object_id(healer),
-                    target_id: object_id(target),
-                    resource: None,
-                    amount: None,
-                    range: None,
-                    structure: None,
-                    damage_type: None,
-                    cooldown: None,
-                }
+                registered_action("Heal", object_id(healer), object_id(target))
             ),
             Ok(())
         );
@@ -2065,16 +2035,7 @@ mod tests {
                 &mut world,
                 1,
                 1,
-                CommandAction::Attack {
-                    object_id: object_id(attacker),
-                    target_id: object_id(friendly),
-                    resource: None,
-                    amount: None,
-                    range: None,
-                    structure: None,
-                    damage_type: None,
-                    cooldown: None,
-                }
+                registered_action("Attack", object_id(attacker), object_id(friendly))
             ),
             Err(RejectionReason::FriendlyTarget)
         );
@@ -2085,16 +2046,7 @@ mod tests {
                 &mut world,
                 1,
                 2,
-                CommandAction::Heal {
-                    object_id: object_id(healer),
-                    target_id: object_id(friendly),
-                    resource: None,
-                    amount: None,
-                    range: None,
-                    structure: None,
-                    damage_type: None,
-                    cooldown: None,
-                }
+                registered_action("Heal", object_id(healer), object_id(friendly))
             ),
             Err(RejectionReason::AlreadyFullHealth)
         );
@@ -2112,16 +2064,7 @@ mod tests {
                 &mut world,
                 1,
                 3,
-                CommandAction::Heal {
-                    object_id: object_id(healer),
-                    target_id: object_id(enemy),
-                    resource: None,
-                    amount: None,
-                    range: None,
-                    structure: None,
-                    damage_type: None,
-                    cooldown: None,
-                }
+                registered_action("Heal", object_id(healer), object_id(enemy))
             ),
             Err(RejectionReason::NotFriendly)
         );
@@ -2425,9 +2368,7 @@ mod tests {
                     structure: StructureType::EXTENSION,
                 }
             ),
-            Err(RejectionReason::MissingBodyPart {
-                part: BodyPart::Work
-            })
+            Err(RejectionReason::InsufficientResources)
         );
 
         assert!(world.set_terrain(RoomId(0), 10, 11, TerrainType::Wall));
@@ -2569,7 +2510,7 @@ mod tests {
     fn starting_resources_config_has_expected_defaults() {
         let config = crate::world::StartingResourcesConfig::default();
         assert_eq!(config.starting_resources.get("Energy"), Some(&5000));
-        assert_eq!(config.starting_resources.get("Minerals"), Some(&2000));
+        assert_eq!(config.starting_resources.len(), 1);
         assert_eq!(config.free_upkeep_controllers, 1);
         assert_eq!(config.free_upkeep_drones, 3);
         assert_eq!(config.free_upkeep_ticks, 2000);
@@ -2589,7 +2530,16 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(storage.get("Energy").copied().unwrap_or(0) >= 5000);
-        assert!(storage.get("Minerals").copied().unwrap_or(0) >= 2000);
+        let operations = &world
+            .app
+            .world()
+            .resource::<crate::resource_ledger::ResourceLedger>()
+            .trace_snapshot()
+            .operations;
+        assert!(operations.iter().any(|operation| matches!(
+            operation.operation,
+            crate::resource_ledger::ResourceOperation::WorldStartupSubsidy
+        )));
     }
 
     #[test]
@@ -2608,7 +2558,6 @@ mod tests {
             .unwrap_or_default();
         // Should be ~5000 (not 10000) since granted only once
         assert_eq!(storage.get("Energy").copied().unwrap_or(0), 5000);
-        assert_eq!(storage.get("Minerals").copied().unwrap_or(0), 2000);
     }
 
     #[test]

@@ -188,12 +188,14 @@ pub fn tutorial_bot_system(
         TutorialStep::SpawnDrone => {
             queue.0.push(crate::systems::PendingSpawn {
                 owner: config.player_id,
+                spawn_id: 0,
                 body: vec![BodyPart::Move, BodyPart::Work, BodyPart::Carry],
                 position: Position {
                     x: TUTORIAL_SPAWN_POSITION.x + 1,
                     y: TUTORIAL_SPAWN_POSITION.y,
                     room: config.room_id,
                 },
+                cost: ResourceCost::new(),
             });
             state.mark_completed(TutorialStep::SpawnDrone, TutorialStep::Collect);
             events.p1().write(TutorialStepEvent {

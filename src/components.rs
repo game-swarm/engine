@@ -64,15 +64,17 @@ impl WorldSettings {
 #[serde(default)]
 pub struct DamageTypeDef {
     pub name: String,
-    pub component_multipliers: IndexMap<String, f64>,
-    pub attribute_multipliers: IndexMap<String, f64>,
+    #[serde(alias = "component_multipliers")]
+    pub component_multipliers_bps: IndexMap<String, u32>,
+    #[serde(alias = "attribute_multipliers")]
+    pub attribute_multipliers_bps: IndexMap<String, u32>,
 }
 impl Default for DamageTypeDef {
     fn default() -> Self {
         Self {
             name: DamageType::Kinetic.to_string(),
-            component_multipliers: IndexMap::new(),
-            attribute_multipliers: IndexMap::new(),
+            component_multipliers_bps: IndexMap::new(),
+            attribute_multipliers_bps: IndexMap::new(),
         }
     }
 }
@@ -102,8 +104,8 @@ impl Default for DamageTypeRegistry {
         damage_types
             .get_mut(DamageType::Kinetic.as_str())
             .unwrap()
-            .attribute_multipliers
-            .insert("Shielded".to_string(), 0.7);
+            .attribute_multipliers_bps
+            .insert("Shielded".to_string(), 7_000);
         Self { damage_types }
     }
 }
@@ -115,40 +117,32 @@ impl DamageTypeRegistry {
         }
         r
     }
-    pub fn component_multiplier(&self, dt: &str, body: Option<&[BodyPart]>) -> f64 {
+    pub fn component_multiplier_bps(&self, dt: &str, body: Option<&[BodyPart]>) -> u32 {
         let Some(def) = self.damage_types.get(dt) else {
-            return 1.0;
+            return 10_000;
         };
         body.unwrap_or(&[])
             .iter()
-            .filter_map(|part| def.component_multipliers.get(&part.to_string()))
-            .fold(1.0, |acc, multiplier| {
-                acc * damage_type_multiplier(*multiplier)
-            })
+            .filter_map(|part| def.component_multipliers_bps.get(&part.to_string()))
+            .fold(10_000, |acc, multiplier| scale_bps(acc, *multiplier))
     }
-    pub fn attribute_multiplier(&self, dt: &str, attrs: Option<&Attributes>) -> f64 {
+    pub fn attribute_multiplier_bps(&self, dt: &str, attrs: Option<&Attributes>) -> u32 {
         let Some(attrs) = attrs else {
-            return 1.0;
+            return 10_000;
         };
         let Some(def) = self.damage_types.get(dt) else {
-            return 1.0;
+            return 10_000;
         };
         attrs
             .0
             .iter()
-            .filter_map(|a| def.attribute_multipliers.get(a))
-            .fold(1.0, |acc, multiplier| {
-                acc * damage_type_multiplier(*multiplier)
-            })
+            .filter_map(|a| def.attribute_multipliers_bps.get(a))
+            .fold(10_000, |acc, multiplier| scale_bps(acc, *multiplier))
     }
 }
 
-fn damage_type_multiplier(multiplier: f64) -> f64 {
-    if multiplier.is_finite() {
-        multiplier.max(0.0)
-    } else {
-        1.0
-    }
+fn scale_bps(amount: u32, multiplier_bps: u32) -> u32 {
+    ((amount as u64 * multiplier_bps as u64) / 10_000).min(u32::MAX as u64) as u32
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -164,8 +158,10 @@ pub struct ResistanceRegistry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResistanceDamageTypeDef {
-    pub component_multipliers: IndexMap<String, f64>,
-    pub attribute_multipliers: IndexMap<String, f64>,
+    #[serde(alias = "component_multipliers")]
+    pub component_multipliers_bps: IndexMap<String, u32>,
+    #[serde(alias = "attribute_multipliers")]
+    pub attribute_multipliers_bps: IndexMap<String, u32>,
 }
 
 impl ResistanceRegistry {
@@ -181,11 +177,11 @@ impl ResistanceRegistry {
             registry.add_damage_type(damage_type);
         }
         for (part, def) in &body_registry.parts {
-            for (damage_type, resistance) in &def.resistances {
+            for (damage_type, resistance) in &def.resistances_bps {
                 registry.set_component_multiplier(
                     damage_type,
                     &part.to_string(),
-                    1.0 - resistance.clamp(0.0, 1.0),
+                    10_000_u32.saturating_sub((*resistance).min(10_000)),
                 );
             }
         }
@@ -196,13 +192,19 @@ impl ResistanceRegistry {
         self.damage_types.entry(damage_type.into()).or_default();
     }
 
-    pub fn set_resistance(&mut self, damage_type: &str, layer: &str, key: &str, multiplier: f64) {
+    pub fn set_resistance(
+        &mut self,
+        damage_type: &str,
+        layer: &str,
+        key: &str,
+        multiplier_bps: u32,
+    ) {
         match layer {
             "component" | "components" | "body" | "body_part" => {
-                self.set_component_multiplier(damage_type, key, multiplier);
+                self.set_component_multiplier(damage_type, key, multiplier_bps);
             }
             "attribute" | "attributes" => {
-                self.set_attribute_multiplier(damage_type, key, multiplier);
+                self.set_attribute_multiplier(damage_type, key, multiplier_bps);
             }
             _ => {}
         }
@@ -212,12 +214,12 @@ impl ResistanceRegistry {
         &mut self,
         damage_type: &str,
         component: &str,
-        multiplier: f64,
+        multiplier_bps: u32,
     ) {
         self.add_damage_type(damage_type);
         if let Some(def) = self.damage_types.get_mut(damage_type) {
-            def.component_multipliers
-                .insert(component.to_string(), clamp_multiplier(multiplier));
+            def.component_multipliers_bps
+                .insert(component.to_string(), multiplier_bps);
         }
     }
 
@@ -225,45 +227,37 @@ impl ResistanceRegistry {
         &mut self,
         damage_type: &str,
         attribute: &str,
-        multiplier: f64,
+        multiplier_bps: u32,
     ) {
         self.add_damage_type(damage_type);
         if let Some(def) = self.damage_types.get_mut(damage_type) {
-            def.attribute_multipliers
-                .insert(attribute.to_string(), clamp_multiplier(multiplier));
+            def.attribute_multipliers_bps
+                .insert(attribute.to_string(), multiplier_bps);
         }
     }
 
-    pub fn component_multiplier(&self, damage_type: &str, body: Option<&[BodyPart]>) -> f64 {
+    pub fn component_multiplier_bps(&self, damage_type: &str, body: Option<&[BodyPart]>) -> u32 {
         let Some(def) = self.damage_types.get(damage_type) else {
-            return 1.0;
+            return 10_000;
         };
         body.unwrap_or(&[])
             .iter()
-            .filter_map(|part| def.component_multipliers.get(&part.to_string()))
-            .fold(1.0, |acc, multiplier| acc * multiplier.clamp(0.0, 1.0))
+            .filter_map(|part| def.component_multipliers_bps.get(&part.to_string()))
+            .fold(10_000, |acc, multiplier| scale_bps(acc, *multiplier))
     }
 
-    pub fn attribute_multiplier(&self, damage_type: &str, attrs: Option<&Attributes>) -> f64 {
+    pub fn attribute_multiplier_bps(&self, damage_type: &str, attrs: Option<&Attributes>) -> u32 {
         let Some(attrs) = attrs else {
-            return 1.0;
+            return 10_000;
         };
         let Some(def) = self.damage_types.get(damage_type) else {
-            return 1.0;
+            return 10_000;
         };
         attrs
             .0
             .iter()
-            .filter_map(|attribute| def.attribute_multipliers.get(attribute))
-            .fold(1.0, |acc, multiplier| acc * multiplier.clamp(0.0, 1.0))
-    }
-}
-
-fn clamp_multiplier(multiplier: f64) -> f64 {
-    if multiplier.is_finite() {
-        multiplier.clamp(0.0, 1.0)
-    } else {
-        1.0
+            .filter_map(|attribute| def.attribute_multipliers_bps.get(attribute))
+            .fold(10_000, |acc, multiplier| scale_bps(acc, *multiplier))
     }
 }
 
@@ -617,7 +611,8 @@ pub struct CustomActionDef {
     pub base_damage: Option<u32>,
     pub range: u32,
     pub special_effect: Option<String>,
-    pub special_param: Option<f64>,
+    #[serde(alias = "special_param")]
+    pub special_param_micro: Option<u64>,
     pub cooldown: Option<u32>,
     pub cost: IndexMap<String, u32>,
 }
@@ -631,7 +626,7 @@ impl Default for CustomActionDef {
             base_damage: None,
             range: 1,
             special_effect: None,
-            special_param: None,
+            special_param_micro: None,
             cooldown: None,
             cost: IndexMap::new(),
         }
@@ -724,7 +719,7 @@ pub fn vanilla_action_defs() -> Vec<CustomActionDef> {
         &[("Energy", 300)],
     );
     overload.damage_type = Some("EMP".to_string());
-    overload.special_param = Some(500_000.0);
+    overload.special_param_micro = Some(500_000_000_000);
 
     let mut debilitate = custom_action_def(
         "Debilitate",
@@ -735,7 +730,7 @@ pub fn vanilla_action_defs() -> Vec<CustomActionDef> {
         &[("Energy", 200)],
     );
     debilitate.damage_type = Some("Corrosive".to_string());
-    debilitate.special_param = Some(2.0);
+    debilitate.special_param_micro = Some(2_000_000);
 
     let mut disrupt = custom_action_def(
         "Disrupt",
@@ -755,7 +750,7 @@ pub fn vanilla_action_defs() -> Vec<CustomActionDef> {
         Some(300),
         &[("Energy", 400)],
     );
-    fortify.special_param = Some(0.5);
+    fortify.special_param_micro = Some(500_000);
 
     let mut leech = custom_action_def(
         "Leech",
@@ -767,7 +762,7 @@ pub fn vanilla_action_defs() -> Vec<CustomActionDef> {
     );
     leech.damage_type = Some("Kinetic".to_string());
     leech.base_damage = Some(15);
-    leech.special_param = Some(0.5);
+    leech.special_param_micro = Some(500_000);
 
     let fabricate = custom_action_def(
         "Fabricate",
@@ -868,17 +863,11 @@ impl Default for LeechState {
 
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FabricateState {
-    pub structure_type: StructureType,
-    pub remaining_ticks: u32,
-}
-
-impl Default for FabricateState {
-    fn default() -> Self {
-        Self {
-            structure_type: StructureType::FACTORY,
-            remaining_ticks: 0,
-        }
-    }
+    pub source: bevy::prelude::Entity,
+    pub target: bevy::prelude::Entity,
+    pub resolved_structure_type: StructureType,
+    pub channel_remaining: u32,
+    pub started_at_tick: u64,
 }
 
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -922,15 +911,11 @@ pub struct LeechBuffer {
 
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FabricateBuffer {
-    pub structure_type: StructureType,
-}
-
-impl Default for FabricateBuffer {
-    fn default() -> Self {
-        Self {
-            structure_type: StructureType::FACTORY,
-        }
-    }
+    pub source: bevy::prelude::Entity,
+    pub target: bevy::prelude::Entity,
+    pub resolved_structure_type: StructureType,
+    pub channel_delta: u32,
+    pub complete: bool,
 }
 
 pub const DEFAULT_ROOM_SIZE: i32 = 50;

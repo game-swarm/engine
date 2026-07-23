@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use schemars::schema_for;
-use swarm_engine_api::ids::BodyPart;
+use swarm_engine_api::{abi::CommandIntent, ids::BodyPart};
 use ts_rs::{Config as TsConfig, TS};
 
-use crate::command::{CommandAction, CommandIntent, Direction};
+use crate::command::Direction;
 use crate::components::TerrainType;
 use crate::mcp::{
     VisibleController, VisibleDrone, VisibleEntity, VisiblePendingGlobalTransfer, VisiblePosition,
@@ -40,8 +40,6 @@ pub fn generate_typescript_contracts() -> Result<String, String> {
         Direction::export_to_string(&cfg),
         BodyPart::export_to_string(&cfg),
         TerrainType::export_to_string(&cfg),
-        CommandAction::export_to_string(&cfg),
-        CommandIntent::export_to_string(&cfg),
         VisiblePosition::export_to_string(&cfg),
         VisibleTile::export_to_string(&cfg),
         VisiblePendingGlobalTransfer::export_to_string(&cfg),
@@ -64,12 +62,45 @@ pub fn generate_typescript_contracts() -> Result<String, String> {
         }
         out.push('\n');
     }
-    out.push_str("/** @deprecated use CommandIntent; kept for one release for old bots. */\n");
-    out.push_str("export type Command = CommandIntent;\n");
+    out.push_str(shared_abi_typescript_contracts());
+    out.push('\n');
     out.push_str("export type RealtimeEnvelopeV1 = RealtimeEnvelope;\n");
     out.push_str("export type RealtimePayloadV1 = RealtimeDelta;\n");
     out.push_str("export type RealtimeVisibleEntity = VisibleEntity;\n");
     Ok(out)
+}
+
+fn shared_abi_typescript_contracts() -> &'static str {
+    r#"export type AbiDirection = "North" | "South" | "East" | "West";
+export type AbiResourceName = string;
+export type AbiStructureType = string;
+export type AbiActionPayload = { schema_hash: number[], payload: number[], };
+export type PlayerMessage = { channel: "Player" | "Debug", text: string, };
+
+export type CommandAction =
+  | { type: "Move", object_id: number, direction: AbiDirection, }
+  | { type: "Harvest", object_id: number, target_id: number, resource?: AbiResourceName, }
+  | { type: "Transfer", object_id: number, target_id: number, resource: AbiResourceName, amount: number, }
+  | { type: "Withdraw", object_id: number, target_id: number, resource: AbiResourceName, amount: number, }
+  | { type: "Action", action_type: string, object_id: number, payload: AbiActionPayload, }
+  | { type: "ClaimController", object_id: number, target_id: number, }
+  | { type: "Spawn", object_id: number, spawn_id: number, body_parts: BodyPart[], }
+  | { type: "Recycle", object_id: number, }
+  | { type: "Build", object_id: number, structure: AbiStructureType, x: number, y: number, }
+  | { type: "Repair", object_id: number, target_id: number, }
+  | { type: "UpgradeController", object_id: number, target_id: number, }
+  | { type: "TransferToGlobal", resource: AbiResourceName, amount: number, }
+  | { type: "TransferFromGlobal", resource: AbiResourceName, amount: number, }
+  | { type: "AlliedTransfer", target_player: number, resource: AbiResourceName, amount: number, };
+
+export type CommandIntent = { sequence: number, idempotency_key: string, client_trace_id?: string, action: CommandAction, };
+export type WorldConfigView = { config_hash: number[], payload: number[], };
+export type FuelBudgetHints = { fuel_remaining: number, host_calls_remaining: number, output_bytes_remaining: number, };
+export type MessageInboxCursor = { next_message_id: number, };
+export type TickInput = { tick: number, player_id: number, world_id: number, visible_snapshot: number[], world_config_view: WorldConfigView, fuel_budget_hints: FuelBudgetHints, message_inbox_cursor: MessageInboxCursor, };
+export type TickResult = { commands: CommandIntent[], messages: PlayerMessage[], };
+
+"#
 }
 
 fn write_schema(path: std::path::PathBuf, schema: &schemars::Schema) -> Result<(), String> {
@@ -87,11 +118,13 @@ fn write_if_changed(path: std::path::PathBuf, contents: &str) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::CommandAction;
     use crate::components::TerrainType;
     use crate::mcp::{VisiblePosition, VisibleTile};
     use serde_json::json;
-    use swarm_engine_plugin_sdk::components::StructureType;
+    use swarm_engine_api::{
+        abi::{ActionPayload, CommandAction, Direction},
+        ids::StructureTypeValue,
+    };
 
     #[test]
     fn exports_runtime_contract_artifacts_without_wire_dtos_or_bigint() {
@@ -105,7 +138,7 @@ mod tests {
         assert!(ts.contains("export type VisibleWorldSnapshot"));
         assert!(!ts.contains("Wire"));
         assert!(!ts.contains("bigint"));
-        assert!(!ts.contains("\"type\": \"Action\""));
+        assert!(ts.contains("type: \"Action\""));
         assert!(!dir.path().join("bindings").exists());
 
         let schema =
@@ -114,7 +147,7 @@ mod tests {
         assert!(schema.contains("Move"));
         assert!(schema.contains("AlliedTransfer"));
         assert!(!schema.contains("CommandIntentWire"));
-        assert!(!schema.contains("\"const\": \"Action\""));
+        assert!(schema.contains("\"const\": \"Action\""));
         assert!(!schema.contains("bigint"));
 
         let schema_json: serde_json::Value = serde_json::from_str(&schema).unwrap();
@@ -129,52 +162,63 @@ mod tests {
                 "{action_type} schema branch must reject unknown fields"
             );
         }
+
+        let realtime_schema =
+            std::fs::read_to_string(dir.path().join("realtime.schema.json")).unwrap();
+        let realtime_schema_json: serde_json::Value =
+            serde_json::from_str(&realtime_schema).unwrap();
+        assert_eq!(
+            realtime_schema_json["properties"]["schema"],
+            json!({"type": "string", "const": "swarm.realtime.v1"})
+        );
+        assert_eq!(realtime_schema_json["additionalProperties"], json!(false));
     }
 
     #[test]
     fn runtime_command_json_samples_match_exported_core_contract_shape() {
         let move_command = CommandIntent {
             sequence: 1,
+            idempotency_key: "move-1".to_string(),
+            client_trace_id: None,
             action: CommandAction::Move {
                 object_id: 42,
-                direction: Direction::TopRight,
+                direction: Direction::North,
             },
         };
         assert_eq!(
             serde_json::to_value(move_command).unwrap(),
-            json!({"sequence": 1, "action": {"type": "Move", "object_id": 42, "direction": "TopRight"}})
+            json!({"sequence": 1, "idempotency_key": "move-1", "action": {"type": "Move", "object_id": 42, "direction": "North"}})
         );
 
         let build_command = CommandIntent {
             sequence: 2,
+            idempotency_key: "build-2".to_string(),
+            client_trace_id: Some("trace-2".to_string()),
             action: CommandAction::Build {
                 object_id: 7,
                 x: 3,
                 y: 4,
-                structure: StructureType::EXTENSION,
+                structure: StructureTypeValue::new("Extension"),
             },
         };
         assert_eq!(
             serde_json::to_value(build_command).unwrap(),
-            json!({"sequence": 2, "action": {"type": "Build", "object_id": 7, "x": 3, "y": 4, "structure": "Extension"}})
+            json!({"sequence": 2, "idempotency_key": "build-2", "client_trace_id": "trace-2", "action": {"type": "Build", "object_id": 7, "structure": "Extension", "x": 3, "y": 4}})
         );
 
         let special = CommandIntent {
             sequence: 3,
-            action: CommandAction::Attack {
+            idempotency_key: "action-3".to_string(),
+            client_trace_id: None,
+            action: CommandAction::Action {
+                action_type: "Attack".to_string(),
                 object_id: 7,
-                target_id: 9,
-                resource: None,
-                amount: None,
-                range: None,
-                structure: None,
-                damage_type: None,
-                cooldown: None,
+                payload: ActionPayload::empty(),
             },
         };
         assert_eq!(
             serde_json::to_value(special).unwrap(),
-            json!({"sequence": 3, "action": {"type": "Attack", "object_id": 7, "target_id": 9}})
+            json!({"sequence": 3, "idempotency_key": "action-3", "action": {"type": "Action", "action_type": "Attack", "object_id": 7, "payload": {"schema_hash": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "payload": []}}})
         );
     }
 
