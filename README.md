@@ -14,6 +14,18 @@ swarm/
     └── ...
 ```
 
+Use `cargo xtask mods update <name>` from `engine/` to refresh a selected mod checkout.
+
+- `cargo xtask mods update <name>...` updates only named mods.
+- `cargo xtask mods update --all` updates every Git-backed mod.
+- `--dry-run` reports work without writing files.
+- `--check` exits nonzero when any selected mod is stale.
+- There is no implicit `--all`; omitting names without `--all` is rejected.
+- By default, each remote default-branch `HEAD` is resolved to an immutable SHA before apply.
+- Apply updates `mods.toml`, selected sibling checkouts, and refreshes root `Cargo.lock` only when dependency resolution requires it, runs locked identity/check gates, and rolls back on failure.
+- `--all` skips path-backed entries, and explicit path selection errors.
+- Runtime `mods.lock` and signed package installation are not touched.
+
 A normal engine checkout fetches every configured mod. Cargo fetches API/SDK dependencies itself:
 
 ```bash
