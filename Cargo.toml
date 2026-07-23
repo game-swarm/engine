@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "xtask"]
 resolver = "2"
 
 [patch."https://github.com/game-swarm/engine.git"]
