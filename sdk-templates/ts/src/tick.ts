@@ -22,12 +22,12 @@ export interface TickHandler {
   (snapshot: WorldSnapshot): CommandIntent[] | Promise<CommandIntent[]>;
 }
 
-export async function runTick(handler: TickHandler, snapshot: WorldSnapshot): Promise<string> {
+export async function runTick(handler: TickHandler, snapshot: WorldSnapshot): Promise<Uint8Array> {
   const commands = await handler(snapshot);
   return serializeTickOutput(commands);
 }
 
-export function parseCommandsFromTickOutput(output: string | Uint8Array): ValidationResult<CommandIntent[]> {
+export function parseCommandsFromTickOutput(output: Uint8Array): ValidationResult<CommandIntent[]> {
   return parseTickOutput(output);
 }
 

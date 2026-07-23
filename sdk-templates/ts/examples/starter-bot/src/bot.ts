@@ -27,7 +27,7 @@ export function tick(snapshot: WorldSnapshot): CommandIntent[] {
 
   const spawnEnergy = spawn.store?.[ENERGY] ?? snapshot.resources[ENERGY] ?? 0;
   if (spawnEnergy >= (WORKER_COST[ENERGY] ?? 100) && !spawn.cooldown && workers[0]) {
-    commands.push(command(sequence++, actions.spawn(workers[0].id, spawn.id, [...WORKER_BODY])));
+    commands.push(command(sequence, `starter-${snapshot.tick}-${sequence++}`, actions.spawn(workers[0].id, spawn.id, [...WORKER_BODY])));
   }
 
   for (const drone of workers) {
@@ -37,16 +37,16 @@ export function tick(snapshot: WorldSnapshot): CommandIntent[] {
     if (carriedEnergy >= Math.min(100, drone.carry_capacity ?? 100)) {
       commands.push(
         isNear(drone, spawn)
-          ? command(sequence++, actions.transfer(drone.id, spawn.id, ENERGY, carriedEnergy))
-          : command(sequence++, actions.move(drone.id, directionToward(drone, spawn)))
+          ? command(sequence, `starter-${snapshot.tick}-${sequence++}`, actions.transfer(drone.id, spawn.id, ENERGY, carriedEnergy))
+          : command(sequence, `starter-${snapshot.tick}-${sequence++}`, actions.move(drone.id, directionToward(drone, spawn)))
       );
       continue;
     }
 
     commands.push(
       isNear(drone, source)
-        ? command(sequence++, { type: "Harvest", object_id: drone.id, target_id: source.id, resource: ENERGY } satisfies HarvestAction)
-        : command(sequence++, actions.move(drone.id, directionToward(drone, source)))
+        ? command(sequence, `starter-${snapshot.tick}-${sequence++}`, { type: "Harvest", object_id: drone.id, target_id: source.id, resource: ENERGY } satisfies HarvestAction)
+        : command(sequence, `starter-${snapshot.tick}-${sequence++}`, actions.move(drone.id, directionToward(drone, source)))
     );
   }
 
@@ -85,12 +85,8 @@ function isNear(a: WorldEntity, b: WorldEntity): boolean {
 }
 
 function directionToward(a: WorldEntity, b: WorldEntity): Direction {
-  const dx = Math.sign(b.position.x - a.position.x);
-  const dy = Math.sign(b.position.y - a.position.y);
-  if (dx > 0 && dy <= 0) return "TopRight";
-  if (dx > 0) return "BottomRight";
-  if (dx < 0 && dy >= 0) return "BottomLeft";
-  if (dx < 0) return "TopLeft";
-  if (dy > 0) return "Bottom";
-  return "Top";
+  const dx = b.position.x - a.position.x;
+  const dy = b.position.y - a.position.y;
+  if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? "East" : "West";
+  return dy > 0 ? "South" : "North";
 }

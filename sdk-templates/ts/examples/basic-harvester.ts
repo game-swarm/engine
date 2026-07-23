@@ -11,7 +11,7 @@ import {
 } from "@swarm/sdk-ts";
 
 const ENERGY = "Energy";
-const DIRECTIONS: Direction[] = ["Top", "TopRight", "BottomRight", "Bottom", "BottomLeft", "TopLeft"];
+const DIRECTIONS: Direction[] = ["North", "South", "East", "West"];
 
 export function tick(snapshot: WorldSnapshot): CommandIntent[] {
   const sources = snapshot.entities.filter((entity) => entity.type === "source");
@@ -35,12 +35,12 @@ export function tick(snapshot: WorldSnapshot): CommandIntent[] {
 
     if (capacity > 0 && carried >= capacity) {
       const store = nearest(drone, stores);
-      commands.push(store ? command(sequence++, actions.transfer(drone.id, store.id, ENERGY, carried)) : randomMove(sequence++, drone));
+      commands.push(store ? command(sequence, `harvester-${snapshot.tick}-${sequence++}`, actions.transfer(drone.id, store.id, ENERGY, carried)) : randomMove(snapshot.tick, sequence++, drone));
       continue;
     }
 
     const source = nearest(drone, sources);
-    commands.push(source ? command(sequence++, { type: "Harvest", object_id: drone.id, target_id: source.id, resource: ENERGY } satisfies HarvestAction) : randomMove(sequence++, drone));
+    commands.push(source ? command(sequence, `harvester-${snapshot.tick}-${sequence++}`, { type: "Harvest", object_id: drone.id, target_id: source.id, resource: ENERGY } satisfies HarvestAction) : randomMove(snapshot.tick, sequence++, drone));
   }
 
   return commands;
@@ -62,7 +62,7 @@ function nearest<T extends WorldEntity>(from: WorldEntity, entities: T[]): T | u
   return best;
 }
 
-function randomMove(sequence: number, drone: DroneEntity): CommandIntent {
-  const direction = DIRECTIONS[Math.floor(Math.random() * DIRECTIONS.length)] ?? "Top";
-  return command(sequence, actions.move(drone.id, direction));
+function randomMove(tick: number | bigint, sequence: number, drone: DroneEntity): CommandIntent {
+  const direction = DIRECTIONS[Math.floor(Math.random() * DIRECTIONS.length)] ?? "North";
+  return command(sequence, `harvester-${tick}-${sequence}`, actions.move(drone.id, direction));
 }

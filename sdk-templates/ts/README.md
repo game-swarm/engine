@@ -26,7 +26,7 @@ const tick: TickHandler = (snapshot) => {
   if (!spawn || !actor) return [];
 
   return [
-    command(0, actions.spawn(actor.id, spawn.id, ["Move", "Work", "Carry"]))
+    command(0, `bot-${snapshot.tick}-0`, actions.spawn(actor.id, spawn.id, ["Move", "Work", "Carry"]))
   ];
 };
 
@@ -38,6 +38,7 @@ const commandJson = await runTick(tick, snapshot);
 WASM `tick()` output is `CommandIntent[]`. Each intent contains only:
 
 - `sequence`: per-tick monotonic `u32` chosen by player code
+- `idempotency_key`: a non-empty key unique to the intended command
 - `action`: one IDL action such as `Move`, `Harvest`, `Spawn`, `Attack`, `Fortify`
 
 Fields such as `player_id`, `tick`, `source`, and `auth` are server-injected and rejected if present in untrusted tick output.
@@ -46,8 +47,8 @@ Fields such as `player_id`, `tick`, `source`, and `auth` are server-injected and
 import { actions, command, serializeTickOutput } from "@swarm/sdk-ts";
 
 const output = serializeTickOutput([
-  command(0, actions.move(1001, "TopRight")),
-  command(1, actions.harvest(1001, 4001, "Energy"))
+command(0, "tick-42-move", actions.move(1001, "East")),
+  command(1, "tick-42-harvest", actions.harvest(1001, 4001, "Energy"))
 ]);
 ```
 

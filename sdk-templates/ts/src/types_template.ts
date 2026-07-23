@@ -2,7 +2,7 @@
 // The generated types (Direction, BodyPart, Action, CommandIntent, etc.)
 // are in commands.ts which is produced by swarm-engine's IDL codegen.
 
-import type { Action, BodyPart, CommandIntent, Direction, ResourceAmount, ResourceCost, ResourceName, StructureType } from "./commands.js";
+import type { Action, BodyPart, CommandIntent, ResourceCost, ResourceName, StructureType } from "./commands.js";
 
 type UInt32 = number;
 type UInt64 = number | bigint;
@@ -100,10 +100,6 @@ export interface WorldSnapshot {
   controller?: JsonObject;
   leaderboard_snapshot?: LeaderboardSnapshot;
   world_rules?: WorldConfig;
-}
-
-export interface TickResult {
-  commands: CommandIntent[];
 }
 
 export interface TickMetrics {

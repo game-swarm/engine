@@ -1,176 +1,38 @@
-const ENERGY = "Energy";
-let output = "[]";
+const ABI_VERSION: u32 = 2;
+const GAME_API_SCHEMA_VERSION: u32 = 4;
+const CODEC_VERSION: u32 = 1;
+const TICK_INPUT_TAG: u32 = 1;
+const TICK_RESULT_TAG: u32 = 2;
+const HEADER_LEN: i32 = 20;
+const EMPTY_TICK_RESULT_LEN: i32 = 28;
 
 export function alloc(len: i32): i32 {
   return changetype<i32>(heap.alloc(len));
 }
 
-export function free(ptr: i32): void {
+export function free(ptr: i32, _len: i32): void {
   heap.free(changetype<usize>(ptr));
 }
 
-export function result_len(): i32 {
-  return String.UTF8.byteLength(output);
+export function tick(input_ptr: i32, input_len: i32, output_ptr: i32, output_len: i32): i32 {
+  if (!validTickInputHeader(input_ptr, input_len)) return -1;
+  if (output_len < EMPTY_TICK_RESULT_LEN) return -2;
+
+  store<u32>(output_ptr, ABI_VERSION);
+  store<u32>(output_ptr + 4, GAME_API_SCHEMA_VERSION);
+  store<u32>(output_ptr + 8, CODEC_VERSION);
+  store<u32>(output_ptr + 12, TICK_RESULT_TAG);
+  store<u32>(output_ptr + 16, 8);
+  store<u32>(output_ptr + 20, 0); // commands
+  store<u32>(output_ptr + 24, 0); // messages
+  return EMPTY_TICK_RESULT_LEN;
 }
 
-export function tick(snapshot_ptr: i32, snapshot_len: i32): i32 {
-  const snapshot = String.UTF8.decodeUnsafe(snapshot_ptr, snapshot_len);
-  output = buildCommands(snapshot);
-  const bytes = String.UTF8.encode(output, false);
-  const len = bytes.byteLength;
-  const ptr = heap.alloc(len);
-  memory.copy(changetype<usize>(ptr), changetype<usize>(bytes), len);
-  return changetype<i32>(ptr);
-}
-
-function buildCommands(snapshot: string): string {
-  const playerId = numberField(snapshot, "player_id");
-  const spawn = findOwnedEntity(snapshot, playerId, "structure", "Spawn");
-  const spawnActor = findOwnedDrone(snapshot, playerId);
-  const source = findEntity(snapshot, "source");
-  if (spawn.length == 0 || source.length == 0) return "[]";
-
-  const commands = new Array<string>();
-  let sequence = 0;
-  const spawnEnergy = storeEnergy(spawn);
-  const spawnCooldown = numberField(spawn, "cooldown");
-  if (spawnEnergy >= 100 && spawnCooldown == 0 && spawnActor.length > 0) {
-    commands.push('{"sequence":' + sequence.toString() + ',"action":{"type":"Spawn","object_id":' + idField(spawnActor).toString() + ',"spawn_id":' + idField(spawn).toString() + ',"body_parts":["Work"]}}');
-    sequence += 1;
-  }
-
-  let cursor = 0;
-  while (true) {
-    const droneStart = snapshot.indexOf('{"id":', cursor);
-    if (droneStart < 0) break;
-    const entity = objectAt(snapshot, droneStart);
-    cursor = droneStart + entity.length;
-    if (entity.indexOf('"type":"drone"') < 0 || numberField(entity, "owner") != playerId || entity.indexOf('"Work"') < 0) continue;
-    if (numberField(entity, "spawning") > 0 || numberField(entity, "fatigue") > 0) continue;
-
-    const carried = carryEnergy(entity);
-    if (carried >= 100) {
-      commands.push(actionForTarget(sequence, entity, spawn, true, carried));
-    } else {
-      commands.push(actionForTarget(sequence, entity, source, false, 0));
-    }
-    sequence += 1;
-  }
-
-  return "[" + commands.join(",") + "]";
-}
-
-function actionForTarget(sequence: i32, actor: string, target: string, transfer: bool, amount: i32): string {
-  const actorId = idField(actor);
-  const targetId = idField(target);
-  if (!isNear(actor, target)) {
-    return '{"sequence":' + sequence.toString() + ',"action":{"type":"Move","object_id":' + actorId.toString() + ',"direction":"' + directionToward(actor, target) + '"}}';
-  }
-  if (transfer) {
-    return '{"sequence":' + sequence.toString() + ',"action":{"type":"Transfer","object_id":' + actorId.toString() + ',"target_id":' + targetId.toString() + ',"resource":"' + ENERGY + '","amount":' + amount.toString() + "}}";
-  }
-  return '{"sequence":' + sequence.toString() + ',"action":{"type":"Harvest","object_id":' + actorId.toString() + ',"target_id":' + targetId.toString() + ',"resource":"' + ENERGY + '"}}';
-}
-
-function findOwnedEntity(snapshot: string, owner: i32, typeName: string, structureType: string): string {
-  let cursor = 0;
-  while (true) {
-    const start = snapshot.indexOf('{"id":', cursor);
-    if (start < 0) return "";
-    const entity = objectAt(snapshot, start);
-    cursor = start + entity.length;
-    if (entity.indexOf('"type":"' + typeName + '"') >= 0 && entity.indexOf('"structure_type":"' + structureType + '"') >= 0 && numberField(entity, "owner") == owner) {
-      return entity;
-    }
-  }
-}
-
-function findEntity(snapshot: string, typeName: string): string {
-  let cursor = 0;
-  while (true) {
-    const start = snapshot.indexOf('{"id":', cursor);
-    if (start < 0) return "";
-    const entity = objectAt(snapshot, start);
-    cursor = start + entity.length;
-    if (entity.indexOf('"type":"' + typeName + '"') >= 0) return entity;
-  }
-}
-
-function findOwnedDrone(snapshot: string, owner: i32): string {
-  let cursor = 0;
-  while (true) {
-    const start = snapshot.indexOf('{"id":', cursor);
-    if (start < 0) return "";
-    const entity = objectAt(snapshot, start);
-    cursor = start + entity.length;
-    if (entity.indexOf('"type":"drone"') >= 0 && numberField(entity, "owner") == owner) {
-      return entity;
-    }
-  }
-}
-
-function objectAt(text: string, start: i32): string {
-  let depth = 0;
-  for (let i = start; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    if (c == 123) depth += 1;
-    if (c == 125) {
-      depth -= 1;
-      if (depth == 0) return text.substring(start, i + 1);
-    }
-  }
-  return "";
-}
-
-function idField(text: string): i32 {
-  return numberField(text, "id");
-}
-
-function storeEnergy(text: string): i32 {
-  const storeStart = text.indexOf('"store":');
-  if (storeStart < 0) return 0;
-  return numberField(text.substring(storeStart), ENERGY);
-}
-
-function carryEnergy(text: string): i32 {
-  const carryStart = text.indexOf('"carry":');
-  if (carryStart < 0) return 0;
-  return numberField(text.substring(carryStart), ENERGY);
-}
-
-function numberField(text: string, field: string): i32 {
-  const key = '"' + field + '":';
-  const start = text.indexOf(key);
-  if (start < 0) return 0;
-  let i = start + key.length;
-  while (i < text.length && text.charCodeAt(i) == 32) i += 1;
-  let value = 0;
-  while (i < text.length) {
-    const c = text.charCodeAt(i);
-    if (c < 48 || c > 57) break;
-    value = value * 10 + (c - 48);
-    i += 1;
-  }
-  return value;
-}
-
-function isNear(a: string, b: string): bool {
-  const ax = numberField(a, "x");
-  const ay = numberField(a, "y");
-  const bx = numberField(b, "x");
-  const by = numberField(b, "y");
-  const dx = ax > bx ? ax - bx : bx - ax;
-  const dy = ay > by ? ay - by : by - ay;
-  return dx <= 1 && dy <= 1;
-}
-
-function directionToward(a: string, b: string): string {
-  const dx = numberField(b, "x") - numberField(a, "x");
-  const dy = numberField(b, "y") - numberField(a, "y");
-  if (dx > 0 && dy <= 0) return "TopRight";
-  if (dx > 0) return "BottomRight";
-  if (dx < 0 && dy >= 0) return "BottomLeft";
-  if (dx < 0) return "TopLeft";
-  if (dy > 0) return "Bottom";
-  return "Top";
+function validTickInputHeader(input_ptr: i32, input_len: i32): bool {
+  if (input_len < HEADER_LEN) return false;
+  return load<u32>(input_ptr) == ABI_VERSION
+    && load<u32>(input_ptr + 4) == GAME_API_SCHEMA_VERSION
+    && load<u32>(input_ptr + 8) == CODEC_VERSION
+    && load<u32>(input_ptr + 12) == TICK_INPUT_TAG
+    && load<u32>(input_ptr + 16) == <u32>(input_len - HEADER_LEN);
 }

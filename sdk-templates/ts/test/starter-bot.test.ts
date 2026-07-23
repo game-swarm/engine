@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseCommandsFromTickOutput, serializeTickOutput, type WorldSnapshot } from "../src/index.js";
+import { parseCommandsFromTickOutput, serializeTickOutput, type WorldSnapshot } from "../dist/index.js";
 import { hasEnoughEnergyForWorker, tick } from "../examples/starter-bot/src/bot.js";
 
 const baseSnapshot: WorldSnapshot = {
@@ -47,7 +47,7 @@ describe("starter bot", () => {
     };
     const commands = tick(snapshot);
     expect(hasEnoughEnergyForWorker(baseSnapshot)).toBe(true);
-    expect(commands[0]).toEqual({ sequence: 0, action: { type: "Spawn", object_id: 150, spawn_id: 100, body_parts: ["Work"] } });
+    expect(commands[0]).toEqual({ sequence: 0, idempotency_key: "starter-1-0", action: { type: "Spawn", object_id: 150, spawn_id: 100, body_parts: ["Work"] } });
   });
 
   it("harvests, returns, and serializes valid SDK command output", () => {

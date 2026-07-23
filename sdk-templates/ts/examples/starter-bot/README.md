@@ -47,11 +47,11 @@ The AssemblyScript file is a standalone WASM smoke-test entrypoint that mirrors 
 ```text
 alloc(len) -> ptr
 free(ptr)
-tick(snapshot_ptr, snapshot_len) -> result_ptr
+tick(input_ptr, input_len, output_ptr, output_len) -> bytes_written
 result_len() -> len
 ```
 
-The generated SDK and `assembly/tick.ts` use the current Engine ABI. The deploy CLI appends the signed target-manifest section required by Engine validation before upload.
+The generated SDK and `assembly/tick.ts` use ABI v2 Swarm codec bytes for both `TickInput` and `TickResult`. The deploy CLI appends the signed target-manifest section required by Engine validation before upload.
 
 ## 4. Deploy
 
@@ -72,7 +72,7 @@ Create an owner-only deploy auth file containing the certificate bundle, its 32-
   "room_id": 0,
   "drone_id": 1,
   "target_manifest_hash": "blake3:<manifest hash>",
-  "engine_abi_version": 1,
+  "engine_abi_version": 2,
   "language": "typescript"
 }
 ```
