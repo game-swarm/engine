@@ -11,6 +11,8 @@ use crate::components::{RoomTerrains, Source};
 use crate::resources::CurrentTick;
 use crate::world::WorldConfig;
 
+pub const EVENT_PROBABILITY_SCALE: u32 = 10_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WorldEventKind {
     SwarmInvasion,
@@ -30,10 +32,10 @@ impl WorldEventKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EventRuleConfig {
-    pub probability: f64,
+    pub probability_per_10_000: u32,
     pub interval: Tick,
     pub event_cooldown: Tick,
     pub duration: Tick,
@@ -42,7 +44,7 @@ pub struct EventRuleConfig {
 impl Default for EventRuleConfig {
     fn default() -> Self {
         Self {
-            probability: 0.0,
+            probability_per_10_000: 0,
             interval: 1,
             event_cooldown: 0,
             duration: 0,
@@ -70,25 +72,25 @@ impl Default for EventConfig {
         Self {
             enabled: false,
             swarm_invasion: EventRuleConfig {
-                probability: 0.10,
+                probability_per_10_000: 1_000,
                 interval: 1_000,
                 event_cooldown: 1_000,
                 duration: 200,
             },
             resource_boom: EventRuleConfig {
-                probability: 0.15,
+                probability_per_10_000: 1_500,
                 interval: 500,
                 event_cooldown: 500,
                 duration: 100,
             },
             ruin_awakening: EventRuleConfig {
-                probability: 1.0,
+                probability_per_10_000: EVENT_PROBABILITY_SCALE,
                 interval: 1,
                 event_cooldown: 0,
                 duration: 0,
             },
             merchant_arrival: EventRuleConfig {
-                probability: 1.0,
+                probability_per_10_000: EVENT_PROBABILITY_SCALE,
                 interval: 2_000,
                 event_cooldown: 2_000,
                 duration: 100,
@@ -197,16 +199,18 @@ pub fn deterministic_event_triggers(
     world_seed: u64,
     tick: Tick,
     kind: WorldEventKind,
-    probability: f64,
+    probability_per_10_000: u32,
 ) -> bool {
-    if probability <= 0.0 || !probability.is_finite() {
+    if probability_per_10_000 == 0 {
         return false;
     }
-    if probability >= 1.0 {
+    if probability_per_10_000 >= EVENT_PROBABILITY_SCALE {
         return true;
     }
-    let threshold = (probability.clamp(0.0, 1.0) * 256.0).floor() as u8;
-    deterministic_event_seed(world_seed, tick, kind)[0] < threshold
+    let seed = deterministic_event_seed(world_seed, tick, kind);
+    let roll = u32::from_le_bytes(seed[..4].try_into().expect("four-byte event seed"))
+        % EVENT_PROBABILITY_SCALE;
+    roll < probability_per_10_000
 }
 
 pub fn world_event_system(
@@ -249,7 +253,7 @@ pub fn world_event_system(
                 world_seed,
                 tick,
                 WorldEventKind::RuinAwakening,
-                rule.probability,
+                rule.probability_per_10_000,
             )
         {
             state.trigger(
@@ -278,7 +282,7 @@ fn maybe_trigger_random_event(
     if !state.can_trigger(kind, tick, rule) {
         return;
     }
-    if deterministic_event_triggers(world_seed, tick, kind, rule.probability) {
+    if deterministic_event_triggers(world_seed, tick, kind, rule.probability_per_10_000) {
         state.trigger(kind, tick, rule.duration, origin);
     }
 }
@@ -523,7 +527,7 @@ mod tests {
 
     fn always(duration: Tick) -> EventRuleConfig {
         EventRuleConfig {
-            probability: 1.0,
+            probability_per_10_000: EVENT_PROBABILITY_SCALE,
             interval: 1,
             event_cooldown: 0,
             duration,
@@ -547,13 +551,13 @@ mod tests {
             1,
             1,
             WorldEventKind::SwarmInvasion,
-            1.0
+            EVENT_PROBABILITY_SCALE
         ));
         assert!(!deterministic_event_triggers(
             1,
             1,
             WorldEventKind::SwarmInvasion,
-            0.0
+            0
         ));
         assert_eq!(
             deterministic_event_seed(42, 1_000, WorldEventKind::ResourceBoom),
@@ -572,8 +576,8 @@ mod tests {
             resource_boom: always(1),
             ..Default::default()
         };
-        events.swarm_invasion.probability = 0.0;
-        events.merchant_arrival.probability = 0.0;
+        events.swarm_invasion.probability_per_10_000 = 0;
+        events.merchant_arrival.probability_per_10_000 = 0;
         let mut world =
             create_world_with_mode_and_config(WorldMode::Default, config_with_events(events));
 
@@ -609,15 +613,15 @@ mod tests {
         let mut events = EventConfig {
             enabled: true,
             swarm_invasion: EventRuleConfig {
-                probability: 1.0,
+                probability_per_10_000: EVENT_PROBABILITY_SCALE,
                 interval: 1,
                 event_cooldown: 3,
                 duration: 10,
             },
             ..Default::default()
         };
-        events.resource_boom.probability = 0.0;
-        events.merchant_arrival.probability = 0.0;
+        events.resource_boom.probability_per_10_000 = 0;
+        events.merchant_arrival.probability_per_10_000 = 0;
         let mut world =
             create_world_with_mode_and_config(WorldMode::Default, config_with_events(events));
 
