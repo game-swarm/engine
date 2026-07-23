@@ -2,11 +2,18 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::abi::{
+    SnapshotActorContext as AbiSnapshotActorContext, SnapshotEntity as AbiSnapshotEntity,
+    SnapshotMessage as AbiSnapshotMessage, SnapshotOmittedBucket as AbiSnapshotOmittedBucket,
+    SnapshotOmittedCategories as AbiSnapshotOmittedCategories,
+    SnapshotPosition as AbiSnapshotPosition, SnapshotTerrain as AbiSnapshotTerrain,
+    SnapshotTerrainTile as AbiSnapshotTerrainTile, VisibleSnapshot,
+};
 use swarm_engine_api::ids::{BodyPart, PlayerId};
 use swarm_engine_plugin_sdk::components::{Controller, Drone, Owner, Position, Structure};
 
 use crate::command::{Tick, object_id};
-use crate::components::Source;
+use crate::components::{RoomTerrains, Source, TerrainType};
 use crate::visibility::{VisibilitySet, is_visible_to, visible_positions};
 use crate::world::{SwarmWorld, create_world};
 
@@ -34,18 +41,18 @@ pub enum DistanceBucket {
 }
 
 impl DistanceBucket {
-    pub fn from_distance(distance: f64) -> Self {
-        if distance == 0.0 {
+    pub fn from_distance(distance: u64) -> Self {
+        if distance == 0 {
             Self::Self_
-        } else if distance <= 1.0 {
+        } else if distance <= 1 {
             Self::Adjacent
-        } else if distance <= 4.0 {
+        } else if distance <= 4 {
             Self::Close
-        } else if distance <= 8.0 {
+        } else if distance <= 8 {
             Self::Medium
-        } else if distance <= 16.0 {
+        } else if distance <= 16 {
             Self::Far
-        } else if distance <= 32.0 {
+        } else if distance <= 32 {
             Self::VeryFar
         } else {
             Self::OutOfSight
@@ -76,12 +83,22 @@ impl OmittedBucket {
     }
 }
 
+impl Default for OmittedBucket {
+    fn default() -> Self {
+        Self::Zero
+    }
+}
+
 /// Bucketed omitted categories in a truncated snapshot (§1.2)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OmittedCategories {
     pub entities: OmittedBucket,
     pub resources: OmittedBucket,
     pub events: OmittedBucket,
+    #[serde(default)]
+    pub terrain: OmittedBucket,
+    #[serde(default)]
+    pub messages: OmittedBucket,
 }
 
 impl OmittedCategories {
@@ -90,8 +107,26 @@ impl OmittedCategories {
             entities: OmittedBucket::Zero,
             resources: OmittedBucket::Zero,
             events: OmittedBucket::Zero,
+            terrain: OmittedBucket::Zero,
+            messages: OmittedBucket::Zero,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotTerrainTile {
+    pub room_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub terrain: TerrainType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotMessage {
+    pub message_id: u64,
+    pub sender_id: String,
+    pub recipient_id: String,
+    pub payload: Vec<u8>,
 }
 
 /// Lightweight entity representation for snapshots
@@ -140,16 +175,22 @@ pub struct PerDroneSnapshot {
     #[serde(default)]
     pub degraded: bool,
     pub omitted_categories: OmittedCategories,
+    #[serde(default)]
+    pub terrain: Vec<SnapshotTerrainTile>,
     pub entities: Vec<SnapshotEntity>,
     pub resources: Vec<SnapshotEntity>,
     #[serde(default)]
     pub events: Vec<SnapshotEntity>,
+    #[serde(default)]
+    pub messages: Vec<SnapshotMessage>,
+    #[serde(default)]
+    pub omitted_messages: OmittedBucket,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotActorContext {
     pub active_drones: Vec<String>,
-    pub primary_drone: String,
+    pub primary_drone: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,10 +204,16 @@ pub struct PerPlayerSnapshot {
     #[serde(default)]
     pub over_budget: bool,
     pub omitted_categories: OmittedCategories,
+    #[serde(default)]
+    pub terrain: Vec<SnapshotTerrainTile>,
     pub entities: Vec<SnapshotEntity>,
     pub resources: Vec<SnapshotEntity>,
     #[serde(default)]
     pub events: Vec<SnapshotEntity>,
+    #[serde(default)]
+    pub messages: Vec<SnapshotMessage>,
+    #[serde(default)]
+    pub omitted_messages: OmittedBucket,
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -196,11 +243,11 @@ pub fn fog_of_war_filter(
 }
 
 /// Compute hex distance between two positions
-fn hex_distance(a: &Position, b: &Position) -> f64 {
-    let dx = (a.x - b.x).unsigned_abs() as f64;
-    let dy = (a.y - b.y).unsigned_abs() as f64;
-    let dz = ((a.x + a.y) - (b.x + b.y)).unsigned_abs() as f64;
-    (dx + dy + dz) / 2.0
+fn hex_distance(a: &Position, b: &Position) -> u64 {
+    let dx = a.x as i64 - b.x as i64;
+    let dy = a.y as i64 - b.y as i64;
+    let dz = dx + dy;
+    (dx.unsigned_abs() + dy.unsigned_abs() + dz.unsigned_abs()) / 2
 }
 
 /// Classify an entity into a SnapshotEntity
@@ -312,7 +359,20 @@ pub fn build_snapshot(
     // Serialize and truncate if needed
     let drone_eid = object_id(drone_entity).to_string();
     let serialize_to_size = |entities: &[SnapshotEntity]| -> usize {
-        serde_json::to_string(entities).unwrap_or_default().len()
+        encode_drone_snapshot_v2(&PerDroneSnapshot {
+            tick,
+            drone_entity_id: drone_eid.clone(),
+            truncated: false,
+            degraded: false,
+            omitted_categories: OmittedCategories::all_zero(),
+            terrain: Vec::new(),
+            entities: entities.to_vec(),
+            resources: Vec::new(),
+            events: Vec::new(),
+            messages: Vec::new(),
+            omitted_messages: OmittedBucket::Zero,
+        })
+        .len()
     };
 
     let mut kept_entities: Vec<SnapshotEntity> = critical.iter().map(|(_, e)| e.clone()).collect();
@@ -348,10 +408,15 @@ pub fn build_snapshot(
             entities: OmittedBucket::from_count(omitted_count),
             resources: OmittedBucket::Zero, // resources tracked separately in ledger
             events: OmittedBucket::Zero,    // events not yet in snapshot scope
+            terrain: OmittedBucket::Zero,
+            messages: OmittedBucket::Zero,
         },
+        terrain: Vec::new(),
         entities: kept_entities,
         resources: Vec::new(),
         events: Vec::new(),
+        messages: Vec::new(),
+        omitted_messages: OmittedBucket::Zero,
     }
 }
 
@@ -398,16 +463,12 @@ pub fn build_player_snapshot(
         .collect::<Vec<_>>();
     owned_drones.sort_by_key(|entity| object_id(*entity));
 
-    if owned_drones.is_empty() {
-        return None;
-    }
-
     let active_drones = owned_drones
         .iter()
         .map(|entity| object_id(*entity).to_string())
         .collect::<Vec<_>>();
     let actor_context = SnapshotActorContext {
-        primary_drone: active_drones[0].clone(),
+        primary_drone: active_drones.first().cloned(),
         active_drones,
     };
     let drone_positions = owned_drones
@@ -422,6 +483,7 @@ pub fn build_player_snapshot(
     let visible = config
         .fog_of_war
         .then(|| visible_positions(world, player_id));
+    let terrain = snapshot_terrain(world, visible.as_ref());
 
     let mut sortable_entities: Vec<(SortKey, SnapshotEntity)> = Vec::new();
     for &entity in &all_entities {
@@ -460,7 +522,7 @@ pub fn build_player_snapshot(
         });
 
     let size_of = |entities: &[SnapshotEntity], omitted_count: usize, over_budget: bool| -> usize {
-        serde_json::to_vec(&PerPlayerSnapshot {
+        encode_player_snapshot_v2(&PerPlayerSnapshot {
             tick,
             player_id,
             actor_context: actor_context.clone(),
@@ -471,12 +533,16 @@ pub fn build_player_snapshot(
                 entities: OmittedBucket::from_count(omitted_count),
                 resources: OmittedBucket::Zero,
                 events: OmittedBucket::Zero,
+                terrain: OmittedBucket::Zero,
+                messages: OmittedBucket::Zero,
             },
+            terrain: terrain.clone(),
             entities: entities.to_vec(),
             resources: Vec::new(),
             events: Vec::new(),
+            messages: Vec::new(),
+            omitted_messages: OmittedBucket::Zero,
         })
-        .unwrap_or_default()
         .len()
     };
 
@@ -523,11 +589,40 @@ pub fn build_player_snapshot(
             entities: OmittedBucket::from_count(omitted_count),
             resources: OmittedBucket::Zero,
             events: OmittedBucket::Zero,
+            terrain: OmittedBucket::Zero,
+            messages: OmittedBucket::Zero,
         },
+        terrain,
         entities: kept_entities,
         resources: Vec::new(),
         events: Vec::new(),
+        messages: Vec::new(),
+        omitted_messages: OmittedBucket::Zero,
     })
+}
+
+fn snapshot_terrain(world: &World, visible: Option<&VisibilitySet>) -> Vec<SnapshotTerrainTile> {
+    let Some(terrains) = world.get_resource::<RoomTerrains>() else {
+        return Vec::new();
+    };
+    let mut tiles = terrains
+        .0
+        .iter()
+        .flat_map(|(room_id, room)| {
+            room.iter().filter_map(move |(x, y, terrain)| {
+                visible
+                    .is_none_or(|visible| visible.contains(&(*room_id, x, y)))
+                    .then_some(SnapshotTerrainTile {
+                        room_id: room_id.0,
+                        x,
+                        y,
+                        terrain,
+                    })
+            })
+        })
+        .collect::<Vec<_>>();
+    tiles.sort_by_key(|tile| (tile.room_id, tile.y, tile.x));
+    tiles
 }
 
 fn is_visible_with_precomputed_positions(
@@ -565,8 +660,251 @@ pub fn collect_player_snapshots(
 }
 
 pub fn snapshot_hash(snapshot: &PerPlayerSnapshot) -> [u8; 32] {
-    let bytes = serde_json::to_vec(snapshot).unwrap_or_default();
-    *blake3::hash(&bytes).as_bytes()
+    *blake3::hash(&encode_player_snapshot_v2(snapshot)).as_bytes()
+}
+
+pub fn encode_player_snapshot_v2(snapshot: &PerPlayerSnapshot) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"swarm.snapshot.player.v2");
+    write_u64(&mut bytes, snapshot.tick);
+    write_u32(&mut bytes, snapshot.player_id);
+    encode_actor_context(&mut bytes, &snapshot.actor_context);
+    write_bool(&mut bytes, snapshot.truncated);
+    write_bool(&mut bytes, snapshot.degraded);
+    write_bool(&mut bytes, snapshot.over_budget);
+    encode_omitted_categories(&mut bytes, snapshot.omitted_categories);
+    encode_terrain_tiles(&mut bytes, &snapshot.terrain);
+    encode_entities(&mut bytes, &snapshot.entities);
+    encode_entities(&mut bytes, &snapshot.resources);
+    encode_entities(&mut bytes, &snapshot.events);
+    encode_messages(&mut bytes, &snapshot.messages);
+    encode_omitted_bucket(&mut bytes, snapshot.omitted_messages);
+    bytes
+}
+
+pub fn to_abi_visible_snapshot(
+    snapshot: &PerPlayerSnapshot,
+    world_seed: u64,
+    actor_id: u64,
+) -> VisibleSnapshot {
+    VisibleSnapshot {
+        tick: snapshot.tick,
+        player_id: snapshot.player_id,
+        world_seed,
+        actor_id,
+        actor_context: AbiSnapshotActorContext {
+            active_drones: snapshot.actor_context.active_drones.clone(),
+            primary_drone: snapshot.actor_context.primary_drone.clone(),
+        },
+        truncated: snapshot.truncated,
+        degraded: snapshot.degraded,
+        over_budget: snapshot.over_budget,
+        omitted_categories: to_abi_omitted_categories(snapshot.omitted_categories),
+        terrain: snapshot
+            .terrain
+            .iter()
+            .map(|tile| AbiSnapshotTerrainTile {
+                room_id: tile.room_id,
+                x: tile.x,
+                y: tile.y,
+                terrain: match tile.terrain {
+                    TerrainType::Plain => AbiSnapshotTerrain::Plain,
+                    TerrainType::Swamp => AbiSnapshotTerrain::Swamp,
+                    TerrainType::Wall => AbiSnapshotTerrain::Wall,
+                },
+            })
+            .collect(),
+        entities: snapshot.entities.iter().map(to_abi_entity).collect(),
+        resources: snapshot.resources.iter().map(to_abi_entity).collect(),
+        events: snapshot.events.iter().map(to_abi_entity).collect(),
+        messages: snapshot
+            .messages
+            .iter()
+            .map(|message| AbiSnapshotMessage {
+                message_id: message.message_id,
+                sender_id: message.sender_id.clone(),
+                recipient_id: message.recipient_id.clone(),
+                payload: message.payload.clone(),
+            })
+            .collect(),
+        omitted_messages: to_abi_omitted_bucket(snapshot.omitted_messages),
+    }
+}
+
+fn to_abi_entity(entity: &SnapshotEntity) -> AbiSnapshotEntity {
+    AbiSnapshotEntity {
+        entity_id: entity.entity_id.clone(),
+        entity_type: entity.entity_type.clone(),
+        position: entity
+            .position
+            .map(|(room_id, x, y)| AbiSnapshotPosition { room_id, x, y }),
+        owner: entity.owner,
+        hits: entity.hits,
+        hits_max: entity.hits_max,
+    }
+}
+
+fn to_abi_omitted_categories(categories: OmittedCategories) -> AbiSnapshotOmittedCategories {
+    AbiSnapshotOmittedCategories {
+        entities: to_abi_omitted_bucket(categories.entities),
+        resources: to_abi_omitted_bucket(categories.resources),
+        events: to_abi_omitted_bucket(categories.events),
+        terrain: to_abi_omitted_bucket(categories.terrain),
+        messages: to_abi_omitted_bucket(categories.messages),
+    }
+}
+
+fn to_abi_omitted_bucket(bucket: OmittedBucket) -> AbiSnapshotOmittedBucket {
+    match bucket {
+        OmittedBucket::Zero => AbiSnapshotOmittedBucket::Zero,
+        OmittedBucket::Few => AbiSnapshotOmittedBucket::Few,
+        OmittedBucket::Some => AbiSnapshotOmittedBucket::Some,
+        OmittedBucket::Many => AbiSnapshotOmittedBucket::Many,
+        OmittedBucket::Extreme => AbiSnapshotOmittedBucket::Extreme,
+    }
+}
+
+fn encode_drone_snapshot_v2(snapshot: &PerDroneSnapshot) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"swarm.snapshot.drone.v2");
+    write_u64(&mut bytes, snapshot.tick);
+    write_string(&mut bytes, &snapshot.drone_entity_id);
+    write_bool(&mut bytes, snapshot.truncated);
+    write_bool(&mut bytes, snapshot.degraded);
+    encode_omitted_categories(&mut bytes, snapshot.omitted_categories);
+    encode_terrain_tiles(&mut bytes, &snapshot.terrain);
+    encode_entities(&mut bytes, &snapshot.entities);
+    encode_entities(&mut bytes, &snapshot.resources);
+    encode_entities(&mut bytes, &snapshot.events);
+    encode_messages(&mut bytes, &snapshot.messages);
+    encode_omitted_bucket(&mut bytes, snapshot.omitted_messages);
+    bytes
+}
+
+fn encode_actor_context(bytes: &mut Vec<u8>, actor_context: &SnapshotActorContext) {
+    write_len(bytes, actor_context.active_drones.len());
+    for drone_id in &actor_context.active_drones {
+        write_string(bytes, drone_id);
+    }
+    encode_option_string(bytes, actor_context.primary_drone.as_deref());
+}
+
+fn encode_omitted_categories(bytes: &mut Vec<u8>, categories: OmittedCategories) {
+    encode_omitted_bucket(bytes, categories.entities);
+    encode_omitted_bucket(bytes, categories.resources);
+    encode_omitted_bucket(bytes, categories.events);
+    encode_omitted_bucket(bytes, categories.terrain);
+    encode_omitted_bucket(bytes, categories.messages);
+}
+
+fn encode_omitted_bucket(bytes: &mut Vec<u8>, bucket: OmittedBucket) {
+    write_u8(
+        bytes,
+        match bucket {
+            OmittedBucket::Zero => 0,
+            OmittedBucket::Few => 1,
+            OmittedBucket::Some => 2,
+            OmittedBucket::Many => 3,
+            OmittedBucket::Extreme => 4,
+        },
+    );
+}
+
+fn encode_terrain_tiles(bytes: &mut Vec<u8>, terrain: &[SnapshotTerrainTile]) {
+    write_len(bytes, terrain.len());
+    for tile in terrain {
+        write_u32(bytes, tile.room_id);
+        write_i32(bytes, tile.x);
+        write_i32(bytes, tile.y);
+        write_u8(
+            bytes,
+            match tile.terrain {
+                TerrainType::Plain => 0,
+                TerrainType::Swamp => 1,
+                TerrainType::Wall => 2,
+            },
+        );
+    }
+}
+
+fn encode_entities(bytes: &mut Vec<u8>, entities: &[SnapshotEntity]) {
+    write_len(bytes, entities.len());
+    for entity in entities {
+        write_string(bytes, &entity.entity_id);
+        write_string(bytes, &entity.entity_type);
+        match entity.position {
+            Some((room_id, x, y)) => {
+                write_bool(bytes, true);
+                write_u32(bytes, room_id);
+                write_i32(bytes, x);
+                write_i32(bytes, y);
+            }
+            None => write_bool(bytes, false),
+        }
+        encode_option_u32(bytes, entity.owner);
+        encode_option_u32(bytes, entity.hits);
+        encode_option_u32(bytes, entity.hits_max);
+    }
+}
+
+fn encode_messages(bytes: &mut Vec<u8>, messages: &[SnapshotMessage]) {
+    write_len(bytes, messages.len());
+    for message in messages {
+        write_u64(bytes, message.message_id);
+        write_string(bytes, &message.sender_id);
+        write_string(bytes, &message.recipient_id);
+        write_len(bytes, message.payload.len());
+        bytes.extend_from_slice(&message.payload);
+    }
+}
+
+fn encode_option_string(bytes: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            write_bool(bytes, true);
+            write_string(bytes, value);
+        }
+        None => write_bool(bytes, false),
+    }
+}
+
+fn encode_option_u32(bytes: &mut Vec<u8>, value: Option<u32>) {
+    match value {
+        Some(value) => {
+            write_bool(bytes, true);
+            write_u32(bytes, value);
+        }
+        None => write_bool(bytes, false),
+    }
+}
+
+fn write_u8(bytes: &mut Vec<u8>, value: u8) {
+    bytes.push(value);
+}
+
+fn write_bool(bytes: &mut Vec<u8>, value: bool) {
+    write_u8(bytes, value as u8);
+}
+
+fn write_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_i32(bytes: &mut Vec<u8>, value: i32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_len(bytes: &mut Vec<u8>, len: usize) {
+    write_u64(bytes, len as u64);
+}
+
+fn write_string(bytes: &mut Vec<u8>, value: &str) {
+    write_len(bytes, value.len());
+    bytes.extend_from_slice(value.as_bytes());
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -629,7 +967,7 @@ pub fn summarize_local_simulation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swarm_engine_api::ids::BodyPart;
+    use swarm_engine_api::ids::{BodyPart, RoomId};
     use swarm_engine_plugin_sdk::components::Drone;
 
     #[test]
@@ -867,21 +1205,36 @@ mod tests {
 
     #[test]
     fn distance_bucket_assignment() {
-        assert_eq!(DistanceBucket::from_distance(0.0), DistanceBucket::Self_);
-        assert_eq!(DistanceBucket::from_distance(0.5), DistanceBucket::Adjacent);
-        assert_eq!(DistanceBucket::from_distance(1.0), DistanceBucket::Adjacent);
-        assert_eq!(DistanceBucket::from_distance(2.0), DistanceBucket::Close);
-        assert_eq!(DistanceBucket::from_distance(4.0), DistanceBucket::Close);
-        assert_eq!(DistanceBucket::from_distance(5.0), DistanceBucket::Medium);
-        assert_eq!(DistanceBucket::from_distance(8.0), DistanceBucket::Medium);
-        assert_eq!(DistanceBucket::from_distance(10.0), DistanceBucket::Far);
-        assert_eq!(DistanceBucket::from_distance(16.0), DistanceBucket::Far);
-        assert_eq!(DistanceBucket::from_distance(20.0), DistanceBucket::VeryFar);
-        assert_eq!(DistanceBucket::from_distance(32.0), DistanceBucket::VeryFar);
+        assert_eq!(DistanceBucket::from_distance(0), DistanceBucket::Self_);
+        assert_eq!(DistanceBucket::from_distance(1), DistanceBucket::Adjacent);
+        assert_eq!(DistanceBucket::from_distance(2), DistanceBucket::Close);
+        assert_eq!(DistanceBucket::from_distance(4), DistanceBucket::Close);
+        assert_eq!(DistanceBucket::from_distance(5), DistanceBucket::Medium);
+        assert_eq!(DistanceBucket::from_distance(8), DistanceBucket::Medium);
+        assert_eq!(DistanceBucket::from_distance(10), DistanceBucket::Far);
+        assert_eq!(DistanceBucket::from_distance(16), DistanceBucket::Far);
+        assert_eq!(DistanceBucket::from_distance(20), DistanceBucket::VeryFar);
+        assert_eq!(DistanceBucket::from_distance(32), DistanceBucket::VeryFar);
         assert_eq!(
-            DistanceBucket::from_distance(100.0),
+            DistanceBucket::from_distance(100),
             DistanceBucket::OutOfSight
         );
+    }
+
+    #[test]
+    fn hex_distance_is_exact_for_extreme_coordinates() {
+        let a = Position {
+            x: i32::MIN,
+            y: i32::MAX,
+            room: RoomId(0),
+        };
+        let b = Position {
+            x: i32::MAX,
+            y: i32::MIN,
+            room: RoomId(0),
+        };
+
+        assert_eq!(hex_distance(&a, &b), u32::MAX as u64);
     }
 
     #[test]
@@ -900,6 +1253,155 @@ mod tests {
 
         assert!(!snapshot.truncated);
         assert_eq!(snapshot.omitted_categories, OmittedCategories::all_zero());
+    }
+
+    #[test]
+    fn player_snapshot_for_no_drone_player_has_null_primary_drone() {
+        let mut world = create_test_world();
+        let w = world.app.world_mut();
+
+        let snapshot = build_player_snapshot(w, 99, 7, &SnapshotConfig::default()).unwrap();
+
+        assert_eq!(snapshot.player_id, 99);
+        assert_eq!(snapshot.actor_context.active_drones, Vec::<String>::new());
+        assert_eq!(snapshot.actor_context.primary_drone, None);
+        assert_eq!(snapshot.omitted_categories, OmittedCategories::all_zero());
+        assert_eq!(snapshot.omitted_messages, OmittedBucket::Zero);
+    }
+
+    #[test]
+    fn player_snapshot_v2_carries_terrain_and_message_omission_buckets() {
+        let mut world = create_test_world();
+        let w = world.app.world_mut();
+
+        let snapshot = build_player_snapshot(w, 1, 7, &SnapshotConfig::default()).unwrap();
+
+        assert!(!snapshot.terrain.is_empty());
+        assert_eq!(snapshot.messages, Vec::<SnapshotMessage>::new());
+        assert_eq!(snapshot.omitted_categories.terrain, OmittedBucket::Zero);
+        assert_eq!(snapshot.omitted_categories.messages, OmittedBucket::Zero);
+        assert_eq!(snapshot.omitted_messages, OmittedBucket::Zero);
+    }
+
+    #[test]
+    fn abi_visible_snapshot_maps_every_player_snapshot_field() {
+        let entity = SnapshotEntity {
+            entity_id: "entity-1".to_string(),
+            entity_type: "Drone".to_string(),
+            position: Some((3, 4, 5)),
+            owner: Some(7),
+            hits: Some(8),
+            hits_max: Some(9),
+        };
+        let snapshot = PerPlayerSnapshot {
+            tick: 11,
+            player_id: 7,
+            actor_context: SnapshotActorContext {
+                active_drones: vec!["drone-1".to_string()],
+                primary_drone: Some("drone-1".to_string()),
+            },
+            truncated: true,
+            degraded: true,
+            over_budget: true,
+            omitted_categories: OmittedCategories {
+                entities: OmittedBucket::Few,
+                resources: OmittedBucket::Some,
+                events: OmittedBucket::Many,
+                terrain: OmittedBucket::Extreme,
+                messages: OmittedBucket::Zero,
+            },
+            terrain: vec![SnapshotTerrainTile {
+                room_id: 3,
+                x: 4,
+                y: 5,
+                terrain: TerrainType::Swamp,
+            }],
+            entities: vec![entity.clone()],
+            resources: vec![entity.clone()],
+            events: vec![entity],
+            messages: vec![SnapshotMessage {
+                message_id: 12,
+                sender_id: "sender".to_string(),
+                recipient_id: "recipient".to_string(),
+                payload: vec![13, 14],
+            }],
+            omitted_messages: OmittedBucket::Few,
+        };
+
+        let visible = to_abi_visible_snapshot(&snapshot, 15, 16);
+
+        assert_eq!(visible.tick, snapshot.tick);
+        assert_eq!(visible.player_id, snapshot.player_id);
+        assert_eq!(visible.world_seed, 15);
+        assert_eq!(visible.actor_id, 16);
+        assert_eq!(visible.actor_context.active_drones, vec!["drone-1"]);
+        assert_eq!(
+            visible.actor_context.primary_drone.as_deref(),
+            Some("drone-1")
+        );
+        assert!(visible.truncated && visible.degraded && visible.over_budget);
+        assert_eq!(
+            visible.omitted_categories.entities,
+            AbiSnapshotOmittedBucket::Few
+        );
+        assert_eq!(
+            visible.omitted_categories.resources,
+            AbiSnapshotOmittedBucket::Some
+        );
+        assert_eq!(
+            visible.omitted_categories.events,
+            AbiSnapshotOmittedBucket::Many
+        );
+        assert_eq!(
+            visible.omitted_categories.terrain,
+            AbiSnapshotOmittedBucket::Extreme
+        );
+        assert_eq!(
+            visible.omitted_categories.messages,
+            AbiSnapshotOmittedBucket::Zero
+        );
+        assert_eq!(visible.terrain[0].terrain, AbiSnapshotTerrain::Swamp);
+        for mapped in [
+            &visible.entities[0],
+            &visible.resources[0],
+            &visible.events[0],
+        ] {
+            assert_eq!(mapped.entity_id, "entity-1");
+            assert_eq!(mapped.entity_type, "Drone");
+            assert_eq!(
+                mapped.position,
+                Some(AbiSnapshotPosition {
+                    room_id: 3,
+                    x: 4,
+                    y: 5
+                })
+            );
+            assert_eq!(mapped.owner, Some(7));
+            assert_eq!(mapped.hits, Some(8));
+            assert_eq!(mapped.hits_max, Some(9));
+        }
+        assert_eq!(visible.messages[0].message_id, 12);
+        assert_eq!(visible.messages[0].sender_id, "sender");
+        assert_eq!(visible.messages[0].recipient_id, "recipient");
+        assert_eq!(visible.messages[0].payload, vec![13, 14]);
+        assert_eq!(visible.omitted_messages, AbiSnapshotOmittedBucket::Few);
+    }
+
+    #[test]
+    fn player_snapshot_hash_uses_v2_binary_encoding_not_json() {
+        let mut world = create_test_world();
+        let w = world.app.world_mut();
+
+        let snapshot = build_player_snapshot(w, 1, 7, &SnapshotConfig::default()).unwrap();
+
+        assert_eq!(
+            snapshot_hash(&snapshot),
+            *blake3::hash(&encode_player_snapshot_v2(&snapshot)).as_bytes()
+        );
+        assert_ne!(
+            snapshot_hash(&snapshot),
+            *blake3::hash(&serde_json::to_vec(&snapshot).unwrap()).as_bytes()
+        );
     }
 
     #[test]
@@ -940,7 +1442,7 @@ mod tests {
                 .active_drones
                 .contains(&object_id(second).to_string())
         );
-        assert!(!snapshot.actor_context.primary_drone.is_empty());
+        assert!(snapshot.actor_context.primary_drone.is_some());
         assert_eq!(snapshot.omitted_categories.resources, OmittedBucket::Zero);
         assert_eq!(snapshot.omitted_categories.events, OmittedBucket::Zero);
         assert_eq!(snapshot_hash(&snapshot), snapshot_hash(&snapshot.clone()));
@@ -967,11 +1469,14 @@ mod tests {
 
         let snapshots = collect_player_snapshots(w, &[1, 2, 99], 11, &config);
 
-        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots.len(), 3);
         assert_eq!(snapshots[0].player_id, 1);
         assert_eq!(snapshots[1].player_id, 2);
+        assert_eq!(snapshots[2].player_id, 99);
         assert_eq!(snapshots[0].actor_context.active_drones.len(), 2);
         assert_eq!(snapshots[1].actor_context.active_drones.len(), 1);
+        assert_eq!(snapshots[2].actor_context.active_drones.len(), 0);
+        assert_eq!(snapshots[2].actor_context.primary_drone, None);
     }
 
     #[test]
@@ -991,6 +1496,9 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(first.truncated);
+        assert!(
+            encode_player_snapshot_v2(&first).len() <= config.max_size_bytes || first.over_budget
+        );
         assert_ne!(first.omitted_categories.entities, OmittedBucket::Zero);
         assert!(
             first

@@ -638,7 +638,9 @@ mod tests {
 
     use crate::{
         redb_store::{SnapshotRow, TickCommitPayload, TickTerminalState},
-        tick::{TickCommitRecord, TickFuelLedger, WorldSnapshot, commands_hash},
+        tick::{
+            ReplayInputEnvelope, TickCommitRecord, TickFuelLedger, WorldSnapshot, commands_hash,
+        },
         world::create_world,
     };
 
@@ -660,11 +662,16 @@ mod tests {
             state_checksum: checksum,
             manifest_hash: [1; 32],
             world_config_hash: [2; 32],
+            mods_lock_hash: [3; 32],
+            resolved_config_hash: [5; 32],
         };
         let snapshot = keyframe.then(|| snapshot_row(tick, checksum));
         if snapshot.is_some() {
             commit_record.snapshot_hash = [8; 32];
         }
+        let mods_lock_hash = commit_record.mods_lock_hash;
+        let replay_input_envelopes: Vec<ReplayInputEnvelope> = Vec::new();
+        let replay_input_envelope_bytes = serde_json::to_vec(&replay_input_envelopes).unwrap();
         TickCommitPayload {
             tick,
             commit_record,
@@ -673,9 +680,12 @@ mod tests {
             object_id: format!("tick-trace/{tick}.zst"),
             terminal_state: TickTerminalState::Verified,
             system_manifest_hash: [6; 32],
-            mods_lock_hash: [3; 32],
+            mods_lock_hash,
             keyframe: snapshot,
-            replay_critical_writes: Vec::new(),
+            replay_critical_writes: vec![(
+                format!("/tick/{tick}/replay_input_envelope").into_bytes(),
+                replay_input_envelope_bytes,
+            )],
         }
     }
 

@@ -10,7 +10,10 @@ use crate::command::{ObjectId, Tick};
 use crate::mcp::{VisibleEntity, visible_entities_for_player};
 use crate::world::SwarmWorld;
 
+pub const REALTIME_SCHEMA: &str = "swarm.realtime.v1";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct RealtimeDelta {
     pub tick: Tick,
     pub last_tick: Tick,
@@ -23,9 +26,19 @@ pub struct RealtimeDelta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct RealtimeEnvelope {
+    #[schemars(schema_with = "realtime_schema_json_schema")]
+    #[ts(type = "\"swarm.realtime.v1\"")]
     pub schema: String,
     pub payload: RealtimeDelta,
+}
+
+fn realtime_schema_json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "const": REALTIME_SCHEMA,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,11 +102,11 @@ where
 
     pub fn publish_delta(&mut self, delta: &RealtimeDelta) -> Result<(), RealtimeError> {
         let payload = serde_json::to_vec(&RealtimeEnvelope {
-            schema: "swarm.realtime.v1".to_string(),
+            schema: REALTIME_SCHEMA.to_string(),
             payload: delta.clone(),
         })
         .map_err(|error| RealtimeError::Serialize(error.to_string()))?;
-        self.nats.publish("swarm.realtime.v1", payload)
+        self.nats.publish(REALTIME_SCHEMA, payload)
     }
 }
 

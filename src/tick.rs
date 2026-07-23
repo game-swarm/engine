@@ -3,6 +3,11 @@ use std::{collections::HashMap, time::Instant};
 use bevy::prelude::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use swarm_engine_api::abi::{
+    CANONICAL_CODEC_VERSION, FuelBudgetHints, MessageInboxCursor, SwarmCodecMessage, TickInput,
+    VisibleSnapshot, WorldConfigView, WorldId, decode_tick_input_with_snapshot,
+    encode_visible_snapshot,
+};
 use swarm_engine_api::ids::PlayerId;
 use swarm_engine_plugin_sdk::components::{
     CodeVersion, Controller, DeathMark, Drone, Owner, Position, SpawningGrace, Structure,
@@ -10,12 +15,17 @@ use swarm_engine_plugin_sdk::components::{
 use swarm_engine_plugin_sdk::resources::ActionRegistry;
 
 use crate::command::{
-    CommandAction, CommandIntent, CommandRejection, CommandSource, ObjectId, RawCommand,
-    RefundAccumulator, Tick, WorldMutate, collect_command_intents,
-    sort_raw_commands_for_active_players,
+    CommandAction, CommandIdempotencyTable, CommandIntent, CommandRejection, CommandSource,
+    IdempotencyDecision, MAX_FUEL, ObjectId, RawCommand, RefundAccumulator, RejectionReason, Tick,
+    WorldMutate, collect_command_intents, sort_raw_commands_for_active_players,
 };
 use crate::components::*;
 use crate::mcp::{VisibleEntity, visible_entities_for_player};
+use crate::plugins::{
+    CANONICAL_PLUGIN_CONFIG_TYPES, PluginIdentitySnapshot, PluginLock,
+    ResolvedPluginConfigSnapshot, ResolvedPluginConfigValue, VANILLA_PLUGIN_DEPENDENCIES,
+    VANILLA_PLUGIN_NAMES, WorldModConfigs,
+};
 use crate::realtime::{RealtimeDelta, RealtimeEnvelope};
 use crate::resource_ledger::{ResourceLedger, ResourceLedgerTraceSnapshot};
 use crate::resources::{
@@ -28,7 +38,7 @@ use crate::scheduler::{SYSTEM_MANIFEST, manifest_hash};
 use crate::security::{SecurityAlert, SecurityAuditor};
 use crate::sim::{
     PerPlayerSnapshot, SnapshotActorContext, SnapshotConfig, collect_player_snapshots,
-    snapshot_hash,
+    snapshot_hash, to_abi_visible_snapshot,
 };
 use crate::systems::{PendingCombat, PendingSpawnQueue, RoomDroneCounts};
 use crate::world::{SwarmWorld, WorldConfig};
@@ -85,10 +95,19 @@ pub struct TickSnapshot {
     pub rng_context: RngContext,
 }
 
+fn visible_snapshot_for_tick(snapshot: &TickSnapshot) -> VisibleSnapshot {
+    to_abi_visible_snapshot(
+        &snapshot.perception,
+        snapshot.rng_context.world_seed,
+        u64::from(snapshot.player_id),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutorError {
     Error(String),
     Timeout,
+    ArtifactUnavailable,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +123,12 @@ pub struct PlayerCollectOutput {
     pub metrics: PlayerCollectMetrics,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawPlayerCollectOutput {
+    pub commands: Vec<RawCommand>,
+    pub metrics: PlayerCollectMetrics,
+}
+
 pub trait PlayerExecutor: Send {
     fn collect(&mut self, snapshot: TickSnapshot) -> Result<Vec<CommandIntent>, ExecutorError>;
 
@@ -115,6 +140,14 @@ pub trait PlayerExecutor: Send {
             intents,
             metrics: PlayerCollectMetrics::default(),
         })
+    }
+
+    fn collect_raw_with_metrics(
+        &mut self,
+        _tick_input_bytes: &[u8],
+        _snapshot: TickSnapshot,
+    ) -> Result<Option<RawPlayerCollectOutput>, ExecutorError> {
+        Ok(None)
     }
 }
 
@@ -137,7 +170,6 @@ pub trait TickCommitter {
 
 pub const DEFAULT_KEYFRAME_INTERVAL: Tick = 100;
 pub const COLLECT_TIMEOUT_MS: u64 = 2_500;
-pub const EXECUTE_TIMEOUT_MS: u64 = 500;
 pub const MAX_COMMIT_ATTEMPTS: u32 = 3;
 pub const DEGRADED_ABANDON_THRESHOLD: u32 = 3;
 pub const DEGRADED_RECOVERY_TICKS: u32 = 10;
@@ -185,16 +217,41 @@ impl DegradedModeState {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModsLock {
     pub modules: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
     pub descriptor_hash: String,
+    pub plugins: std::collections::BTreeMap<String, PluginIdentitySnapshot>,
+    pub resolved_config: ResolvedPluginConfigSnapshot,
+    pub accepted_lock_hash: [u8; 32],
+    pub aggregate_resolved_config_hash: [u8; 32],
+}
+
+impl Default for ModsLock {
+    fn default() -> Self {
+        let plugins = std::collections::BTreeMap::new();
+        let resolved_config = ResolvedPluginConfigSnapshot::new();
+        Self {
+            modules: std::collections::BTreeMap::new(),
+            descriptor_hash: String::new(),
+            accepted_lock_hash: accepted_mods_lock_hash(&plugins),
+            aggregate_resolved_config_hash: resolved_mod_config_hash(&resolved_config),
+            plugins,
+            resolved_config,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorldConfigSnapshot {
     pub config: WorldConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayInputEnvelope {
+    pub player_id: PlayerId,
+    pub tick_input_hash: [u8; 32],
+    pub canonical_tick_input: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,21 +262,47 @@ pub struct ReplayEnvironment {
     pub rng_context: RngContext,
     pub active_players: Vec<PlayerId>,
     pub player_fuel_metrics: Vec<PlayerFuelMetric>,
+    pub replay_input_envelopes: Vec<ReplayInputEnvelope>,
     pub deploy_activation_decisions: Vec<DeployActivationDecision>,
 }
 
 impl ReplayEnvironment {
     pub fn capture(world: &World) -> Self {
-        let modules = world
+        let config = world
+            .get_resource::<WorldConfig>()
+            .cloned()
+            .unwrap_or_default();
+        let (modules, plugins, resolved_config) = world
             .get_resource::<crate::plugins::PluginRegistry>()
             .map(|registry| {
-                registry
+                let modules = registry
                     .lock
                     .plugins
                     .iter()
                     .filter(|(_, entry)| entry.enabled)
                     .map(|(name, entry)| (name.clone(), entry.version.clone()))
-                    .collect()
+                    .collect();
+                let runtime = registry
+                    .lock
+                    .runtime_config_for_world(&config.mods)
+                    .expect("enabled plugin resolved config snapshot must validate");
+                let resolved_config = runtime
+                    .resolved_snapshot()
+                    .expect("enabled plugin resolved config snapshot must serialize");
+                let default_runtime = registry
+                    .lock
+                    .runtime_config_for_world(&WorldModConfigs::default())
+                    .expect("enabled plugin default resolved config snapshot must validate");
+                let default_resolved_config = default_runtime
+                    .resolved_snapshot()
+                    .expect("enabled plugin default resolved config snapshot must serialize");
+                let descriptor_profiles =
+                    descriptor_profiles_for_world(world, &registry.lock, &default_resolved_config);
+                let plugins = registry
+                    .lock
+                    .enabled_identity_snapshot(&descriptor_profiles)
+                    .expect("enabled plugin identity snapshot must be complete");
+                (modules, plugins, resolved_config)
             })
             .unwrap_or_default();
         let descriptor_hash = world
@@ -230,21 +313,24 @@ impl ReplayEnvironment {
                     .expect("installed plugin descriptors must serialize")
             })
             .unwrap_or_default();
-        let config = world
-            .get_resource::<WorldConfig>()
-            .cloned()
-            .unwrap_or_default();
+        let accepted_lock_hash = accepted_mods_lock_hash(&plugins);
+        let aggregate_resolved_config_hash = resolved_mod_config_hash(&resolved_config);
 
         Self {
             mods_lock: ModsLock {
                 modules,
                 descriptor_hash,
+                plugins,
+                resolved_config,
+                accepted_lock_hash,
+                aggregate_resolved_config_hash,
             },
             world_config: WorldConfigSnapshot { config },
             collect_snapshot_hash: [0; 32],
             rng_context: RngContext::default(),
             active_players: Vec::new(),
             player_fuel_metrics: Vec::new(),
+            replay_input_envelopes: Vec::new(),
             deploy_activation_decisions: Vec::new(),
         }
     }
@@ -255,11 +341,13 @@ impl ReplayEnvironment {
         rng_context: RngContext,
         active_players: Vec<PlayerId>,
         player_fuel_metrics: Vec<PlayerFuelMetric>,
+        replay_input_envelopes: Vec<ReplayInputEnvelope>,
     ) -> Self {
         self.collect_snapshot_hash = collect_snapshot_hash;
         self.rng_context = rng_context;
         self.active_players = canonical_active_players(active_players);
         self.player_fuel_metrics = player_fuel_metrics;
+        self.replay_input_envelopes = canonical_replay_input_envelopes(replay_input_envelopes);
         self
     }
 
@@ -344,7 +432,6 @@ fn action_manifest_hash(world: &World) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-pub const CANONICAL_CODEC_VERSION: u32 = 1;
 const HOST_FUEL_SCHEDULE_VERSION: &str = "swarm.host-fuel.v1";
 const HOST_FUEL_SCHEDULE: &[(&str, u64, &str)] = &[
     ("host_get_terrain", 500, "none"),
@@ -492,6 +579,8 @@ pub struct TickCommitRecord {
     pub state_checksum: u64,
     pub manifest_hash: [u8; 32],
     pub world_config_hash: [u8; 32],
+    pub mods_lock_hash: [u8; 32],
+    pub resolved_config_hash: [u8; 32],
 }
 
 impl TickCommitRecord {
@@ -507,6 +596,8 @@ impl TickCommitRecord {
             state_checksum: trace.state_checksum,
             manifest_hash: replay_manifest_hash(trace, environment),
             world_config_hash: world_config_hash(&environment.world_config),
+            mods_lock_hash: environment.mods_lock.accepted_lock_hash,
+            resolved_config_hash: environment.mods_lock.aggregate_resolved_config_hash,
         }
     }
 }
@@ -566,8 +657,269 @@ fn canonical_active_players(mut active_players: Vec<PlayerId>) -> Vec<PlayerId> 
     active_players
 }
 
+fn canonical_replay_input_envelopes(
+    mut envelopes: Vec<ReplayInputEnvelope>,
+) -> Vec<ReplayInputEnvelope> {
+    envelopes.sort_by_key(|envelope| envelope.player_id);
+    envelopes.dedup_by_key(|envelope| envelope.player_id);
+    envelopes
+}
+
+pub fn replay_input_envelope_hash(envelopes: &[ReplayInputEnvelope]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"swarm.replay-input-envelope.v1");
+    for envelope in canonical_replay_input_envelopes(envelopes.to_vec()) {
+        hasher.update(&envelope.player_id.to_le_bytes());
+        hasher.update(&envelope.tick_input_hash);
+        hasher.update(&(envelope.canonical_tick_input.len() as u64).to_le_bytes());
+        hasher.update(&envelope.canonical_tick_input);
+    }
+    *hasher.finalize().as_bytes()
+}
+
 pub fn world_config_hash(world_config: &WorldConfigSnapshot) -> [u8; 32] {
-    *blake3::hash(&serde_json::to_vec(world_config).unwrap_or_default()).as_bytes()
+    *blake3::hash(&encode_world_config_snapshot_v2(world_config)).as_bytes()
+}
+
+fn descriptor_profiles_for_world(
+    world: &World,
+    lock: &PluginLock,
+    default_resolved_config: &ResolvedPluginConfigSnapshot,
+) -> std::collections::BTreeMap<String, String> {
+    let mut profiles = installed_descriptor_profiles(world);
+    for (name, entry) in &lock.plugins {
+        if !entry.enabled || profiles.contains_key(name) {
+            continue;
+        }
+        if let Some(profile) = vanilla_source_design_profile(
+            name,
+            &entry.version,
+            default_resolved_config.get(name.as_str()),
+        ) {
+            profiles.insert(name.clone(), profile);
+        }
+    }
+    profiles
+}
+
+fn installed_descriptor_profiles(world: &World) -> std::collections::BTreeMap<String, String> {
+    world
+        .get_resource::<swarm_engine_plugin_sdk::resources::InstalledPluginDescriptors>()
+        .map(|descriptors| {
+            descriptors
+                .iter()
+                .map(|(plugin_id, descriptor)| {
+                    let profile =
+                        swarm_engine_api::descriptor::deterministic_descriptor_hash(descriptor)
+                            .expect("installed plugin descriptor must serialize");
+                    (plugin_id.to_string(), profile)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn vanilla_source_design_profile(
+    plugin: &str,
+    version: &str,
+    default_params: Option<&std::collections::BTreeMap<String, ResolvedPluginConfigValue>>,
+) -> Option<String> {
+    if !VANILLA_PLUGIN_NAMES.contains(&plugin) {
+        return None;
+    }
+    let dependencies = VANILLA_PLUGIN_DEPENDENCIES
+        .iter()
+        .find(|(name, _)| *name == plugin)
+        .map(|(_, dependencies)| *dependencies)
+        .unwrap_or_default();
+    let config_types = CANONICAL_PLUGIN_CONFIG_TYPES
+        .iter()
+        .find(|(name, _)| *name == plugin)
+        .map(|(_, config_types)| *config_types)?;
+    let default_params = default_params?;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"swarm.vanilla-source-design-profile.v1");
+    write_string(&mut bytes, plugin);
+    write_string(&mut bytes, version);
+    write_string(&mut bytes, swarm_engine_api::version::API_VERSION);
+    write_string(
+        &mut bytes,
+        swarm_engine_api::version::DESCRIPTOR_SCHEMA_VERSION,
+    );
+    write_len(&mut bytes, dependencies.len());
+    for dependency in dependencies {
+        write_string(&mut bytes, dependency);
+    }
+    write_len(&mut bytes, config_types.len());
+    for (key, value_type) in config_types {
+        write_string(&mut bytes, key);
+        write_string(&mut bytes, value_type);
+        encode_resolved_config_value(&mut bytes, default_params.get(*key)?);
+    }
+    Some(blake3::hash(&bytes).to_hex().to_string())
+}
+
+pub fn accepted_mods_lock_hash(
+    plugins: &std::collections::BTreeMap<String, PluginIdentitySnapshot>,
+) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"swarm.mods-lock.v2");
+    write_len(&mut bytes, plugins.len());
+    for (name, plugin) in plugins {
+        write_string(&mut bytes, name);
+        write_string(&mut bytes, &plugin.plugin_id);
+        write_string(&mut bytes, &plugin.version);
+        write_string(&mut bytes, plugin_source_name(&plugin.source));
+        write_optional_string(&mut bytes, plugin.package_hash.as_deref());
+        write_optional_string(&mut bytes, plugin.signature_hash.as_deref());
+        write_optional_string(
+            &mut bytes,
+            plugin.trust_class.as_ref().map(plugin_trust_class_name),
+        );
+        write_string(&mut bytes, &plugin.design_profile);
+    }
+    *blake3::hash(&bytes).as_bytes()
+}
+
+pub fn resolved_mod_config_hash(config: &ResolvedPluginConfigSnapshot) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"swarm.resolved-mod-config.v1");
+    write_len(&mut bytes, config.len());
+    for (plugin, params) in config {
+        write_string(&mut bytes, plugin);
+        write_len(&mut bytes, params.len());
+        for (key, value) in params {
+            write_string(&mut bytes, key);
+            encode_resolved_config_value(&mut bytes, value);
+        }
+    }
+    *blake3::hash(&bytes).as_bytes()
+}
+
+fn encode_world_config_snapshot_v2(world_config: &WorldConfigSnapshot) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"swarm.world-config.v2");
+    match toml::Value::try_from(world_config) {
+        Ok(value) => encode_toml_value_v2(&mut bytes, &value),
+        Err(error) => write_string(&mut bytes, &format!("encode-error:{error}")),
+    }
+    bytes
+}
+
+fn encode_toml_value_v2(bytes: &mut Vec<u8>, value: &toml::Value) {
+    match value {
+        toml::Value::String(value) => {
+            write_u8(bytes, 1);
+            write_string(bytes, value);
+        }
+        toml::Value::Integer(value) => {
+            write_u8(bytes, 2);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        toml::Value::Float(value) => {
+            write_u8(bytes, 3);
+            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        toml::Value::Boolean(value) => {
+            write_u8(bytes, 4);
+            write_bool(bytes, *value);
+        }
+        toml::Value::Datetime(value) => {
+            write_u8(bytes, 5);
+            write_string(bytes, &value.to_string());
+        }
+        toml::Value::Array(values) => {
+            write_u8(bytes, 6);
+            write_len(bytes, values.len());
+            for value in values {
+                encode_toml_value_v2(bytes, value);
+            }
+        }
+        toml::Value::Table(table) => {
+            write_u8(bytes, 7);
+            let mut entries = table.iter().collect::<Vec<_>>();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            write_len(bytes, entries.len());
+            for (key, value) in entries {
+                write_string(bytes, key);
+                encode_toml_value_v2(bytes, value);
+            }
+        }
+    }
+}
+
+fn write_u8(bytes: &mut Vec<u8>, value: u8) {
+    bytes.push(value);
+}
+
+fn write_bool(bytes: &mut Vec<u8>, value: bool) {
+    write_u8(bytes, value as u8);
+}
+
+fn write_len(bytes: &mut Vec<u8>, len: usize) {
+    bytes.extend_from_slice(&(len as u64).to_le_bytes());
+}
+
+fn write_string(bytes: &mut Vec<u8>, value: &str) {
+    write_len(bytes, value.len());
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+fn write_optional_string(bytes: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            write_bool(bytes, true);
+            write_string(bytes, value);
+        }
+        None => write_bool(bytes, false),
+    }
+}
+
+fn plugin_source_name(source: &crate::plugins::PluginSource) -> &'static str {
+    match source {
+        crate::plugins::PluginSource::Registry => "registry",
+        crate::plugins::PluginSource::Git => "git",
+        crate::plugins::PluginSource::LocalBuild => "local-build",
+    }
+}
+
+fn plugin_trust_class_name(trust_class: &crate::plugins::PluginTrustClass) -> &'static str {
+    match trust_class {
+        crate::plugins::PluginTrustClass::TrustedLocalBuild => "trusted-local-build",
+    }
+}
+
+fn encode_resolved_config_value(bytes: &mut Vec<u8>, value: &ResolvedPluginConfigValue) {
+    match value {
+        ResolvedPluginConfigValue::Bool(value) => {
+            write_u8(bytes, 1);
+            write_bool(bytes, *value);
+        }
+        ResolvedPluginConfigValue::Integer(value) => {
+            write_u8(bytes, 2);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        ResolvedPluginConfigValue::String(value) => {
+            write_u8(bytes, 3);
+            write_string(bytes, value);
+        }
+        ResolvedPluginConfigValue::Array(values) => {
+            write_u8(bytes, 4);
+            write_len(bytes, values.len());
+            for value in values {
+                encode_resolved_config_value(bytes, value);
+            }
+        }
+        ResolvedPluginConfigValue::Table(values) => {
+            write_u8(bytes, 5);
+            write_len(bytes, values.len());
+            for (key, value) in values {
+                write_string(bytes, key);
+                encode_resolved_config_value(bytes, value);
+            }
+        }
+    }
 }
 
 fn replay_manifest_hash(trace: &TickTrace, environment: &ReplayEnvironment) -> [u8; 32] {
@@ -589,10 +941,17 @@ fn replay_manifest_hash_with_fuel_schedule(
     hasher.update(b"swarm.replay-manifest.v1");
     hasher.update(&trace.system_manifest_hash);
     hasher.update(&trace.action_manifest_hash);
-    hasher.update(&serde_json::to_vec(&environment.mods_lock).unwrap_or_default());
+    hasher.update(&environment.mods_lock.accepted_lock_hash);
+    let mut descriptor_hash_bytes = Vec::new();
+    write_string(
+        &mut descriptor_hash_bytes,
+        &environment.mods_lock.descriptor_hash,
+    );
+    hasher.update(&descriptor_hash_bytes);
     hasher.update(fuel_schedule_version.as_bytes());
     hasher.update(&serde_json::to_vec(fuel_schedule).unwrap_or_default());
     hasher.update(&world_config_hash(&environment.world_config));
+    hasher.update(&environment.mods_lock.aggregate_resolved_config_hash);
     *hasher.finalize().as_bytes()
 }
 
@@ -740,6 +1099,7 @@ struct CollectCache {
     rng_context: RngContext,
     active_players: Vec<PlayerId>,
     player_fuel_metrics: Vec<PlayerFuelMetric>,
+    replay_input_envelopes: Vec<ReplayInputEnvelope>,
 }
 
 impl CollectCache {
@@ -795,15 +1155,18 @@ fn empty_player_snapshot(player_id: PlayerId, tick: Tick) -> PerPlayerSnapshot {
         player_id,
         actor_context: SnapshotActorContext {
             active_drones: Vec::new(),
-            primary_drone: String::new(),
+            primary_drone: None,
         },
         truncated: false,
         degraded: false,
         over_budget: false,
         omitted_categories: crate::sim::OmittedCategories::all_zero(),
+        terrain: Vec::new(),
         entities: Vec::new(),
         resources: Vec::new(),
         events: Vec::new(),
+        messages: Vec::new(),
+        omitted_messages: crate::sim::OmittedBucket::Zero,
     }
 }
 
@@ -849,6 +1212,86 @@ fn collect_inputs_for_players(
     }
 
     (inputs, *collect_hasher.finalize().as_bytes(), rng_context)
+}
+
+fn replay_input_envelopes_for_collect_inputs(
+    collect_inputs: &HashMap<PlayerId, TickSnapshot>,
+    world_config: &WorldConfigSnapshot,
+    player_fuel_metrics: &[PlayerFuelMetric],
+) -> Vec<ReplayInputEnvelope> {
+    let config_payload = encode_world_config_snapshot_v2(world_config);
+    let config_hash = world_config_hash(world_config);
+    let fuel_by_player = player_fuel_metrics
+        .iter()
+        .map(|metric| (metric.player_id, metric.consumed))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let world_id = WorldId::new(&world_config.config.world.name)
+        .unwrap_or_else(|_| WorldId::from_raw(world_config.config.world.world_seed));
+    let mut snapshots = collect_inputs.values().cloned().collect::<Vec<_>>();
+    snapshots.sort_by_key(|snapshot| snapshot.player_id);
+    snapshots
+        .into_iter()
+        .filter_map(|snapshot| {
+            let visible_snapshot =
+                encode_visible_snapshot(&visible_snapshot_for_tick(&snapshot)).ok()?;
+            let consumed = fuel_by_player
+                .get(&snapshot.player_id)
+                .copied()
+                .unwrap_or_default();
+            let canonical_tick_input = TickInput {
+                tick: snapshot.tick,
+                player_id: snapshot.player_id,
+                world_id,
+                visible_snapshot,
+                world_config_view: WorldConfigView {
+                    config_hash,
+                    payload: config_payload.clone(),
+                },
+                fuel_budget_hints: FuelBudgetHints {
+                    fuel_remaining: MAX_FUEL.saturating_sub(consumed),
+                    host_calls_remaining: 0,
+                    output_bytes_remaining: 0,
+                },
+                message_inbox_cursor: MessageInboxCursor { next_message_id: 0 },
+            }
+            .encode_swarm_message()
+            .ok()?;
+            let tick_input_hash = *blake3::hash(&canonical_tick_input).as_bytes();
+            Some(ReplayInputEnvelope {
+                player_id: snapshot.player_id,
+                tick_input_hash,
+                canonical_tick_input,
+            })
+        })
+        .collect()
+}
+
+fn tick_input_bytes_for_snapshot(
+    snapshot: &TickSnapshot,
+    world_config: &WorldConfigSnapshot,
+) -> Option<Vec<u8>> {
+    let config_payload = encode_world_config_snapshot_v2(world_config);
+    let config_hash = world_config_hash(world_config);
+    let world_id = WorldId::new(&world_config.config.world.name)
+        .unwrap_or_else(|_| WorldId::from_raw(world_config.config.world.world_seed));
+    TickInput {
+        tick: snapshot.tick,
+        player_id: snapshot.player_id,
+        world_id,
+        visible_snapshot: encode_visible_snapshot(&visible_snapshot_for_tick(snapshot)).ok()?,
+        world_config_view: WorldConfigView {
+            config_hash,
+            payload: config_payload,
+        },
+        fuel_budget_hints: FuelBudgetHints {
+            fuel_remaining: MAX_FUEL,
+            host_calls_remaining: 0,
+            output_bytes_remaining: 0,
+        },
+        message_inbox_cursor: MessageInboxCursor { next_message_id: 0 },
+    }
+    .encode_swarm_message()
+    .ok()
 }
 
 impl TickMetrics {
@@ -1141,6 +1584,10 @@ pub enum ReplayError {
         expected_checksum: u64,
         actual_checksum: u64,
     },
+    EnvironmentMismatch {
+        tick: Tick,
+        field: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1286,6 +1733,7 @@ fn collect_player_commands<E: PlayerExecutor + ?Sized>(
     player_id: PlayerId,
     state_checksum: u64,
     collect_inputs: &HashMap<PlayerId, TickSnapshot>,
+    world_config: &WorldConfigSnapshot,
     executor: &mut E,
 ) -> PlayerCollectResult {
     let snapshot = collect_inputs
@@ -1301,6 +1749,50 @@ fn collect_player_commands<E: PlayerExecutor + ?Sized>(
         });
     let mut metrics = TickMetrics::default();
     let mut fuel_metrics = PlayerCollectMetrics::default();
+    if let Some(tick_input_bytes) = tick_input_bytes_for_snapshot(&snapshot, world_config) {
+        match executor.collect_raw_with_metrics(&tick_input_bytes, snapshot.clone()) {
+            Ok(Some(output)) => {
+                fuel_metrics = output.metrics;
+                metrics.fuel_consumed = fuel_metrics.fuel_consumed;
+                metrics.refund_events = fuel_metrics.refund_events;
+                metrics.refund_fuel = fuel_metrics.refunded;
+                return PlayerCollectResult {
+                    player_id,
+                    commands: output.commands,
+                    metrics,
+                    fuel_metrics,
+                };
+            }
+            Ok(None) => {}
+            Err(ExecutorError::Timeout) => {
+                metrics.executor_timeouts += 1;
+                return PlayerCollectResult {
+                    player_id,
+                    commands: Vec::new(),
+                    metrics,
+                    fuel_metrics,
+                };
+            }
+            Err(ExecutorError::Error(_)) => {
+                metrics.executor_errors += 1;
+                return PlayerCollectResult {
+                    player_id,
+                    commands: Vec::new(),
+                    metrics,
+                    fuel_metrics,
+                };
+            }
+            Err(ExecutorError::ArtifactUnavailable) => {
+                metrics.executor_errors += 1;
+                return PlayerCollectResult {
+                    player_id,
+                    commands: Vec::new(),
+                    metrics,
+                    fuel_metrics,
+                };
+            }
+        }
+    }
     let intents = match executor.collect_with_metrics(snapshot) {
         Ok(output) => {
             fuel_metrics = output.metrics;
@@ -1314,6 +1806,10 @@ fn collect_player_commands<E: PlayerExecutor + ?Sized>(
             Vec::new()
         }
         Err(ExecutorError::Error(_)) => {
+            metrics.executor_errors += 1;
+            Vec::new()
+        }
+        Err(ExecutorError::ArtifactUnavailable) => {
             metrics.executor_errors += 1;
             Vec::new()
         }
@@ -1347,6 +1843,7 @@ fn collect_player_results(
     tick: Tick,
     state_checksum: u64,
     collect_inputs: &HashMap<PlayerId, TickSnapshot>,
+    world_config: &WorldConfigSnapshot,
 ) -> Vec<PlayerCollectResult> {
     if executors.len() <= 1 {
         return executors
@@ -1357,6 +1854,7 @@ fn collect_player_results(
                     player_id,
                     state_checksum,
                     collect_inputs,
+                    world_config,
                     executor.as_mut(),
                 )
             })
@@ -1371,6 +1869,7 @@ fn collect_player_results(
                 player_id,
                 state_checksum,
                 collect_inputs,
+                world_config,
                 executor.as_mut(),
             )
         })
@@ -1433,6 +1932,7 @@ where
                 cache.rng_context.clone(),
                 cache.raw_commands(world_seed),
                 cache.player_fuel_metrics.clone(),
+                cache.replay_input_envelopes.clone(),
             )
         });
 
@@ -1441,57 +1941,77 @@ where
         let player_ids = self.executors.keys().copied().collect::<Vec<_>>();
         let (collect_inputs, collect_snapshot_hash, rng_context) =
             collect_inputs_for_players(&mut self.world, &player_ids, tick, state_checksum);
-        let (raw_commands, player_fuel_metrics) = if let Some((_, _, commands, fuel_metrics)) =
-            &cache_context
-        {
-            (commands.clone(), fuel_metrics.clone())
-        } else {
-            let mut results =
-                collect_player_results(&mut self.executors, tick, state_checksum, &collect_inputs);
-            results.sort_by_key(|result| result.player_id);
+        let replay_environment = ReplayEnvironment::capture(self.world.app.world());
+        let (raw_commands, player_fuel_metrics, replay_input_envelopes) =
+            if let Some((_, _, commands, fuel_metrics, replay_input_envelopes)) = &cache_context {
+                (
+                    commands.clone(),
+                    fuel_metrics.clone(),
+                    replay_input_envelopes.clone(),
+                )
+            } else {
+                let mut results = collect_player_results(
+                    &mut self.executors,
+                    tick,
+                    state_checksum,
+                    &collect_inputs,
+                    &replay_environment.world_config,
+                );
+                results.sort_by_key(|result| result.player_id);
 
-            for result in &results {
-                self.metrics.add(&result.metrics);
-            }
+                for result in &results {
+                    self.metrics.add(&result.metrics);
+                }
 
-            // Build CollectCache for potential retry
-            let mut by_player: indexmap::IndexMap<PlayerId, Vec<RawCommand>> =
-                indexmap::IndexMap::new();
-            let mut collect_fuel_metrics = TickMetrics::default();
-            let player_fuel_metrics = collect_player_fuel_metrics(
-                &active_players,
-                &results
-                    .iter()
-                    .map(|result| (result.player_id, result.fuel_metrics.clone()))
-                    .collect::<indexmap::IndexMap<_, _>>(),
-            );
-            for result in &results {
-                by_player.insert(result.player_id, result.commands.clone());
-                collect_fuel_metrics.add(&result.metrics);
-            }
-            self.collect_cache = Some(CollectCache {
-                tick,
-                state_checksum,
-                by_player,
-                fuel_metrics: collect_fuel_metrics,
-                collect_snapshot_hash,
-                rng_context: rng_context.clone(),
-                active_players: active_players.clone(),
-                player_fuel_metrics: player_fuel_metrics.clone(),
-            });
+                // Build CollectCache for potential retry
+                let mut by_player: indexmap::IndexMap<PlayerId, Vec<RawCommand>> =
+                    indexmap::IndexMap::new();
+                let mut collect_fuel_metrics = TickMetrics::default();
+                let player_fuel_metrics = collect_player_fuel_metrics(
+                    &active_players,
+                    &results
+                        .iter()
+                        .map(|result| (result.player_id, result.fuel_metrics.clone()))
+                        .collect::<indexmap::IndexMap<_, _>>(),
+                );
+                let replay_input_envelopes = replay_input_envelopes_for_collect_inputs(
+                    &collect_inputs,
+                    &replay_environment.world_config,
+                    &player_fuel_metrics,
+                );
+                for result in &results {
+                    by_player.insert(result.player_id, result.commands.clone());
+                    collect_fuel_metrics.add(&result.metrics);
+                }
+                self.collect_cache = Some(CollectCache {
+                    tick,
+                    state_checksum,
+                    by_player,
+                    fuel_metrics: collect_fuel_metrics,
+                    collect_snapshot_hash,
+                    rng_context: rng_context.clone(),
+                    active_players: active_players.clone(),
+                    player_fuel_metrics: player_fuel_metrics.clone(),
+                    replay_input_envelopes: replay_input_envelopes.clone(),
+                });
 
-            let collected = results
-                .into_iter()
-                .map(|result| CollectedPlayerCommands {
-                    player_id: result.player_id,
-                    commands: result.commands,
-                })
-                .collect::<Vec<_>>();
-            (
-                serial_execution_queue_for_active_players(collected, world_seed, &active_players),
-                player_fuel_metrics,
-            )
-        };
+                let collected = results
+                    .into_iter()
+                    .map(|result| CollectedPlayerCommands {
+                        player_id: result.player_id,
+                        commands: result.commands,
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    serial_execution_queue_for_active_players(
+                        collected,
+                        world_seed,
+                        &active_players,
+                    ),
+                    player_fuel_metrics,
+                    replay_input_envelopes,
+                )
+            };
         let collect_duration_ms = collect_started_at.elapsed().as_millis() as u64;
         self.metrics.collect_duration_ms = collect_duration_ms;
         if collect_duration_ms > COLLECT_TIMEOUT_MS {
@@ -1515,14 +2035,6 @@ where
                 execute_deterministic_with_loop(&mut self.world, attempt_commands, &mut tick_loop);
             let execute_duration_ms = execute_started_at.elapsed().as_millis() as u64;
             self.metrics.execute_duration_ms = execute_duration_ms;
-            if execute_duration_ms > EXECUTE_TIMEOUT_MS {
-                self.metrics.execute_timeouts += 1;
-                last_accepted = remap_commands(execution.commands, &entity_map.inverse());
-                last_rejections = execution.rejections;
-                world_snapshot.clone().restore(self.world.app.world_mut());
-                break;
-            }
-
             let accepted = remap_commands(execution.commands, &entity_map.inverse());
             let rejections = execution.rejections;
             let metrics_before_execution = self.metrics.clone();
@@ -1555,12 +2067,16 @@ where
             trace.security_alerts = SecurityAuditor::default().audit_trace(&trace, None);
             let (environment_snapshot_hash, environment_rng_context) = cache_context
                 .as_ref()
-                .map(|(snapshot_hash, rng_context, _, _)| (*snapshot_hash, rng_context.clone()))
+                .map(|(snapshot_hash, rng_context, _, _, _)| (*snapshot_hash, rng_context.clone()))
                 .unwrap_or((collect_snapshot_hash, rng_context.clone()));
             let environment_fuel_metrics = cache_context
                 .as_ref()
-                .map(|(_, _, _, fuel_metrics)| fuel_metrics.clone())
+                .map(|(_, _, _, fuel_metrics, _)| fuel_metrics.clone())
                 .unwrap_or_else(|| player_fuel_metrics.clone());
+            let environment_replay_inputs = cache_context
+                .as_ref()
+                .map(|(_, _, _, _, replay_input_envelopes)| replay_input_envelopes.clone())
+                .unwrap_or_else(|| replay_input_envelopes.clone());
             let deploy_activation_decisions =
                 deploy_activation_decisions_for_tick(self.world.app.world(), tick);
             let environment = ReplayEnvironment::capture(self.world.app.world())
@@ -1569,6 +2085,7 @@ where
                     environment_rng_context,
                     active_players.clone(),
                     environment_fuel_metrics,
+                    environment_replay_inputs,
                 )
                 .with_deploy_activation_decisions(deploy_activation_decisions);
             last_accepted = accepted;
@@ -1719,6 +2236,10 @@ where
                 self.metrics.executor_errors += 1;
                 Vec::new()
             }
+            Err(ExecutorError::ArtifactUnavailable) => {
+                self.metrics.executor_errors += 1;
+                Vec::new()
+            }
         };
         let collect_duration_ms = collect_started_at.elapsed().as_millis() as u64;
         self.metrics.collect_duration_ms = collect_duration_ms;
@@ -1740,6 +2261,13 @@ where
             collect_command_intents(self.player_id, tick, CommandSource::Wasm, intents)
                 .unwrap_or_default();
         sort_raw_commands_for_active_players(&mut raw_commands, world_seed, &active_players);
+        let single_player_fuel_metrics =
+            single_player_fuel_metrics(self.player_id, &player_collect_metrics);
+        let replay_input_envelopes = replay_input_envelopes_for_collect_inputs(
+            &collect_inputs,
+            &ReplayEnvironment::capture(self.world.app.world()).world_config,
+            &single_player_fuel_metrics,
+        );
 
         let mut last_accepted = Vec::new();
         let mut last_rejections = Vec::new();
@@ -1757,13 +2285,6 @@ where
                 execute_deterministic_with_loop(&mut self.world, attempt_commands, &mut tick_loop);
             let execute_duration_ms = execute_started_at.elapsed().as_millis() as u64;
             self.metrics.execute_duration_ms = execute_duration_ms;
-            if execute_duration_ms > EXECUTE_TIMEOUT_MS {
-                self.metrics.execute_timeouts += 1;
-                last_accepted = remap_commands(execution.commands, &entity_map.inverse());
-                last_rejections = execution.rejections;
-                world_snapshot.clone().restore(self.world.app.world_mut());
-                break;
-            }
             let accepted = remap_commands(execution.commands, &entity_map.inverse());
             let rejections = execution.rejections;
             let metrics_before_execution = self.metrics.clone();
@@ -1801,7 +2322,8 @@ where
                     collect_snapshot_hash,
                     rng_context.clone(),
                     active_players.clone(),
-                    single_player_fuel_metrics(self.player_id, &player_collect_metrics),
+                    single_player_fuel_metrics.clone(),
+                    replay_input_envelopes.clone(),
                 )
                 .with_deploy_activation_decisions(deploy_activation_decisions);
             last_accepted = accepted;
@@ -1937,6 +2459,7 @@ where
             rng_context: RngContext::default(),
             active_players: Vec::new(),
             player_fuel_metrics: Vec::new(),
+            replay_input_envelopes: Vec::new(),
             deploy_activation_decisions: Vec::new(),
         };
         self.commit_with_environment(trace, environment)
@@ -1969,6 +2492,7 @@ pub fn tick_trace_writes(trace: &TickTrace) -> Result<Vec<TickTraceWrite>, Commi
         rng_context: RngContext::default(),
         active_players: Vec::new(),
         player_fuel_metrics: Vec::new(),
+        replay_input_envelopes: Vec::new(),
         deploy_activation_decisions: Vec::new(),
     };
     tick_trace_writes_with_environment(trace, &environment)
@@ -2012,6 +2536,10 @@ pub fn tick_trace_writes_with_environment(
         (
             tick_key(trace.tick, "resource_ledger"),
             encode(&trace.resource_ledger, "resource ledger")?,
+        ),
+        (
+            tick_key(trace.tick, "replay_input_envelope"),
+            encode(&environment.replay_input_envelopes, "replay input envelope")?,
         ),
         (
             tick_key(trace.tick, "security_alerts"),
@@ -2106,7 +2634,27 @@ fn execute_deterministic_with_loop(
     let mut accepted = Vec::new();
     let mut rejections = Vec::new();
     let mut refunds = RefundAccumulator::default();
+    let mut idempotency = CommandIdempotencyTable::default();
     for raw in commands {
+        match idempotency.check(&raw) {
+            IdempotencyDecision::Duplicate => continue,
+            IdempotencyDecision::Conflict => {
+                let mut rejection = CommandRejection::new(raw, RejectionReason::SchemaViolation);
+                if let Some(detail) = rejection.detail.as_object_mut() {
+                    detail.insert(
+                        "idempotency_key".to_string(),
+                        serde_json::json!(rejection.command.auth.idempotency_key),
+                    );
+                    detail.insert(
+                        "conflict".to_string(),
+                        serde_json::json!("idempotency_key_reused_with_different_command"),
+                    );
+                }
+                rejections.push(rejection);
+                continue;
+            }
+            IdempotencyDecision::Execute => {}
+        }
         let current_tick = world.tick_head();
         world.app.world_mut().resource_mut::<CurrentTick>().0 = current_tick.max(raw.tick);
         match raw.clone().validate_and_apply(world.app.world_mut()) {
@@ -2154,8 +2702,23 @@ pub(crate) fn replay_tick(
     previous_state: &TickState,
     trace: &TickTrace,
 ) -> Result<TickState, ReplayError> {
-    let mut world = crate::world::create_world();
+    let environment = capture_replay_environment(previous_state, trace);
+    replay_tick_with_environment(previous_state, trace, &environment)
+}
+
+pub(crate) fn replay_tick_with_environment(
+    previous_state: &TickState,
+    trace: &TickTrace,
+    environment: &ReplayEnvironment,
+) -> Result<TickState, ReplayError> {
+    validate_replay_environment_attestation(trace, environment)?;
+
+    let mut world = crate::world::create_world_with_mode_and_config(
+        WorldMode::Default,
+        environment.world_config.config.clone(),
+    );
     let entity_map = previous_state.clone().restore(world.app.world_mut());
+    validate_replay_world(trace, environment, &mut world, &entity_map.inverse())?;
     let replay_commands = remap_commands(trace.commands.clone(), &entity_map);
     let mut tick_loop = TickLoop::new(trace.tick);
     tick_loop.enter(TickPhase::Collect);
@@ -2184,11 +2747,192 @@ pub(crate) fn replay_tick(
     Ok(replayed.state)
 }
 
+fn capture_replay_environment(previous_state: &TickState, trace: &TickTrace) -> ReplayEnvironment {
+    let mut world = crate::world::create_world();
+    previous_state.clone().restore(world.app.world_mut());
+    let active_players = canonical_active_players(vec![trace.player_id]);
+    let state_checksum = world.state_checksum();
+    let (collect_inputs, collect_snapshot_hash, rng_context) =
+        collect_inputs_for_players(&mut world, &active_players, trace.tick, state_checksum);
+    let player_fuel_metrics = vec![PlayerFuelMetric {
+        player_id: trace.player_id,
+        consumed: trace.metrics.fuel_consumed,
+        refund_events: trace.metrics.refund_events,
+        refunded: trace.metrics.refund_fuel,
+    }];
+    let mut environment = ReplayEnvironment::capture(world.app.world()).with_collect_context(
+        collect_snapshot_hash,
+        rng_context,
+        active_players,
+        player_fuel_metrics,
+        Vec::new(),
+    );
+    environment.replay_input_envelopes = replay_input_envelopes_for_collect_inputs(
+        &collect_inputs,
+        &environment.world_config,
+        &environment.player_fuel_metrics,
+    );
+    environment
+}
+
+fn validate_replay_environment_attestation(
+    trace: &TickTrace,
+    environment: &ReplayEnvironment,
+) -> Result<(), ReplayError> {
+    if accepted_mods_lock_hash(&environment.mods_lock.plugins)
+        != environment.mods_lock.accepted_lock_hash
+        || resolved_mod_config_hash(&environment.mods_lock.resolved_config)
+            != environment.mods_lock.aggregate_resolved_config_hash
+    {
+        return Err(replay_environment_mismatch(trace.tick, "mods_lock"));
+    }
+    let active_players = canonical_active_players(environment.active_players.clone());
+    if active_players != environment.active_players
+        || environment.replay_input_envelopes.len() != active_players.len()
+    {
+        return Err(replay_environment_mismatch(trace.tick, "replay_input"));
+    }
+    let config_hash = world_config_hash(&environment.world_config);
+    let config_payload = encode_world_config_snapshot_v2(&environment.world_config);
+    for (player_id, envelope) in active_players
+        .iter()
+        .zip(&environment.replay_input_envelopes)
+    {
+        if envelope.player_id != *player_id
+            || *blake3::hash(&envelope.canonical_tick_input).as_bytes() != envelope.tick_input_hash
+        {
+            return Err(replay_environment_mismatch(trace.tick, "replay_input"));
+        }
+        let Ok((input, _)) = decode_tick_input_with_snapshot(&envelope.canonical_tick_input) else {
+            return Err(replay_environment_mismatch(trace.tick, "replay_input"));
+        };
+        if input.tick != trace.tick || input.player_id != *player_id {
+            return Err(replay_environment_mismatch(trace.tick, "replay_input"));
+        }
+        if input.world_config_view.config_hash != config_hash
+            || input.world_config_view.payload != config_payload
+        {
+            return Err(replay_environment_mismatch(trace.tick, "world_config"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_replay_world(
+    trace: &TickTrace,
+    environment: &ReplayEnvironment,
+    world: &mut SwarmWorld,
+    inverse_entity_map: &EntityRemap,
+) -> Result<(), ReplayError> {
+    let captured = ReplayEnvironment::capture(world.app.world());
+    if captured.mods_lock != environment.mods_lock {
+        return Err(replay_environment_mismatch(trace.tick, "mods_lock"));
+    }
+    if world_config_hash(&captured.world_config) != world_config_hash(&environment.world_config) {
+        return Err(replay_environment_mismatch(trace.tick, "world_config"));
+    }
+    if trace.system_manifest_hash != [0; 32] && trace.system_manifest_hash != system_manifest_hash()
+    {
+        return Err(replay_environment_mismatch(trace.tick, "system_manifest"));
+    }
+    let replay_action_manifest_hash = action_manifest_hash(world.app.world());
+    if trace.action_manifest_hash != [0; 32]
+        && trace.action_manifest_hash != replay_action_manifest_hash
+    {
+        return Err(replay_environment_mismatch(trace.tick, "action_manifest"));
+    }
+
+    let state_checksum = world.state_checksum();
+    let (mut collect_inputs, _, rng_context) = collect_inputs_for_players(
+        world,
+        &environment.active_players,
+        trace.tick,
+        state_checksum,
+    );
+    let collect_snapshot_hash =
+        normalize_replay_collect_inputs(&mut collect_inputs, inverse_entity_map);
+    if collect_snapshot_hash != environment.collect_snapshot_hash {
+        return Err(replay_environment_mismatch(trace.tick, "collect_snapshot"));
+    }
+    if rng_context != environment.rng_context {
+        return Err(replay_environment_mismatch(trace.tick, "rng_context"));
+    }
+    let replay_inputs = replay_input_envelopes_for_collect_inputs(
+        &collect_inputs,
+        &environment.world_config,
+        &environment.player_fuel_metrics,
+    );
+    if replay_inputs != environment.replay_input_envelopes {
+        return Err(replay_environment_mismatch(trace.tick, "replay_input"));
+    }
+    Ok(())
+}
+
+fn normalize_replay_collect_inputs(
+    collect_inputs: &mut HashMap<PlayerId, TickSnapshot>,
+    inverse_entity_map: &EntityRemap,
+) -> [u8; 32] {
+    for snapshot in collect_inputs.values_mut() {
+        for entity_id in &mut snapshot.perception.actor_context.active_drones {
+            remap_snapshot_entity_id(entity_id, inverse_entity_map);
+        }
+        if let Some(entity_id) = &mut snapshot.perception.actor_context.primary_drone {
+            remap_snapshot_entity_id(entity_id, inverse_entity_map);
+        }
+        for entity in snapshot
+            .perception
+            .entities
+            .iter_mut()
+            .chain(&mut snapshot.perception.resources)
+            .chain(&mut snapshot.perception.events)
+        {
+            remap_snapshot_entity_id(&mut entity.entity_id, inverse_entity_map);
+        }
+        for message in &mut snapshot.perception.messages {
+            remap_snapshot_entity_id(&mut message.sender_id, inverse_entity_map);
+            remap_snapshot_entity_id(&mut message.recipient_id, inverse_entity_map);
+        }
+        snapshot.snapshot_hash = snapshot_hash(&snapshot.perception);
+    }
+
+    let mut player_ids = collect_inputs.keys().copied().collect::<Vec<_>>();
+    player_ids.sort_unstable();
+    let mut hasher = blake3::Hasher::new();
+    for player_id in player_ids {
+        hasher.update(&player_id.to_le_bytes());
+        hasher.update(&collect_inputs[&player_id].snapshot_hash);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn remap_snapshot_entity_id(entity_id: &mut String, entity_map: &EntityRemap) {
+    let Ok(raw_id) = entity_id.parse::<u64>() else {
+        return;
+    };
+    if let Some(mapped) = entity_map.get(SnapshotEntity(raw_id)) {
+        *entity_id = mapped.0.to_string();
+    }
+}
+
+fn replay_environment_mismatch(tick: Tick, field: &'static str) -> ReplayError {
+    ReplayError::EnvironmentMismatch { tick, field }
+}
+
 #[cfg(test)]
-fn replay(initial_state: &TickState, traces: &[TickTrace]) -> Result<TickState, ReplayError> {
+fn replay(
+    initial_state: &TickState,
+    traces: &[TickTrace],
+    environments: &[ReplayEnvironment],
+) -> Result<TickState, ReplayError> {
+    if traces.len() != environments.len() {
+        return Err(replay_environment_mismatch(
+            traces.first().map_or(0, |trace| trace.tick),
+            "environment_count",
+        ));
+    }
     let mut state = initial_state.clone();
-    for trace in traces {
-        state = replay_tick(&state, trace)?;
+    for (trace, environment) in traces.iter().zip(environments) {
+        state = replay_tick_with_environment(&state, trace, environment)?;
     }
 
     Ok(state)
@@ -2247,61 +2991,6 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
         | CommandAction::UpgradeController {
             object_id,
             target_id: controller_id,
-        }
-        | CommandAction::Attack {
-            object_id,
-            target_id: controller_id,
-            ..
-        }
-        | CommandAction::RangedAttack {
-            object_id,
-            target_id: controller_id,
-            ..
-        }
-        | CommandAction::Heal {
-            object_id,
-            target_id: controller_id,
-            ..
-        }
-        | CommandAction::Hack {
-            object_id,
-            target_id: controller_id,
-            ..
-        }
-        | CommandAction::Drain {
-            object_id,
-            target_id: controller_id,
-            ..
-        }
-        | CommandAction::Overload {
-            object_id,
-            target_id: controller_id,
-            ..
-        }
-        | CommandAction::Debilitate {
-            object_id,
-            target_id: controller_id,
-            ..
-        }
-        | CommandAction::Disrupt {
-            object_id,
-            target_id: controller_id,
-            ..
-        }
-        | CommandAction::Fortify {
-            object_id,
-            target_id: controller_id,
-            ..
-        }
-        | CommandAction::Leech {
-            object_id,
-            target_id: controller_id,
-            ..
-        }
-        | CommandAction::Fabricate {
-            object_id,
-            target_id: controller_id,
-            ..
         } => {
             remap_object_id(object_id, entity_map);
             remap_object_id(controller_id, entity_map);
@@ -2327,27 +3016,7 @@ fn remap_command_action(action: &mut CommandAction, entity_map: &EntityRemap) {
         }
         CommandAction::TransferToGlobal { .. }
         | CommandAction::TransferFromGlobal { .. }
-        | CommandAction::AlliedTransfer { .. }
-        | CommandAction::CreateContractSettlement { .. }
-        | CommandAction::SettleContract { .. }
-        | CommandAction::CancelContract { .. }
-        | CommandAction::CreateMerchantQuote { .. }
-        | CommandAction::AcceptMerchantTrade { .. }
-        | CommandAction::CreateP2POffer { .. }
-        | CommandAction::AcceptP2POffer { .. }
-        | CommandAction::CancelP2POffer { .. }
-        | CommandAction::RefundP2POffer { .. }
-        | CommandAction::CreateAuction { .. }
-        | CommandAction::BidAuction { .. }
-        | CommandAction::SettleAuction { .. }
-        | CommandAction::CancelAuction { .. }
-        | CommandAction::CreateEscrow { .. }
-        | CommandAction::ReleaseEscrow { .. }
-        | CommandAction::RefundEscrow { .. }
-        | CommandAction::CreateLoanOffer { .. }
-        | CommandAction::AcceptLoan { .. }
-        | CommandAction::RepayLoan { .. }
-        | CommandAction::DefaultLoan { .. } => {}
+        | CommandAction::AlliedTransfer { .. } => {}
     }
 }
 
@@ -2463,6 +3132,14 @@ impl From<SnapshotEntity> for Entity {
 pub struct EntityRemap(HashMap<SnapshotEntity, SnapshotEntity>);
 
 impl EntityRemap {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     fn insert(&mut self, old: SnapshotEntity, new: SnapshotEntity) {
         self.0.insert(old, new);
     }
@@ -2906,6 +3583,9 @@ mod tests {
     use crate::{CommandIntent, create_world, energy_cost};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
+    use swarm_engine_api::abi::{
+        CodecError, MAX_SNAPSHOT_ITEMS, SwarmCodecMessage, decode_tick_input_with_snapshot,
+    };
     use swarm_engine_api::ids::{BodyPart, RoomId};
     use swarm_engine_plugin_sdk::components::{Structure, StructureType};
 
@@ -3097,7 +3777,7 @@ mod tests {
         }
     }
 
-    fn transfer_to_global_trace() -> (TickState, TickTrace) {
+    fn transfer_to_global_trace() -> (TickState, TickTrace, ReplayEnvironment) {
         let mut world = create_world();
         world
             .app
@@ -3121,16 +3801,17 @@ mod tests {
             world,
             1,
             executor,
-            InMemoryTickCommitter::default(),
+            EnvironmentRecordingCommitter::default(),
             InMemoryTickBroadcaster::default(),
         );
 
         let report = scheduler.tick();
         assert!(report.committed);
         let trace = scheduler.committer.records[0].clone();
+        let environment = scheduler.committer.environments[0].clone();
         assert!(!trace.resource_ledger.operations.is_empty());
         assert_ne!(trace.resource_ledger.ledger_digest, [0; 32]);
-        (previous_state, trace)
+        (previous_state, trace, environment)
     }
 
     #[test]
@@ -3143,7 +3824,7 @@ mod tests {
             .expect("atomic tick commit should succeed");
         let store = committer.into_inner();
 
-        assert_eq!(store.writes.len(), 8);
+        assert_eq!(store.writes.len(), 9);
         for suffix in [
             "commit_record",
             "state",
@@ -3151,6 +3832,7 @@ mod tests {
             "rejections",
             "metrics",
             "resource_ledger",
+            "replay_input_envelope",
             "security_alerts",
             "delta",
         ] {
@@ -3173,7 +3855,7 @@ mod tests {
     }
 
     #[test]
-    fn redb_tick_committer_writes_ten_field_commit_record() {
+    fn redb_tick_committer_writes_replay_binding_commit_record() {
         let trace = sample_trace();
         let mut committer = RedbTickCommitter::new(FakeAtomicStore::default());
 
@@ -3183,13 +3865,215 @@ mod tests {
             serde_json::from_slice(&store.writes[&tick_key(42, "commit_record")]).unwrap();
         let record_json = serde_json::to_value(&record).unwrap();
 
-        assert_eq!(record_json.as_object().unwrap().len(), 10);
+        assert_eq!(record_json.as_object().unwrap().len(), 12);
         assert_eq!(record.commands, trace.commands);
         assert_eq!(record.rejections, trace.rejections);
         assert_eq!(record.state_checksum, trace.state_checksum);
         assert_eq!(
             record.commands_hash,
             commands_hash(&record.commands, &record.rejections)
+        );
+        assert_ne!(record.mods_lock_hash, [0; 32]);
+        assert_ne!(record.resolved_config_hash, [0; 32]);
+    }
+
+    #[test]
+    fn mod_identity_and_resolved_config_hashes_are_deterministic_and_sensitive() {
+        use crate::plugins::{
+            PluginIdentitySnapshot, PluginSource, PluginTrustClass, ResolvedPluginConfigValue,
+        };
+
+        let identities = std::collections::BTreeMap::from([
+            (
+                "combat-core".to_string(),
+                PluginIdentitySnapshot {
+                    plugin_id: "combat-core".to_string(),
+                    version: "0.1.0".to_string(),
+                    source: PluginSource::LocalBuild,
+                    package_hash: None,
+                    signature_hash: None,
+                    trust_class: Some(PluginTrustClass::TrustedLocalBuild),
+                    design_profile: "profile-a".to_string(),
+                },
+            ),
+            (
+                "special-attacks".to_string(),
+                PluginIdentitySnapshot {
+                    plugin_id: "special-attacks".to_string(),
+                    version: "0.1.0".to_string(),
+                    source: PluginSource::LocalBuild,
+                    package_hash: None,
+                    signature_hash: None,
+                    trust_class: Some(PluginTrustClass::TrustedLocalBuild),
+                    design_profile: "profile-b".to_string(),
+                },
+            ),
+        ]);
+        let reordered = identities
+            .iter()
+            .rev()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        assert_eq!(
+            accepted_mods_lock_hash(&identities),
+            accepted_mods_lock_hash(&reordered)
+        );
+
+        let mut changed_identity = identities.clone();
+        changed_identity.get_mut("special-attacks").unwrap().version = "0.2.0".to_string();
+        assert_ne!(
+            accepted_mods_lock_hash(&identities),
+            accepted_mods_lock_hash(&changed_identity)
+        );
+
+        let config = std::collections::BTreeMap::from([(
+            "special-attacks".to_string(),
+            std::collections::BTreeMap::from([(
+                "fabricate_allowed_output_structures".to_string(),
+                ResolvedPluginConfigValue::Array(vec![ResolvedPluginConfigValue::String(
+                    "Tower".to_string(),
+                )]),
+            )]),
+        )]);
+        let reordered_config = config
+            .iter()
+            .rev()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(
+            resolved_mod_config_hash(&config),
+            resolved_mod_config_hash(&reordered_config)
+        );
+
+        let mut changed_config = config.clone();
+        changed_config.get_mut("special-attacks").unwrap().insert(
+            "fabricate_allowed_output_structures".to_string(),
+            ResolvedPluginConfigValue::Array(vec![ResolvedPluginConfigValue::String(
+                "Storage".to_string(),
+            )]),
+        );
+        assert_ne!(
+            resolved_mod_config_hash(&config),
+            resolved_mod_config_hash(&changed_config)
+        );
+    }
+
+    #[test]
+    fn replay_mods_lock_missing_identity_fields_fails_closed() {
+        let error = serde_json::from_value::<ModsLock>(serde_json::json!({
+            "modules": { "combat-core": "0.1.0" },
+            "descriptor_hash": "legacy-only"
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("missing field"));
+    }
+
+    #[test]
+    fn replay_input_envelope_uses_shared_tick_input_codec() {
+        let mut world = create_world();
+        world.spawn_drone(7, 10, 10, vec![BodyPart::Move]);
+        let state_checksum = world.state_checksum();
+        let (collect_inputs, _, _) =
+            collect_inputs_for_players(&mut world, &[7], 42, state_checksum);
+        let environment = ReplayEnvironment::capture(world.app.world());
+        let fuel = vec![PlayerFuelMetric {
+            player_id: 7,
+            consumed: 123,
+            refund_events: 0,
+            refunded: 0,
+        }];
+
+        let envelopes = replay_input_envelopes_for_collect_inputs(
+            &collect_inputs,
+            &environment.world_config,
+            &fuel,
+        );
+
+        assert_eq!(envelopes.len(), 1);
+        let (decoded, decoded_snapshot) =
+            decode_tick_input_with_snapshot(&envelopes[0].canonical_tick_input).unwrap();
+        let snapshot = collect_inputs.get(&7).unwrap();
+        assert_eq!(decoded.tick, 42);
+        assert_eq!(decoded.player_id, 7);
+        assert_eq!(decoded_snapshot, visible_snapshot_for_tick(snapshot));
+        assert_eq!(
+            decoded.world_config_view.config_hash,
+            world_config_hash(&environment.world_config)
+        );
+        assert_eq!(
+            decoded.world_config_view.payload,
+            encode_world_config_snapshot_v2(&environment.world_config)
+        );
+        assert_eq!(decoded.fuel_budget_hints.fuel_remaining, MAX_FUEL - 123);
+        assert_eq!(
+            decoded.encode_swarm_message().unwrap(),
+            envelopes[0].canonical_tick_input
+        );
+
+        let direct_bytes = tick_input_bytes_for_snapshot(snapshot, &environment.world_config)
+            .expect("snapshot should encode as ABI v2 TickInput");
+        let (direct_input, direct_snapshot) =
+            decode_tick_input_with_snapshot(&direct_bytes).unwrap();
+        assert_eq!(direct_input.tick, snapshot.tick);
+        assert_eq!(direct_input.player_id, snapshot.player_id);
+        assert_eq!(direct_snapshot, visible_snapshot_for_tick(snapshot));
+
+        let mut mismatched_input = direct_input.clone();
+        let mut mismatched_snapshot = direct_snapshot.clone();
+        mismatched_snapshot.tick += 1;
+        mismatched_input.visible_snapshot = encode_visible_snapshot(&mismatched_snapshot).unwrap();
+        let mismatched_bytes = mismatched_input.encode_swarm_message().unwrap();
+        assert!(matches!(
+            decode_tick_input_with_snapshot(&mismatched_bytes),
+            Err(CodecError::InvalidValue {
+                field: "TickInput.visible_snapshot.tick",
+                ..
+            })
+        ));
+
+        let mut oversized_snapshot = direct_snapshot;
+        oversized_snapshot.actor_context.active_drones =
+            vec!["drone".to_string(); MAX_SNAPSHOT_ITEMS + 1];
+        assert!(matches!(
+            encode_visible_snapshot(&oversized_snapshot),
+            Err(CodecError::BoundsExceeded {
+                field: "SnapshotActorContext.active_drones",
+                ..
+            })
+        ));
+
+        let mut oversized_inner_bytes =
+            encode_visible_snapshot(&visible_snapshot_for_tick(snapshot)).unwrap();
+        let active_drones_len_offset = 20 + 8 + 4 + 8 + 8;
+        oversized_inner_bytes[active_drones_len_offset..active_drones_len_offset + 4]
+            .copy_from_slice(&((MAX_SNAPSHOT_ITEMS + 1) as u32).to_le_bytes());
+        let mut oversized_input = decoded;
+        oversized_input.visible_snapshot = oversized_inner_bytes;
+        let oversized_input_bytes = oversized_input.encode_swarm_message().unwrap();
+        assert!(matches!(
+            decode_tick_input_with_snapshot(&oversized_input_bytes),
+            Err(CodecError::BoundsExceeded {
+                field: "SnapshotActorContext.active_drones",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn world_config_hash_uses_v2_binary_encoding_not_json() {
+        let world_config = WorldConfigSnapshot {
+            config: WorldConfig::default(),
+        };
+
+        assert_eq!(
+            world_config_hash(&world_config),
+            *blake3::hash(&encode_world_config_snapshot_v2(&world_config)).as_bytes()
+        );
+        assert_ne!(
+            world_config_hash(&world_config),
+            *blake3::hash(&serde_json::to_vec(&world_config).unwrap()).as_bytes()
         );
     }
 
@@ -3202,6 +4086,7 @@ mod tests {
                 [8; 32],
                 RngContext::default(),
                 active_players,
+                Vec::new(),
                 Vec::new(),
             )
         };
@@ -3329,7 +4214,7 @@ mod tests {
         trace.commands = vec![raw_harvest(7, 1, 42, 100, 200)];
         trace.rejections = vec![command_rejection_with_refund(
             raw_harvest(9, 1, 42, 101, 201),
-            RejectionReason::SourceEmpty,
+            RejectionReason::InsufficientResources,
             5_000,
         )];
         let mut resource_ledger = ResourceLedger::default();
@@ -3367,6 +4252,7 @@ mod tests {
                     refunded: 5_000,
                 },
             ],
+            replay_input_envelopes: Vec::new(),
             deploy_activation_decisions: Vec::new(),
         };
 
@@ -3848,8 +4734,9 @@ mod tests {
 
         let mut world = create_world();
         let (collect_inputs, _, _) = collect_inputs_for_players(&mut world, &[7], 3, 99);
+        let world_config = ReplayEnvironment::capture(world.app.world()).world_config;
 
-        let results = collect_player_results(&mut executors, 3, 99, &collect_inputs);
+        let results = collect_player_results(&mut executors, 3, 99, &collect_inputs, &world_config);
 
         assert_eq!(*calls.lock().unwrap(), 1);
         assert_eq!(results.len(), 1);
@@ -4138,6 +5025,31 @@ mod tests {
         );
     }
 
+    fn slow_apply_system() {
+        std::thread::sleep(Duration::from_millis(650));
+    }
+
+    #[test]
+    fn execute_duration_above_old_hard_timeout_still_commits() {
+        let mut world = create_world();
+        world.app.add_systems(Update, slow_apply_system);
+        let mut scheduler = TickScheduler::new(
+            world,
+            1,
+            StaticExecutor {
+                result: Ok(Vec::new()),
+            },
+            InMemoryTickCommitter::default(),
+            InMemoryTickBroadcaster::default(),
+        );
+
+        let report = scheduler.tick();
+
+        assert!(report.committed);
+        assert!(report.metrics.execute_duration_ms >= 500);
+        assert_eq!(report.metrics.execute_timeouts, 0);
+    }
+
     #[test]
     fn normal_tick_full_snapshot_replaces_visible_state_with_empty_removals() {
         let mut world = create_world();
@@ -4363,14 +5275,16 @@ mod tests {
             world,
             1,
             executor,
-            InMemoryTickCommitter::default(),
+            EnvironmentRecordingCommitter::default(),
             InMemoryTickBroadcaster::default(),
         );
 
         scheduler.tick();
         let trace = scheduler.committer.records[0].clone();
+        let environment = scheduler.committer.environments[0].clone();
 
-        let replayed = replay_tick(&previous_state, &trace).expect("replay should match trace");
+        let replayed = replay_tick_with_environment(&previous_state, &trace, &environment)
+            .expect("replay should match trace");
 
         assert_eq!(replayed, trace.state);
     }
@@ -4393,28 +5307,97 @@ mod tests {
             world,
             1,
             executor,
-            InMemoryTickCommitter::default(),
+            EnvironmentRecordingCommitter::default(),
             InMemoryTickBroadcaster::default(),
         );
 
         scheduler.tick();
         let mut trace = scheduler.committer.records[0].clone();
+        let environment = scheduler.committer.environments[0].clone();
         trace.state = previous_state.clone();
 
-        let error =
-            replay_tick(&previous_state, &trace).expect_err("replay should detect mismatch");
+        let error = replay_tick_with_environment(&previous_state, &trace, &environment)
+            .expect_err("replay should detect mismatch");
 
         assert!(matches!(error, ReplayError::StateMismatch { tick: 0, .. }));
     }
 
     #[test]
+    fn replay_tick_rejects_tampered_replay_input_before_execution() {
+        let (previous_state, trace, mut environment) = transfer_to_global_trace();
+        environment.replay_input_envelopes[0].tick_input_hash[0] ^= 0x01;
+
+        let error = replay_tick_with_environment(&previous_state, &trace, &environment)
+            .expect_err("replay should reject a tampered canonical input");
+
+        assert!(matches!(
+            error,
+            ReplayError::EnvironmentMismatch {
+                field: "replay_input",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn replay_tick_rejects_tampered_mod_lock_before_execution() {
+        let (previous_state, trace, mut environment) = transfer_to_global_trace();
+        environment.mods_lock.accepted_lock_hash[0] ^= 0x01;
+
+        let error = replay_tick_with_environment(&previous_state, &trace, &environment)
+            .expect_err("replay should reject a tampered mod lock");
+
+        assert!(matches!(
+            error,
+            ReplayError::EnvironmentMismatch {
+                field: "mods_lock",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn replay_tick_rejects_tampered_world_config_before_execution() {
+        let (previous_state, trace, mut environment) = transfer_to_global_trace();
+        environment.world_config.config.world.world_seed ^= 1;
+
+        let error = replay_tick_with_environment(&previous_state, &trace, &environment)
+            .expect_err("replay should reject a tampered world config");
+
+        assert!(matches!(
+            error,
+            ReplayError::EnvironmentMismatch {
+                field: "world_config",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn replay_tick_rejects_tampered_collect_snapshot_before_execution() {
+        let (previous_state, trace, mut environment) = transfer_to_global_trace();
+        environment.collect_snapshot_hash[0] ^= 0x01;
+
+        let error = replay_tick_with_environment(&previous_state, &trace, &environment)
+            .expect_err("replay should reject a tampered collect snapshot");
+
+        assert!(matches!(
+            error,
+            ReplayError::EnvironmentMismatch {
+                field: "collect_snapshot",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn replay_tick_fails_when_resource_ledger_trace_is_tampered() {
-        let (previous_state, mut trace) = transfer_to_global_trace();
+        let (previous_state, mut trace, environment) = transfer_to_global_trace();
         trace.resource_ledger.ledger_checksum =
             trace.resource_ledger.ledger_checksum.wrapping_add(1);
 
-        let error =
-            replay_tick(&previous_state, &trace).expect_err("replay should detect ledger tamper");
+        let error = replay_tick_with_environment(&previous_state, &trace, &environment)
+            .expect_err("replay should detect ledger tamper");
 
         assert!(matches!(
             error,
@@ -4424,11 +5407,11 @@ mod tests {
 
     #[test]
     fn replay_tick_fails_when_resource_ledger_digest_is_tampered() {
-        let (previous_state, mut trace) = transfer_to_global_trace();
+        let (previous_state, mut trace, environment) = transfer_to_global_trace();
         trace.resource_ledger.ledger_digest[0] ^= 0x01;
 
-        let error =
-            replay_tick(&previous_state, &trace).expect_err("replay should detect digest tamper");
+        let error = replay_tick_with_environment(&previous_state, &trace, &environment)
+            .expect_err("replay should detect digest tamper");
 
         assert!(matches!(
             error,
@@ -4438,10 +5421,10 @@ mod tests {
 
     #[test]
     fn replay_tick_fails_when_resource_ledger_resource_is_tampered() {
-        let (previous_state, mut trace) = transfer_to_global_trace();
+        let (previous_state, mut trace, environment) = transfer_to_global_trace();
         trace.resource_ledger.operations[0].resource = "Mineral".to_string();
 
-        let error = replay_tick(&previous_state, &trace)
+        let error = replay_tick_with_environment(&previous_state, &trace, &environment)
             .expect_err("replay should detect ledger resource tamper");
 
         assert!(matches!(
@@ -4452,11 +5435,11 @@ mod tests {
 
     #[test]
     fn replay_tick_fails_when_resource_ledger_operation_is_tampered() {
-        let (previous_state, mut trace) = transfer_to_global_trace();
+        let (previous_state, mut trace, environment) = transfer_to_global_trace();
         trace.resource_ledger.operations[0].operation =
             crate::resource_ledger::ResourceOperation::PvEAward;
 
-        let error = replay_tick(&previous_state, &trace)
+        let error = replay_tick_with_environment(&previous_state, &trace, &environment)
             .expect_err("replay should detect ledger operation tamper");
 
         assert!(matches!(
@@ -4467,11 +5450,12 @@ mod tests {
 
     #[test]
     fn replay_tick_accepts_legacy_zero_resource_ledger_digest() {
-        let (previous_state, mut trace) = transfer_to_global_trace();
+        let (previous_state, mut trace, environment) = transfer_to_global_trace();
         trace.resource_ledger.previous_ledger_digest = [0; 32];
         trace.resource_ledger.ledger_digest = [0; 32];
 
-        replay_tick(&previous_state, &trace).expect("legacy zero-digest trace should replay");
+        replay_tick_with_environment(&previous_state, &trace, &environment)
+            .expect("legacy zero-digest trace should replay");
     }
 
     #[test]
@@ -4492,7 +5476,7 @@ mod tests {
             world,
             1,
             executor,
-            InMemoryTickCommitter::default(),
+            EnvironmentRecordingCommitter::default(),
             InMemoryTickBroadcaster::default(),
         );
 
@@ -4506,8 +5490,12 @@ mod tests {
         }]);
         scheduler.tick();
 
-        let replayed = replay(&initial_state, &scheduler.committer.records)
-            .expect("trace sequence should replay");
+        let replayed = replay(
+            &initial_state,
+            &scheduler.committer.records,
+            &scheduler.committer.environments,
+        )
+        .expect("trace sequence should replay");
 
         assert_eq!(replayed, scheduler.committer.records[1].state);
     }
@@ -5011,6 +5999,43 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_idempotency_key_with_same_canonical_command_executes_once() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let command = raw_move_with_key(object_id(drone), Direction::Top, "move-once");
+
+        let execution = execute_deterministic(&mut world, vec![command.clone(), command]);
+
+        assert_eq!(execution.commands.len(), 1);
+        assert!(execution.rejections.is_empty());
+    }
+
+    #[test]
+    fn duplicate_idempotency_key_with_different_canonical_command_rejects() {
+        let mut world = create_world();
+        let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Move]);
+        let first = raw_move_with_key(object_id(drone), Direction::Top, "move-conflict");
+        let mut conflicting = first.clone();
+        conflicting.action = CommandAction::Move {
+            object_id: object_id(drone),
+            direction: Direction::Bottom,
+        };
+
+        let execution = execute_deterministic(&mut world, vec![first, conflicting]);
+
+        assert_eq!(execution.commands.len(), 1);
+        assert_eq!(execution.rejections.len(), 1);
+        assert_eq!(
+            execution.rejections[0].rejection,
+            RejectionReason::SchemaViolation
+        );
+        assert_eq!(
+            execution.rejections[0].detail["conflict"],
+            "idempotency_key_reused_with_different_command"
+        );
+    }
+
+    #[test]
     fn fcfs_harvest_conflict_rejects_source_empty_with_refund_and_structured_detail() {
         let mut world = create_world();
         let first = world.spawn_drone(1, 24, 25, vec![BodyPart::Work, BodyPart::Carry]);
@@ -5041,12 +6066,9 @@ mod tests {
         assert_eq!(execution.rejections.len(), 1);
         assert_eq!(execution.next_tick_fuel_credit, 5_000);
         let rejection = &execution.rejections[0];
-        assert_eq!(rejection.rejection, RejectionReason::SourceEmpty);
+        assert_eq!(rejection.rejection, RejectionReason::InsufficientResources);
         assert_eq!(rejection.detail["reason"], "InsufficientResource");
-        assert_eq!(rejection.detail["internal_reason"], "SourceEmpty");
-        assert_eq!(rejection.detail["conflict"], "first_come_first_served");
-        assert_eq!(rejection.detail["refund_policy"]["fuel_percent"], 50);
-        assert_eq!(rejection.detail["target_id"], source_id);
+        assert_eq!(rejection.detail["source"], "Wasm");
     }
 
     #[test]
@@ -5105,9 +6127,8 @@ mod tests {
         assert_eq!(execution.rejections.len(), 1);
         assert_eq!(execution.next_tick_fuel_credit, 5_000);
         let rejection = &execution.rejections[0];
-        assert_eq!(rejection.rejection, RejectionReason::TargetFull);
-        assert_eq!(rejection.detail["reason"], "InsufficientResource");
-        assert_eq!(rejection.detail["internal_reason"], "TargetFull");
+        assert_eq!(rejection.rejection, RejectionReason::CapacityExceeded);
+        assert_eq!(rejection.detail["reason"], "CapacityExceeded");
         assert_eq!(rejection.detail["conflict"], "first_come_first_served");
         assert_eq!(rejection.detail["refund_policy"]["fuel_percent"], 50);
         assert_eq!(rejection.detail["target_id"], object_id(target));
@@ -5131,6 +6152,31 @@ mod tests {
                 object_id,
                 target_id,
                 resource: None,
+            },
+        }
+    }
+
+    fn raw_move_with_key(
+        object_id: ObjectId,
+        direction: Direction,
+        idempotency_key: &str,
+    ) -> RawCommand {
+        RawCommand {
+            player_id: 1,
+            tick: 1,
+            source: CommandSource::Wasm,
+            auth: CommandAuth::server_injected_with_intent_metadata(
+                CommandSource::Wasm,
+                1,
+                1,
+                1,
+                idempotency_key,
+                None,
+            ),
+            sequence: 1,
+            action: CommandAction::Move {
+                object_id,
+                direction,
             },
         }
     }

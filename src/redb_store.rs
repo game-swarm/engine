@@ -16,11 +16,12 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use swarm_engine_api::ids::PlayerId;
 
-use crate::command::{ObjectId, Tick};
+use crate::command::{ObjectId, Tick, canonicalize_persisted_rejection};
 use crate::hot_cache::{CachedSnapshot, RedbSnapshotStore, SnapshotKey};
 use crate::mcp::VisibleWorldSnapshot;
 use crate::tick::{
-    AtomicTickStore, CommitError, DeployActivationDecision, TickCommitRecord, TickState,
+    AtomicTickStore, CommitError, DeployActivationDecision, ReplayInputEnvelope, TickCommitRecord,
+    TickState,
 };
 
 const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
@@ -667,7 +668,7 @@ impl RedbStore {
             manifest_hash: record.manifest_hash,
             system_manifest_hash: payload.system_manifest_hash,
             world_config_hash: record.world_config_hash,
-            mods_lock_hash: payload.mods_lock_hash,
+            mods_lock_hash: record.mods_lock_hash,
         };
         let state_object_id = payload
             .recovery_state_blob
@@ -697,6 +698,17 @@ impl RedbStore {
             previous_chain_hash,
             chain_hash: chain_hash(previous_chain_hash, head.tick_head_hash),
         };
+        let replay_input_envelope_bytes = payload
+            .replay_critical_writes
+            .iter()
+            .find(|(key, _)| key.as_slice() == replay_input_envelope_key(payload.tick).as_slice())
+            .map(|(_, value)| value.clone())
+            .ok_or_else(|| {
+                RedbError::Integrity(format!(
+                    "missing replay_input_envelope write at tick {}",
+                    payload.tick
+                ))
+            })?;
 
         let mut writes = vec![
             (
@@ -711,6 +723,10 @@ impl RedbStore {
             (
                 tick_hash_chain_key(payload.tick),
                 encode(&chain, "tick hash chain")?,
+            ),
+            (
+                replay_input_envelope_key(payload.tick),
+                replay_input_envelope_bytes,
             ),
         ];
         if let Some(state_artifact) = &state_artifact {
@@ -748,6 +764,7 @@ impl RedbStore {
                         "state",
                         "metrics",
                         "resource_ledger",
+                        "replay_input_envelope",
                         "security_alerts",
                         "delta",
                     ]
@@ -1075,6 +1092,7 @@ impl RedbStore {
         }
         if record.manifest_hash != manifest.manifest_hash
             || record.world_config_hash != manifest.world_config_hash
+            || record.mods_lock_hash != manifest.mods_lock_hash
         {
             return Err(RedbError::Integrity(format!(
                 "tick commit record does not match tick_manifest at tick {tick}"
@@ -1090,6 +1108,14 @@ impl RedbStore {
         if chain.chain_hash != expected_chain_hash {
             return Err(RedbError::Integrity(format!(
                 "hash chain mismatch at tick {tick}"
+            )));
+        }
+        let replay_input_envelopes = self
+            .read_replay_input_envelopes(tick)?
+            .ok_or_else(|| RedbError::NotFound(format!("replay_input_envelope {tick}")))?;
+        if crate::tick::replay_input_envelope_hash(&replay_input_envelopes) == [0; 32] {
+            return Err(RedbError::Integrity(format!(
+                "replay input envelope mismatch at tick {tick}"
             )));
         }
 
@@ -1154,6 +1180,13 @@ impl RedbStore {
             "state artifact",
         )?;
         decode(&bytes, "state artifact").map(Some)
+    }
+
+    pub fn read_replay_input_envelopes(
+        &self,
+        tick: Tick,
+    ) -> Result<Option<Vec<ReplayInputEnvelope>>, RedbError> {
+        self.read_json(&replay_input_envelope_key(tick))
     }
 
     pub fn read_state_artifact(&self, tick: Tick) -> Result<Option<StateArtifactRow>, RedbError> {
@@ -2026,6 +2059,7 @@ impl RedbStore {
             })
             .collect::<Vec<_>>();
 
+        let mods_lock_hash = record.mods_lock_hash;
         self.commit_tick_payload(TickCommitPayload {
             tick,
             commit_record: record,
@@ -2034,7 +2068,7 @@ impl RedbStore {
             object_id: format!("tick/{tick}/rich-trace.json"),
             terminal_state: TickTerminalState::Verified,
             system_manifest_hash: [0; 32],
-            mods_lock_hash: [0; 32],
+            mods_lock_hash,
             keyframe,
             replay_critical_writes,
         })?;
@@ -2072,8 +2106,8 @@ fn decode<T: DeserializeOwned>(value: &[u8], label: &str) -> Result<T, RedbError
 }
 
 fn decode_tick_commit_record(value: &[u8]) -> Result<TickCommitRecord, RedbError> {
-    match decode(value, "tick commit record") {
-        Ok(record) => Ok(record),
+    let mut record: TickCommitRecord = match decode(value, "tick commit record") {
+        Ok(record) => record,
         Err(first_error) => {
             let mut json: serde_json::Value = serde_json::from_slice(value).map_err(|error| {
                 RedbError::Decode(format!("tick commit record legacy json: {error}"))
@@ -2083,12 +2117,16 @@ fn decode_tick_commit_record(value: &[u8]) -> Result<TickCommitRecord, RedbError
                     RedbError::Decode(format!(
                         "tick commit record legacy Action migration: {error}"
                     ))
-                })
+                })?
             } else {
-                Err(first_error)
+                return Err(first_error);
             }
         }
+    };
+    for rejection in &mut record.rejections {
+        canonicalize_persisted_rejection(rejection);
     }
+    Ok(record)
 }
 
 fn migrate_legacy_action_commands(value: &mut serde_json::Value) -> bool {
@@ -2134,6 +2172,9 @@ fn migrate_legacy_action_command(command: &mut serde_json::Value) -> bool {
     fields.insert("type".to_string(), serde_json::Value::String(action_type));
     if let Some(serde_json::Value::Object(payload)) = fields.remove("payload") {
         for (key, value) in payload {
+            if key == "power" {
+                continue;
+            }
             fields.entry(key).or_insert(value);
         }
     }
@@ -2240,6 +2281,10 @@ fn tick_head_key(tick: Tick) -> Vec<u8> {
 
 fn tick_commit_record_key(tick: Tick) -> Vec<u8> {
     format!("/tick/{tick}/commit_record").into_bytes()
+}
+
+fn replay_input_envelope_key(tick: Tick) -> Vec<u8> {
+    format!("/tick/{tick}/replay_input_envelope").into_bytes()
 }
 
 fn tick_key_bytes(tick: Tick, suffix: &str) -> Vec<u8> {
@@ -2640,7 +2685,9 @@ fn committed_ticks(db: &Database) -> Result<Vec<Tick>, RedbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{CommandAction, CommandAuth, CommandSource, RawCommand};
+    use crate::command::{
+        CommandAction, CommandAuth, CommandRejection, CommandSource, RawCommand, RejectionReason,
+    };
     use crate::realtime::{RealtimeDelta, RealtimeEnvelope};
     use crate::tick::{
         TickCommitRecord, TickFuelLedger, TickMetrics, TickTrace, WorldSnapshot, commands_hash,
@@ -2690,7 +2737,10 @@ mod tests {
             state_checksum: checksum,
             manifest_hash: [1; 32],
             world_config_hash: [2; 32],
+            mods_lock_hash: [3; 32],
+            resolved_config_hash: [5; 32],
         };
+        let mods_lock_hash = record.mods_lock_hash;
         TickCommitPayload {
             tick,
             commit_record: record,
@@ -2699,13 +2749,25 @@ mod tests {
             object_id: format!("tick-trace/{tick}.zst"),
             terminal_state: TickTerminalState::Verified,
             system_manifest_hash: [6; 32],
-            mods_lock_hash: [3; 32],
+            mods_lock_hash,
             keyframe: None,
-            replay_critical_writes: vec![(
-                format!("/tick/{tick}/state").into_bytes(),
-                b"state".to_vec(),
-            )],
+            replay_critical_writes: vec![replay_input_envelope_write(tick)],
         }
+    }
+
+    fn replay_input_envelope_write(tick: Tick) -> (Vec<u8>, Vec<u8>) {
+        (
+            replay_input_envelope_key(tick),
+            encode(&replay_input_envelopes(), "test replay input envelope").unwrap(),
+        )
+    }
+
+    fn replay_input_envelopes() -> Vec<ReplayInputEnvelope> {
+        vec![ReplayInputEnvelope {
+            player_id: 7,
+            tick_input_hash: [8; 32],
+            canonical_tick_input: vec![1, 2, 3],
+        }]
     }
 
     fn atomic_trace(tick: Tick) -> TickTrace {
@@ -3014,8 +3076,51 @@ mod tests {
         assert_eq!(point.manifest.blob_size, b"trace-1".len() as u64);
         assert_eq!(point.manifest.system_manifest_hash, [6; 32]);
         assert!(store.read_key(b"/tick/1/commit_record").unwrap().is_some());
+        assert!(
+            store
+                .read_key(b"/tick/1/replay_input_envelope")
+                .unwrap()
+                .is_some()
+        );
         assert!(store.read_key(b"/tick/1/state").unwrap().is_none());
         assert_eq!(store.verify_tick(1).unwrap().chain, point.chain);
+    }
+
+    #[test]
+    fn tick_payload_commit_requires_replay_input_envelope_write() {
+        let mut store = RedbStore::in_memory();
+        let mut payload = payload(1, 42);
+        payload.replay_critical_writes.clear();
+
+        let error = store.commit_tick_payload(payload).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing replay_input_envelope write at tick 1")
+        );
+        assert!(store.read_tick_head(1).unwrap().is_none());
+        assert!(store.read_tick_commit_record(1).unwrap().is_none());
+    }
+
+    #[test]
+    fn verify_tick_fails_closed_when_replay_input_envelope_row_is_missing() {
+        let mut store = RedbStore::in_memory();
+        store.commit_tick_payload(payload(1, 42)).unwrap();
+        match store.backend.as_ref() {
+            RedbBackend::InMemory(backend) => {
+                backend
+                    .lock()
+                    .unwrap()
+                    .data
+                    .remove(&replay_input_envelope_key(1));
+            }
+            RedbBackend::Unavailable(_) => unreachable!("test store is in memory"),
+        }
+
+        let error = store.verify_tick(1).unwrap_err();
+
+        assert!(error.to_string().contains("replay_input_envelope 1"));
     }
 
     #[test]
@@ -3330,7 +3435,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_payload_commit_writes_ten_field_record_and_keyframe_atomically() {
+    fn tick_payload_commit_writes_twelve_field_record_and_keyframe_atomically() {
         let mut store = RedbStore::in_memory();
         let mut payload = payload(0, 77);
         payload.keyframe = Some(snapshot_row(0, 77));
@@ -3338,7 +3443,7 @@ mod tests {
         let point = store.commit_tick_payload(payload).unwrap();
         let record_json = serde_json::to_value(&point.record).unwrap();
 
-        assert_eq!(record_json.as_object().unwrap().len(), 10);
+        assert_eq!(record_json.as_object().unwrap().len(), 12);
         assert_eq!(point.head.snapshot_hash, point.record.snapshot_hash);
         assert_eq!(point.manifest.manifest_hash, point.record.manifest_hash);
         assert!(store.read_verified_snapshot(0).is_ok());
@@ -3706,18 +3811,21 @@ mod tests {
             "commands_hash": vec![0u8; 32],
             "state_checksum": 123,
             "manifest_hash": vec![0u8; 32],
-            "world_config_hash": vec![0u8; 32]
+            "world_config_hash": vec![0u8; 32],
+            "mods_lock_hash": vec![0u8; 32],
+            "resolved_config_hash": vec![0u8; 32]
         });
 
         let record = decode_tick_commit_record(&serde_json::to_vec(&legacy).unwrap()).unwrap();
 
         assert!(matches!(
             record.commands[0].action,
-            CommandAction::Hack {
+            CommandAction::Action {
+                ref action_type,
                 object_id: 10,
-                target_id: 11,
+                target_id: Some(11),
                 ..
-            }
+            } if action_type == "Hack"
         ));
         let live_wire = serde_json::json!({
             "player_id": 7,
@@ -3728,6 +3836,38 @@ mod tests {
             "action": {"type": "Action", "action_type": "Hack", "object_id": 10}
         });
         assert!(serde_json::from_value::<RawCommand>(live_wire).is_err());
+    }
+
+    #[test]
+    fn persisted_legacy_rejection_is_canonicalized_with_migration_detail() {
+        let command = RawCommand {
+            player_id: 7,
+            tick: 1,
+            source: CommandSource::Wasm,
+            auth: CommandAuth::server_injected(CommandSource::Wasm, 7, 1, 1),
+            sequence: 1,
+            action: CommandAction::Move {
+                object_id: 10,
+                direction: crate::command::Direction::Top,
+            },
+        };
+        let mut record = payload(1, 123).commit_record;
+        record.rejections = vec![CommandRejection::new(
+            command,
+            RejectionReason::TargetNotFound,
+        )];
+
+        let decoded = decode_tick_commit_record(&serde_json::to_vec(&record).unwrap()).unwrap();
+
+        assert_eq!(
+            decoded.rejections[0].rejection,
+            RejectionReason::ObjectNotFound
+        );
+        assert_eq!(decoded.rejections[0].detail["reason"], "ObjectNotFound");
+        assert_eq!(
+            decoded.rejections[0].detail["internal_reason"],
+            "TargetNotFound"
+        );
     }
 
     #[test]
