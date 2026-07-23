@@ -64,7 +64,69 @@ drone_decay_rate = 10000
 [combat]
 pvp_enabled = true
 friendly_fire = false
-damage_multiplier = 1.0
+damage_multiplier = 10000
+
+[mods.combat-core]
+damage_multiplier = 10000
+repair_hp_per_work_part = 5
+repair_energy_per_hp = 1
+
+[mods.depot-storage]
+depot_capacity = 10000
+depot_hits = 5000
+repair_range = 1
+repair_capacity = 5
+
+[mods.empire-upkeep]
+base_upkeep = 50
+room_soft_cap = 10
+controller_passive_income = 40
+controller_passive_income_rcl_bonus = 5
+resource = "Energy"
+repair_cap = 3500
+distance_decay_bp = 500
+recycle_refund_base = 5000
+recycle_refund_min = 1000
+tutorial_recycle_refund_full_ticks = 500
+
+[mods.fog-of-war]
+fog_of_war = true
+player_view = "drone"
+
+[mods.pve-spawning]
+spawn_interval = 300
+max_npcs_per_room = 50
+npc_drone_body = ["Attack", "Move", "Move"]
+npc_drop_table = { Energy = 50 }
+
+[mods.special-attacks]
+special_attacks_enabled = true
+enabled = ["Hack", "Drain", "Overload", "Debilitate", "Disrupt", "Fortify", "Leech", "Fabricate"]
+tutorial_enabled = ["Hack", "Drain", "Fortify"]
+novice_enabled = ["Hack", "Drain", "Overload", "Fortify"]
+damage_multiplier = 10000
+fabricate_allowed_output_structures = ["Tower"]
+
+[mods.vanilla-boss]
+arena_bosses_enabled = true
+world_bosses_enabled = true
+boss_spawn_interval = 5000
+
+[[mods.vanilla-boss.boss_templates]]
+name = "world-alpha"
+mode = "world"
+hits = 100000
+phases = [75, 50, 25]
+drops = { Energy = 5000, Mineral = 100 }
+spawn_position = { x = 25, y = 25, room = 0 }
+
+[[mods.vanilla-boss.boss_templates]]
+name = "arena-champion"
+mode = "arena"
+hits = 50000
+phases = [50, 20]
+drops = { ArenaToken = 1 }
+spawn_position = { x = 25, y = 25, room = 1 }
 
 [[special_effects]]
 name = "hack"

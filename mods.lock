@@ -1,42 +1,55 @@
 [plugins.combat-core]
+plugin_id = "combat-core"
 version = "0.1.0"
 enabled = true
-config = { damage_multiplier = 10000 }
+source = "local-build"
+trust_class = "trusted-local-build"
 
 [plugins.depot-storage]
+plugin_id = "depot-storage"
 version = "0.1.0"
 enabled = true
-config = { depot_capacity = 10000, depot_hits = 5000, repair_range = 1, repair_capacity = 5 }
+source = "local-build"
+trust_class = "trusted-local-build"
 
 [plugins.empire-upkeep]
+plugin_id = "empire-upkeep"
 version = "0.1.0"
 enabled = true
-config = { base_upkeep = 50, room_soft_cap = 10, controller_passive_income = 40, controller_passive_income_rcl_bonus = 5, resource = "Energy", repair_cap = 3500, distance_decay_bp = 500, recycle_refund_base = 5000, recycle_refund_min = 1000, tutorial_recycle_refund_full_ticks = 500 }
+source = "local-build"
+trust_class = "trusted-local-build"
 
 [plugins.fog-of-war]
+plugin_id = "fog-of-war"
 version = "0.1.0"
 enabled = true
-config = { fog_of_war = true, player_view = "drone" }
+source = "local-build"
+trust_class = "trusted-local-build"
 
 [plugins.pve-spawning]
+plugin_id = "pve-spawning"
 version = "0.1.0"
 enabled = true
-config = { spawn_interval = 300, max_npcs_per_room = 50, npc_drone_body = ["Attack", "Move", "Move"], npc_drop_table = { Energy = 50 } }
+source = "local-build"
+trust_class = "trusted-local-build"
 
 [plugins.resource-decay]
+plugin_id = "resource-decay"
 version = "0.1.0"
-enabled = true
-config = { decay_rate_ppm = 1000, per_resource_decay_rate_ppm = {} }
+enabled = false
+source = "local-build"
+trust_class = "trusted-local-build"
 
 [plugins.special-attacks]
+plugin_id = "special-attacks"
 version = "0.1.0"
 enabled = true
-config = { special_attacks_enabled = true, enabled = ["Hack", "Drain", "Overload", "Debilitate", "Disrupt", "Fortify", "Leech", "Fabricate"], tutorial_enabled = ["Hack", "Drain", "Fortify"], novice_enabled = ["Hack", "Drain", "Overload", "Fortify"], damage_multiplier = 10000 }
+source = "local-build"
+trust_class = "trusted-local-build"
 
 [plugins.vanilla-boss]
+plugin_id = "vanilla-boss"
 version = "0.1.0"
 enabled = true
-config = { arena_bosses_enabled = true, world_bosses_enabled = true, boss_spawn_interval = 5000, boss_templates = [
-  { name = "world-alpha", mode = "world", hits = 100000, phases = [75, 50, 25], drops = { Energy = 5000, Mineral = 100 }, spawn_position = { x = 25, y = 25, room = 0 } },
-  { name = "arena-champion", mode = "arena", hits = 50000, phases = [50, 20], drops = { ArenaToken = 1 }, spawn_position = { x = 25, y = 25, room = 1 } },
-] }
+source = "local-build"
+trust_class = "trusted-local-build"

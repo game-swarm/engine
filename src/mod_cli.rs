@@ -13,12 +13,16 @@ pub fn try_run(args: impl IntoIterator<Item = String>) -> Result<bool, String> {
 
 fn run(args: &[String]) -> Result<(), String> {
     let mut lock_path = "mods.lock".to_string();
+    let mut world_path = "world.toml".to_string();
     let mut parsed = Vec::new();
     let mut index = 0;
     while index < args.len() {
         if args[index] == "--lock" {
             index += 1;
             lock_path = args.get(index).ok_or("missing path after --lock")?.clone();
+        } else if args[index] == "--world" {
+            index += 1;
+            world_path = args.get(index).ok_or("missing path after --world")?.clone();
         } else {
             parsed.push(args[index].clone());
         }
@@ -55,12 +59,12 @@ fn run(args: &[String]) -> Result<(), String> {
             }
         }
         [cmd, name, key, value] if cmd == "config" => {
-            configure_mod(&lock_path, name, key, parse_value(value))?;
+            configure_mod(&lock_path, &world_path, name, key, parse_value(value))?;
             println!("updated plugin {name} config {key}");
         }
         _ => {
             return Err(
-                "usage: mod [--lock mods.lock] add <name> <version>|upgrade <name> <version>|disable <name>|enable <name>|remove <name>|list|config <name> <key> <value>".into(),
+                "usage: mod [--lock mods.lock] [--world world.toml] add <name> <version>|upgrade <name> <version>|disable <name>|enable <name>|remove <name>|list|config <name> <key> <value>".into(),
             );
         }
     }
@@ -72,7 +76,6 @@ pub struct InstalledMod {
     pub name: String,
     pub version: String,
     pub enabled: bool,
-    pub config: Map<String, Value>,
 }
 
 pub fn add_mod(path: impl AsRef<Path>, name: &str, version: &str) -> Result<InstalledMod, String> {
@@ -83,14 +86,13 @@ pub fn add_mod(path: impl AsRef<Path>, name: &str, version: &str) -> Result<Inst
     }
     plugins.insert(
         name.to_string(),
-        Value::Table(entry_table(version, true, Map::new())),
+        Value::Table(entry_table(name, version, true)),
     );
     write(path.as_ref(), &doc)?;
     Ok(InstalledMod {
         name: name.to_string(),
         version: version.to_string(),
         enabled: true,
-        config: Map::new(),
     })
 }
 
@@ -118,20 +120,35 @@ pub fn remove_mod(path: impl AsRef<Path>, name: &str) -> Result<(), String> {
 }
 
 pub fn configure_mod(
-    path: impl AsRef<Path>,
+    lock_path: impl AsRef<Path>,
+    world_path: impl AsRef<Path>,
     name: &str,
     key: &str,
     value: Value,
 ) -> Result<(), String> {
-    let mut doc = read(path.as_ref())?;
-    let entry = plugin_entry_mut(&mut doc, name)?;
-    let config = entry
-        .entry("config".to_string())
+    let lock = read(lock_path.as_ref())?;
+    let entry = lock
+        .get("plugins")
+        .and_then(Value::as_table)
+        .and_then(|plugins| plugins.get(name))
+        .and_then(Value::as_table)
+        .ok_or_else(|| format!("plugin not installed: {name}"))?;
+    if !entry
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        return Err(format!("plugin is disabled: {name}"));
+    }
+
+    let mut world = read(world_path.as_ref())?;
+    let config = mods_mut(&mut world)?
+        .entry(name.to_string())
         .or_insert_with(|| Value::Table(Map::new()))
         .as_table_mut()
-        .ok_or("plugin config must be table")?;
+        .ok_or_else(|| format!("plugin config must be table: {name}"))?;
     config.insert(key.to_string(), value);
-    write(path.as_ref(), &doc)
+    write(world_path.as_ref(), &world)
 }
 
 pub fn list_mods(path: impl AsRef<Path>) -> Result<Vec<InstalledMod>, String> {
@@ -150,11 +167,6 @@ pub fn list_mods(path: impl AsRef<Path>) -> Result<Vec<InstalledMod>, String> {
                     .get("enabled")
                     .and_then(Value::as_bool)
                     .unwrap_or(true),
-                config: table
-                    .get("config")
-                    .and_then(Value::as_table)
-                    .cloned()
-                    .unwrap_or_default(),
             })
         })
         .collect::<Vec<_>>();
@@ -162,13 +174,19 @@ pub fn list_mods(path: impl AsRef<Path>) -> Result<Vec<InstalledMod>, String> {
     Ok(out)
 }
 
-fn entry_table(version: &str, enabled: bool, config: Map<String, Value>) -> Map<String, Value> {
+fn entry_table(name: &str, version: &str, enabled: bool) -> Map<String, Value> {
     let mut entry = Map::new();
+    entry.insert("plugin_id".to_string(), Value::String(name.to_string()));
     entry.insert("version".to_string(), Value::String(version.to_string()));
     entry.insert("enabled".to_string(), Value::Boolean(enabled));
-    if !config.is_empty() {
-        entry.insert("config".to_string(), Value::Table(config));
-    }
+    entry.insert(
+        "source".to_string(),
+        Value::String("local-build".to_string()),
+    );
+    entry.insert(
+        "trust_class".to_string(),
+        Value::String("trusted-local-build".to_string()),
+    );
     entry
 }
 
@@ -189,6 +207,15 @@ fn plugins_mut(doc: &mut Value) -> Result<&mut Map<String, Value>, String> {
         .or_insert_with(|| Value::Table(Map::new()))
         .as_table_mut()
         .ok_or("plugins must be table".to_string())
+}
+
+fn mods_mut(doc: &mut Value) -> Result<&mut Map<String, Value>, String> {
+    doc.as_table_mut()
+        .ok_or("root must be table")?
+        .entry("mods".to_string())
+        .or_insert_with(|| Value::Table(Map::new()))
+        .as_table_mut()
+        .ok_or("mods must be table".to_string())
 }
 
 fn read(path: &Path) -> Result<Value, String> {
@@ -226,13 +253,15 @@ mod tests {
     fn add_config_disable_enable_upgrade_remove() {
         let temp = tempfile::tempdir().unwrap();
         let lock = temp.path().join("mods.lock");
+        let world = temp.path().join("world.toml");
 
         add_mod(&lock, "combat-core", "0.1.0").unwrap();
         configure_mod(
             &lock,
+            &world,
             "combat-core",
             "damage_multiplier",
-            Value::Integer(120),
+            Value::Integer(12_000),
         )
         .unwrap();
         set_enabled(&lock, "combat-core", false).unwrap();
@@ -243,15 +272,39 @@ mod tests {
         assert_eq!(plugins[0].name, "combat-core");
         assert_eq!(plugins[0].version, "0.2.0");
         assert!(!plugins[0].enabled);
+        let lock_contents = fs::read_to_string(&lock).unwrap();
+        assert!(!lock_contents.contains("config"));
+        let world_doc: Value = toml::from_str(&fs::read_to_string(&world).unwrap()).unwrap();
         assert_eq!(
-            plugins[0].config.get("damage_multiplier"),
-            Some(&Value::Integer(120))
+            world_doc["mods"]["combat-core"]["damage_multiplier"],
+            Value::Integer(12_000)
         );
 
         set_enabled(&lock, "combat-core", true).unwrap();
         assert!(list_mods(&lock).unwrap()[0].enabled);
         remove_mod(&lock, "combat-core").unwrap();
         assert!(list_mods(&lock).unwrap().is_empty());
+    }
+
+    #[test]
+    fn config_rejects_disabled_plugin_without_changing_world() {
+        let temp = tempfile::tempdir().unwrap();
+        let lock = temp.path().join("mods.lock");
+        let world = temp.path().join("world.toml");
+        add_mod(&lock, "combat-core", "0.1.0").unwrap();
+        set_enabled(&lock, "combat-core", false).unwrap();
+
+        let error = configure_mod(
+            &lock,
+            &world,
+            "combat-core",
+            "damage_multiplier",
+            Value::Integer(12_000),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("disabled"));
+        assert!(!world.exists());
     }
 
     #[test]
@@ -262,8 +315,11 @@ mod tests {
             &lock,
             r#"
 [plugins.combat-core]
+plugin_id = "combat-core"
 version = "0.1.0"
 enabled = true
+source = "local-build"
+trust_class = "trusted-local-build"
 "#,
         )
         .unwrap();

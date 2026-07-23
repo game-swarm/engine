@@ -27,18 +27,18 @@ pub enum DifficultyZone {
     Zone4,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ZoneDefinition {
     pub zone: DifficultyZone,
     pub max_distance: u32,
-    pub npc_spawn_rate: f64,
-    pub hp_multiplier: f64,
-    pub drop_bonus: f64,
+    pub npc_spawn_rate_ppm: u32,
+    pub hp_multiplier_bp: u32,
+    pub drop_bonus_bp: u32,
     pub npc_types: Vec<NpcType>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorldPveConfig {
     pub center_x: i32,
@@ -101,9 +101,9 @@ impl Default for ZoneDefinition {
         Self {
             zone: DifficultyZone::Zone1,
             max_distance: 10,
-            npc_spawn_rate: 1.0,
-            hp_multiplier: 1.0,
-            drop_bonus: 0.0,
+            npc_spawn_rate_ppm: 1_000_000,
+            hp_multiplier_bp: 10_000,
+            drop_bonus_bp: 0,
             npc_types: vec![NpcType::Creep],
         }
     }
@@ -118,33 +118,33 @@ impl Default for WorldPveConfig {
                 ZoneDefinition {
                     zone: DifficultyZone::Zone1,
                     max_distance: 10,
-                    npc_spawn_rate: 1.0,
-                    hp_multiplier: 1.0,
-                    drop_bonus: 0.0,
+                    npc_spawn_rate_ppm: 1_000_000,
+                    hp_multiplier_bp: 10_000,
+                    drop_bonus_bp: 0,
                     npc_types: vec![NpcType::Creep],
                 },
                 ZoneDefinition {
                     zone: DifficultyZone::Zone2,
                     max_distance: 25,
-                    npc_spawn_rate: 2.5,
-                    hp_multiplier: 1.5,
-                    drop_bonus: 0.25,
+                    npc_spawn_rate_ppm: 2_500_000,
+                    hp_multiplier_bp: 15_000,
+                    drop_bonus_bp: 2_500,
                     npc_types: vec![NpcType::Creep, NpcType::Guardian],
                 },
                 ZoneDefinition {
                     zone: DifficultyZone::Zone3,
                     max_distance: 50,
-                    npc_spawn_rate: 4.0,
-                    hp_multiplier: 2.0,
-                    drop_bonus: 0.5,
+                    npc_spawn_rate_ppm: 4_000_000,
+                    hp_multiplier_bp: 20_000,
+                    drop_bonus_bp: 5_000,
                     npc_types: vec![NpcType::Creep, NpcType::Guardian],
                 },
                 ZoneDefinition {
                     zone: DifficultyZone::Zone4,
                     max_distance: u32::MAX,
-                    npc_spawn_rate: 6.0,
-                    hp_multiplier: 3.0,
-                    drop_bonus: 1.0,
+                    npc_spawn_rate_ppm: 6_000_000,
+                    hp_multiplier_bp: 30_000,
+                    drop_bonus_bp: 10_000,
                     npc_types: vec![NpcType::Creep, NpcType::Guardian, NpcType::Swarmling],
                 },
             ],
@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_zone_multipliers_from_config() {
+    fn parses_fixed_point_zone_rates_multipliers_and_bonuses() {
         let config: WorldPveConfig = toml::from_str(
             r#"
 center_x = 5
@@ -367,17 +367,17 @@ center_y = -5
 [[zones]]
 zone = "Zone1"
 max_distance = 3
-npc_spawn_rate = 0.5
-hp_multiplier = 1.25
-drop_bonus = 0.1
+npc_spawn_rate_ppm = 500000
+hp_multiplier_bp = 12500
+drop_bonus_bp = 1000
 npc_types = ["Creep", "Merchant"]
 
 [[zones]]
 zone = "Zone4"
 max_distance = 4294967295
-npc_spawn_rate = 5.0
-hp_multiplier = 4.0
-drop_bonus = 2.0
+npc_spawn_rate_ppm = 5000000
+hp_multiplier_bp = 40000
+drop_bonus_bp = 20000
 npc_types = ["Guardian", "Swarmling"]
 "#,
         )
@@ -385,10 +385,25 @@ npc_types = ["Guardian", "Swarmling"]
 
         let zone = zone_definition_for_room(RoomId::from_room_name("A5S8E").unwrap(), &config);
         assert_eq!(zone.zone, DifficultyZone::Zone1);
-        assert_eq!(zone.npc_spawn_rate, 0.5);
-        assert_eq!(zone.hp_multiplier, 1.25);
-        assert_eq!(zone.drop_bonus, 0.1);
+        assert_eq!(zone.npc_spawn_rate_ppm, 500_000);
+        assert_eq!(zone.hp_multiplier_bp, 12_500);
+        assert_eq!(zone.drop_bonus_bp, 1_000);
+        assert_eq!((80_u64 * zone.hp_multiplier_bp as u64) / 10_000, 100);
+        assert_eq!((250_u64 * zone.drop_bonus_bp as u64) / 10_000, 25);
         assert_eq!(zone.npc_types, vec![NpcType::Creep, NpcType::Merchant]);
+    }
+
+    #[test]
+    fn rejects_float_zone_gameplay_values() {
+        let error = toml::from_str::<WorldPveConfig>(
+            r#"
+[[zones]]
+npc_spawn_rate_ppm = 0.5
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid type"));
     }
 
     fn budget_request(amount: u64, tick: Tick) -> PveBudgetRequest<'static> {

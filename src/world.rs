@@ -31,7 +31,9 @@ use crate::onboarding::{
     OnboardingConfig, OnboardingEvent, OnboardingProgress, OnboardingSwarmEvent, onboarding_system,
     send_onboarding_event,
 };
-use crate::plugins::{apply_lock_to_world_config, load_default_plugin_lock, register_mods};
+use crate::plugins::{
+    WorldModConfigs, apply_lock_to_world_config, load_default_plugin_lock, register_mods,
+};
 use crate::pve::{
     DifficultyZone, PveBudget, PveBudgetConfig, WorldPveConfig, ZoneDefinition,
     zone_definition_for_room, zone_for_room,
@@ -81,6 +83,7 @@ pub struct WorldConfig {
     pub pve_budget: PveBudgetConfig,
     pub resources: WorldResourceConfig,
     pub combat: WorldCombatConfig,
+    pub mods: WorldModConfigs,
     #[serde(alias = "retention")]
     pub replay: ReplayRetentionConfig,
     pub damage_types: Vec<crate::components::DamageTypeDef>,
@@ -335,12 +338,12 @@ pub struct WorldResourceConfig {
     pub drone_decay_rate: u32,
     pub max_pve_output_per_tick: u32,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorldCombatConfig {
     pub pvp_enabled: bool,
     pub friendly_fire: bool,
-    pub damage_multiplier: f64,
+    pub damage_multiplier: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,6 +369,7 @@ impl Default for WorldConfig {
             pve_budget: PveBudgetConfig::default(),
             resources: WorldResourceConfig::default(),
             combat: WorldCombatConfig::default(),
+            mods: WorldModConfigs::default(),
             replay: ReplayRetentionConfig::default(),
             damage_types: default_damage_types(),
             body_part_types: Vec::new(),
@@ -411,19 +415,19 @@ fn canonical_world_config_path(path: &str) -> String {
 
 fn damage_type_def(
     damage_type: DamageType,
-    component_multipliers: &[(&str, f64)],
-    attribute_multipliers: &[(&str, f64)],
+    component_multipliers_bps: &[(&str, u32)],
+    attribute_multipliers_bps: &[(&str, u32)],
 ) -> crate::components::DamageTypeDef {
     let mut def = crate::components::DamageTypeDef {
         name: damage_type.to_string(),
         ..Default::default()
     };
-    for (component, multiplier) in component_multipliers {
-        def.component_multipliers
+    for (component, multiplier) in component_multipliers_bps {
+        def.component_multipliers_bps
             .insert((*component).to_string(), *multiplier);
     }
-    for (attribute, multiplier) in attribute_multipliers {
-        def.attribute_multipliers
+    for (attribute, multiplier) in attribute_multipliers_bps {
+        def.attribute_multipliers_bps
             .insert((*attribute).to_string(), *multiplier);
     }
     def
@@ -434,70 +438,70 @@ fn default_damage_types() -> Vec<crate::components::DamageTypeDef> {
         damage_type_def(
             DamageType::Kinetic,
             &[
-                ("Move", 1.0),
-                ("Work", 1.0),
-                ("Carry", 1.0),
-                ("Attack", 1.0),
-                ("RangedAttack", 1.0),
-                ("Heal", 1.0),
-                ("Claim", 1.0),
-                ("Tough", 0.5),
+                ("Move", 10_000),
+                ("Work", 10_000),
+                ("Carry", 10_000),
+                ("Attack", 10_000),
+                ("RangedAttack", 10_000),
+                ("Heal", 10_000),
+                ("Claim", 10_000),
+                ("Tough", 5_000),
             ],
-            &[("Shielded", 0.7)],
+            &[("Shielded", 7_000)],
         ),
         damage_type_def(
             DamageType::Thermal,
             &[
-                ("Move", 1.2),
-                ("Work", 1.0),
-                ("Carry", 1.0),
-                ("Attack", 1.0),
-                ("RangedAttack", 1.0),
-                ("Heal", 1.0),
-                ("Claim", 1.0),
-                ("Tough", 0.8),
+                ("Move", 12_000),
+                ("Work", 10_000),
+                ("Carry", 10_000),
+                ("Attack", 10_000),
+                ("RangedAttack", 10_000),
+                ("Heal", 10_000),
+                ("Claim", 10_000),
+                ("Tough", 8_000),
             ],
             &[],
         ),
         damage_type_def(
             DamageType::EMP,
             &[
-                ("Move", 1.0),
-                ("Work", 1.0),
-                ("Carry", 1.0),
-                ("Attack", 1.0),
-                ("RangedAttack", 1.0),
-                ("Heal", 1.0),
-                ("Claim", 1.3),
-                ("Tough", 1.0),
+                ("Move", 10_000),
+                ("Work", 10_000),
+                ("Carry", 10_000),
+                ("Attack", 10_000),
+                ("RangedAttack", 10_000),
+                ("Heal", 10_000),
+                ("Claim", 13_000),
+                ("Tough", 10_000),
             ],
             &[],
         ),
         damage_type_def(
             DamageType::Corrosive,
             &[
-                ("Move", 1.0),
-                ("Work", 1.2),
-                ("Carry", 1.2),
-                ("Attack", 1.0),
-                ("RangedAttack", 1.0),
-                ("Heal", 1.0),
-                ("Claim", 1.0),
-                ("Tough", 0.7),
+                ("Move", 10_000),
+                ("Work", 12_000),
+                ("Carry", 12_000),
+                ("Attack", 10_000),
+                ("RangedAttack", 10_000),
+                ("Heal", 10_000),
+                ("Claim", 10_000),
+                ("Tough", 7_000),
             ],
             &[],
         ),
         damage_type_def(
             DamageType::Psionic,
             &[
-                ("Move", 1.0),
-                ("Work", 1.0),
-                ("Carry", 1.0),
-                ("Attack", 1.0),
-                ("RangedAttack", 1.0),
-                ("Heal", 1.0),
-                ("Claim", 1.4),
-                ("Tough", 1.0),
+                ("Move", 10_000),
+                ("Work", 10_000),
+                ("Carry", 10_000),
+                ("Attack", 10_000),
+                ("RangedAttack", 10_000),
+                ("Heal", 10_000),
+                ("Claim", 14_000),
+                ("Tough", 10_000),
             ],
             &[],
         ),
@@ -688,7 +692,6 @@ impl Default for StartingResourcesConfig {
     fn default() -> Self {
         let mut resources = crate::resources::ResourceCost::new();
         resources.insert("Energy".to_string(), 5000);
-        resources.insert("Minerals".to_string(), 2000);
         Self {
             starting_resources: resources,
             free_upkeep_controllers: 1,
@@ -725,7 +728,7 @@ impl Default for WorldCombatConfig {
         Self {
             pvp_enabled: true,
             friendly_fire: false,
-            damage_multiplier: 1.0,
+            damage_multiplier: 10_000,
         }
     }
 }
@@ -784,12 +787,7 @@ impl WorldConfig {
         self.code.propagation_speed > 0
     }
     fn combat_damage_multiplier_fixed(&self) -> u32 {
-        let scaled = (self.combat.damage_multiplier * 10_000.0).round();
-        if !scaled.is_finite() || scaled <= 0.0 {
-            0
-        } else {
-            scaled.min(u32::MAX as f64) as u32
-        }
+        self.combat.damage_multiplier
     }
     fn install_resources(&self, app: &mut App) {
         app.insert_resource(self.clone());
@@ -838,6 +836,8 @@ impl WorldConfig {
         app.insert_resource(SystemSchedulerManifest::default());
         app.insert_resource(PendingSpecialAttack::default());
         app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingLeechCombat::default());
+        app.insert_resource(LeechResolution::default());
         app.insert_resource(PendingDamage::default());
         app.insert_resource(PendingHeal::default());
         app.insert_resource(PendingEntityCreation::default());
@@ -1247,12 +1247,14 @@ impl SwarmWorld {
             .0
             .push(PendingSpawn {
                 owner,
+                spawn_id: 0,
                 body,
                 position: Position {
                     x,
                     y,
                     room: RoomId(0),
                 },
+                cost: crate::resources::ResourceCost::new(),
             });
     }
 
@@ -1954,18 +1956,18 @@ mod shard_tests {
                 .damage_types
                 .iter()
                 .find(|damage_type| damage_type.name == "Kinetic")
-                .and_then(|damage_type| damage_type.component_multipliers.get("Tough"))
+                .and_then(|damage_type| damage_type.component_multipliers_bps.get("Tough"))
                 .copied(),
-            Some(0.5)
+            Some(5_000)
         );
         assert_eq!(
             config
                 .damage_types
                 .iter()
                 .find(|damage_type| damage_type.name == "EMP")
-                .and_then(|damage_type| damage_type.component_multipliers.get("Claim"))
+                .and_then(|damage_type| damage_type.component_multipliers_bps.get("Claim"))
                 .copied(),
-            Some(1.3)
+            Some(13_000)
         );
         assert_eq!(config.special_effects.len(), 11);
         assert_eq!(config.custom_actions.len(), 11);
@@ -2086,7 +2088,10 @@ mod shard_tests {
         assert_eq!(action("Overload").range, 5);
         assert_eq!(action("Overload").cooldown, Some(200));
         assert_eq!(action("Overload").cost.get("Energy"), Some(&300));
-        assert_eq!(action("Overload").special_param, Some(500_000.0));
+        assert_eq!(
+            action("Overload").special_param_micro,
+            Some(500_000_000_000)
+        );
 
         assert_eq!(action("Debilitate").range, 3);
         assert_eq!(action("Debilitate").cooldown, Some(150));
@@ -2190,7 +2195,7 @@ max_pve_output_per_tick = 1234
 [combat]
 pvp_enabled = false
 friendly_fire = true
-damage_multiplier = 1.5
+damage_multiplier = 15000
 [replay]
 deterministic_retention_ticks = 123
 rich_artifact_retention_ticks = 456
@@ -2279,19 +2284,20 @@ controller_passive_income_rcl_bonus = 3
             r#"
 [[damage_types]]
 name = "Acid"
-component_multipliers = { Tough = 0.25, Work = 1.5 }
-attribute_multipliers = { Shielded = 0.75 }
+component_multipliers_bps = { Tough = 2500, Work = 15000 }
+attribute_multipliers_bps = { Shielded = 7500 }
 "#,
         )
         .unwrap();
         let registry = DamageTypeRegistry::from_defs(config.damage_types);
         assert_eq!(
-            registry.component_multiplier("Acid", Some(&[BodyPart::Tough, BodyPart::Work])),
-            0.375
+            registry.component_multiplier_bps("Acid", Some(&[BodyPart::Tough, BodyPart::Work])),
+            3_750
         );
         assert_eq!(
-            registry.attribute_multiplier("Acid", Some(&Attributes(vec!["Shielded".to_string()]))),
-            0.75
+            registry
+                .attribute_multiplier_bps("Acid", Some(&Attributes(vec!["Shielded".to_string()]))),
+            7_500
         );
     }
 
@@ -2324,7 +2330,7 @@ display_name = "Mineral"
 category = "mineral"
 starting_amount = 0
 max_storage = 50000
-decay_rate = 0.0
+decay_rate_ppm = 0
 tradeable = true
 
 [[source_types]]
@@ -2435,7 +2441,7 @@ cost = { Energy = 33 }
     #[test]
     fn create_world_with_config_installs_resources() {
         let config = WorldConfig::from_toml_str(
-            "[combat]\ndamage_multiplier = 0.5\n[world]\ntick_interval_ms = 2500\n",
+            "[combat]\ndamage_multiplier = 5000\n[world]\ntick_interval_ms = 2500\n",
         )
         .unwrap();
         let world = create_world_with_mode_and_config(WorldMode::Default, config);
