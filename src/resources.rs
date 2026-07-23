@@ -13,7 +13,7 @@ pub type ResourceCost = IndexMap<ResourceName, ResourceAmount>;
 pub const TRANSFER_TO_GLOBAL_TICKS: Tick = 10;
 pub const TRANSFER_FROM_GLOBAL_TICKS: Tick = 100;
 pub const TRANSFER_TO_GLOBAL_FEE_PER_10_000: u32 = 100;
-pub const TRANSFER_FROM_GLOBAL_FEE_PER_10_000: u32 = 500;
+pub const TRANSFER_FROM_GLOBAL_FEE_PER_10_000: u32 = 100;
 pub const GLOBAL_STORAGE_INTERCEPT_RANGE: u32 = 3;
 pub const DEFAULT_MAX_PVE_OUTPUT_PER_TICK: ResourceAmount = ResourceAmount::MAX;
 pub const ALLIED_TRANSFER_FEE_BP: u32 = 200;
@@ -32,14 +32,15 @@ pub struct PveOutputTracker {
     pub discarded_this_tick: ResourceAmount,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceDef {
     pub name: ResourceName,
     pub display_name: String,
     pub category: String,
     pub starting_amount: ResourceAmount,
     pub max_storage: ResourceAmount,
-    pub decay_rate: f32,
+    #[serde(alias = "decay_rate")]
+    pub decay_rate_ppm: u32,
     pub tradeable: bool,
 }
 
@@ -388,7 +389,7 @@ impl Default for ResourceRegistry {
                 category: "energy".to_string(),
                 starting_amount: 1000,
                 max_storage: 100_000,
-                decay_rate: 0.0,
+                decay_rate_ppm: 0,
                 tradeable: true,
             },
         );
@@ -499,7 +500,7 @@ mod tests {
         assert_eq!(config.transfer_to_global_ticks, 10);
         assert_eq!(config.transfer_from_global_ticks, 100);
         assert_eq!(config.transfer_to_global_fee_per_10_000, 100);
-        assert_eq!(config.transfer_from_global_fee_per_10_000, 500);
+        assert_eq!(config.transfer_from_global_fee_per_10_000, 100);
     }
 
     #[test]
@@ -571,7 +572,7 @@ mod tests {
                 category: "mineral".to_string(),
                 starting_amount: 0,
                 max_storage: 50_000,
-                decay_rate: 0.0,
+                decay_rate_ppm: 0,
                 tradeable: true,
             }],
             vec![SourceDef {

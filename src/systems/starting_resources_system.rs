@@ -49,7 +49,7 @@ pub fn starting_resources_system(
                         Some(owner),
                         resource,
                         i64::from(*amount),
-                        ResourceOperation::PvEAward,
+                        ResourceOperation::WorldStartupSubsidy,
                     );
                 }
                 granted.0.insert(owner);
@@ -75,7 +75,7 @@ pub fn starting_resources_system(
                     Some(owner),
                     resource,
                     i64::from(*amount),
-                    ResourceOperation::PvEAward,
+                    ResourceOperation::WorldStartupSubsidy,
                 );
             }
             granted.0.insert(owner);

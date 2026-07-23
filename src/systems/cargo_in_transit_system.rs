@@ -78,16 +78,40 @@ fn intercept_cargo(resources: &mut IndexMap<String, u32>, thief: &Drone) -> Opti
     if available_carry == 0 {
         return None;
     }
-    // Steal up to available carry capacity, proportional across resources
-    let total_cargo: u32 = resources.values().sum();
+    // Allocate an exact proportional share using largest remainders. Resource
+    // names break equal-remainder ties so insertion order cannot change results.
+    let total_cargo = resources.values().map(|amount| *amount as u64).sum::<u64>();
     if total_cargo == 0 {
         return None;
     }
-    let steal_amount = available_carry.min(total_cargo);
-    let ratio = steal_amount as f64 / total_cargo as f64;
-    for amount in resources.values_mut() {
-        let taken = (*amount as f64 * ratio).ceil() as u32;
-        *amount = amount.saturating_sub(taken);
+    let steal_amount = (available_carry as u64).min(total_cargo) as u32;
+    let mut allocations = resources
+        .iter()
+        .map(|(resource, amount)| {
+            let numerator = *amount as u64 * steal_amount as u64;
+            (
+                resource.clone(),
+                (numerator / total_cargo) as u32,
+                numerator % total_cargo,
+            )
+        })
+        .collect::<Vec<_>>();
+    let allocated = allocations
+        .iter()
+        .map(|(_, amount, _)| *amount)
+        .sum::<u32>();
+    allocations.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
+    for (_, amount, _) in allocations
+        .iter_mut()
+        .take(steal_amount.saturating_sub(allocated) as usize)
+    {
+        *amount += 1;
+    }
+    for (resource, taken, _) in allocations {
+        let amount = resources
+            .get_mut(&resource)
+            .expect("allocation keys come from the resource map");
+        *amount -= taken;
     }
     Some(steal_amount)
 }
@@ -109,5 +133,56 @@ mod tests {
         };
         assert_eq!(cargo.remaining_ticks, 10);
         assert_eq!(cargo.owner, 1);
+    }
+
+    #[test]
+    fn interception_removes_exact_capacity_without_proportional_oversteal() {
+        let mut resources = IndexMap::from([
+            ("Zynthium".to_string(), 1),
+            ("Energy".to_string(), 1),
+            ("Oxygen".to_string(), 1),
+        ]);
+        let thief = Drone {
+            owner: 2,
+            body: Vec::new(),
+            carry: IndexMap::new(),
+            carry_capacity: 2,
+            fatigue: 0,
+            hits: 100,
+            hits_max: 100,
+            spawning: false,
+            age: 0,
+            last_action_tick: 0,
+            lifespan: 1_500,
+        };
+
+        assert_eq!(intercept_cargo(&mut resources, &thief), Some(2));
+        assert_eq!(resources.values().sum::<u32>(), 1);
+        assert_eq!(resources["Energy"], 0);
+        assert_eq!(resources["Oxygen"], 0);
+        assert_eq!(resources["Zynthium"], 1);
+    }
+
+    #[test]
+    fn interception_accounts_for_used_capacity_exactly() {
+        let mut resources = IndexMap::from([("Energy".to_string(), 5), ("Oxygen".to_string(), 3)]);
+        let thief = Drone {
+            owner: 2,
+            body: Vec::new(),
+            carry: IndexMap::from([("Energy".to_string(), 2)]),
+            carry_capacity: 5,
+            fatigue: 0,
+            hits: 100,
+            hits_max: 100,
+            spawning: false,
+            age: 0,
+            last_action_tick: 0,
+            lifespan: 1_500,
+        };
+
+        assert_eq!(intercept_cargo(&mut resources, &thief), Some(3));
+        assert_eq!(resources.values().sum::<u32>(), 5);
+        assert_eq!(resources["Energy"], 3);
+        assert_eq!(resources["Oxygen"], 2);
     }
 }

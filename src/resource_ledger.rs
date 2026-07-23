@@ -28,17 +28,42 @@ pub enum ResourceOperation {
     AlliedTransfer,
     PvEAward,
     ControllerPassiveIncome,
+    WreckageSalvage,
     RecycleRefund,
     BuildCost,
     SpawnCost,
     UpkeepDeduction,
     StorageTax,
-    ContractSettlement,
-    MerchantTradeSettlement,
-    P2POfferSettlement,
-    AuctionSettlement,
-    EscrowSettlement,
-    LendingSettlement,
+    WorldStartupSubsidy,
+    CodeUpdateCost,
+    PluginSettlement {
+        plugin_id: PluginSettlementPluginId,
+        settlement_kind: PluginSettlementKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginSettlementPluginId {
+    Economy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginSettlementKind {
+    Contract,
+    MerchantTrade,
+    P2POffer,
+    Auction,
+    Escrow,
+    Lending,
+}
+
+impl ResourceOperation {
+    pub const fn plugin_settlement(settlement_kind: PluginSettlementKind) -> Self {
+        Self::PluginSettlement {
+            plugin_id: PluginSettlementPluginId::Economy,
+            settlement_kind,
+        }
+    }
 }
 
 /// Result of a resource operation
@@ -765,6 +790,8 @@ impl ResourceLedger {
     }
 
     pub fn finalize_current_tick(&mut self) -> ResourceLedgerTraceSnapshot {
+        sort_s29_operations(&mut self.ops);
+        self.ledger_digest = ledger_digest_for_entries(self.tick_start_ledger_digest, &self.ops);
         let snapshot = self.current_snapshot();
         self.last_tick = snapshot.clone();
         self.ops.clear();
@@ -906,7 +933,7 @@ fn ledger_entry_digest(previous_digest: [u8; 32], entry: &ResourceLedgerEntry) -
     hash_i64(&mut hasher, entry.amount);
     hash_u32(&mut hasher, entry.amount_requested);
     hash_u32(&mut hasher, entry.amount_delivered);
-    hash_u8(&mut hasher, resource_operation_tag(entry.operation));
+    hash_resource_operation(&mut hasher, entry.operation);
     hash_u32(&mut hasher, entry.fee_paid);
     hash_u32(&mut hasher, entry.basis_points_used);
     *hasher.finalize().as_bytes()
@@ -980,6 +1007,18 @@ fn hash_i64(hasher: &mut blake3::Hasher, value: i64) {
     hasher.update(&value.to_le_bytes());
 }
 
+fn hash_resource_operation(hasher: &mut blake3::Hasher, operation: ResourceOperation) {
+    hash_u8(hasher, resource_operation_tag(operation));
+    if let ResourceOperation::PluginSettlement {
+        plugin_id,
+        settlement_kind,
+    } = operation
+    {
+        hash_u8(hasher, plugin_settlement_plugin_tag(plugin_id));
+        hash_u8(hasher, plugin_settlement_kind_tag(settlement_kind));
+    }
+}
+
 fn settlement_kind_tag(kind: SettlementKind) -> u8 {
     match kind {
         SettlementKind::Contract => 1,
@@ -999,17 +1038,67 @@ fn resource_operation_tag(operation: ResourceOperation) -> u8 {
         ResourceOperation::AlliedTransfer => 4,
         ResourceOperation::PvEAward => 5,
         ResourceOperation::ControllerPassiveIncome => 6,
-        ResourceOperation::RecycleRefund => 7,
-        ResourceOperation::BuildCost => 8,
-        ResourceOperation::SpawnCost => 9,
-        ResourceOperation::UpkeepDeduction => 10,
-        ResourceOperation::StorageTax => 11,
-        ResourceOperation::ContractSettlement => 12,
-        ResourceOperation::MerchantTradeSettlement => 13,
-        ResourceOperation::P2POfferSettlement => 14,
-        ResourceOperation::AuctionSettlement => 15,
-        ResourceOperation::EscrowSettlement => 16,
-        ResourceOperation::LendingSettlement => 17,
+        ResourceOperation::WreckageSalvage => 7,
+        ResourceOperation::RecycleRefund => 8,
+        ResourceOperation::BuildCost => 9,
+        ResourceOperation::SpawnCost => 10,
+        ResourceOperation::UpkeepDeduction => 11,
+        ResourceOperation::StorageTax => 12,
+        ResourceOperation::WorldStartupSubsidy => 13,
+        ResourceOperation::CodeUpdateCost => 14,
+        ResourceOperation::PluginSettlement { .. } => 15,
+    }
+}
+
+fn sort_s29_operations(operations: &mut [ResourceLedgerEntry]) {
+    let mut indexed = operations.iter().cloned().enumerate().collect::<Vec<_>>();
+    indexed.sort_by(|(left_index, left), (right_index, right)| {
+        s29_operation_key(left.operation, *left_index)
+            .cmp(&s29_operation_key(right.operation, *right_index))
+    });
+    for (target, (_, entry)) in operations.iter_mut().zip(indexed.into_iter()) {
+        *target = entry;
+    }
+}
+
+fn s29_operation_key(
+    operation: ResourceOperation,
+    original_index: usize,
+) -> (u8, u8, u8, u8, usize) {
+    match operation {
+        ResourceOperation::UpkeepDeduction => (1, 0, 0, 0, original_index),
+        ResourceOperation::StorageTax => (1, 1, 0, 0, original_index),
+        ResourceOperation::PvEAward => (1, 2, 0, 0, original_index),
+        ResourceOperation::ControllerPassiveIncome => (1, 3, 0, 0, original_index),
+        ResourceOperation::WreckageSalvage => (1, 4, 0, 0, original_index),
+        ResourceOperation::PluginSettlement {
+            plugin_id,
+            settlement_kind,
+        } => (
+            1,
+            5,
+            plugin_settlement_plugin_tag(plugin_id),
+            plugin_settlement_kind_tag(settlement_kind),
+            original_index,
+        ),
+        _ => (0, 0, 0, 0, original_index),
+    }
+}
+
+fn plugin_settlement_plugin_tag(plugin_id: PluginSettlementPluginId) -> u8 {
+    match plugin_id {
+        PluginSettlementPluginId::Economy => 1,
+    }
+}
+
+fn plugin_settlement_kind_tag(settlement_kind: PluginSettlementKind) -> u8 {
+    match settlement_kind {
+        PluginSettlementKind::Contract => 1,
+        PluginSettlementKind::MerchantTrade => 2,
+        PluginSettlementKind::P2POffer => 3,
+        PluginSettlementKind::Auction => 4,
+        PluginSettlementKind::Escrow => 5,
+        PluginSettlementKind::Lending => 6,
     }
 }
 
@@ -1176,6 +1265,77 @@ mod tests {
         assert_eq!(compute_fee(1000, 0), 0);
         assert_eq!(compute_fee(0, 500), 0);
         assert_eq!(compute_fee(1, 10000), 1); // 100% of 1 = 1
+    }
+
+    #[test]
+    fn world_startup_subsidy_is_a_canonical_ledger_operation() {
+        let operation: ResourceOperation = serde_json::from_str("\"WorldStartupSubsidy\"").unwrap();
+
+        assert_eq!(format!("{operation:?}"), "WorldStartupSubsidy");
+    }
+
+    #[test]
+    fn concrete_market_settlements_are_not_public_wire_operations() {
+        let operation: ResourceOperation = serde_json::from_str(
+            r#"{"PluginSettlement":{"plugin_id":"Economy","settlement_kind":"Contract"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            operation,
+            ResourceOperation::plugin_settlement(PluginSettlementKind::Contract)
+        );
+        assert!(serde_json::from_str::<ResourceOperation>("\"ContractSettlement\"").is_err());
+    }
+
+    #[test]
+    fn s29_trace_orders_recurring_operations_and_sorts_plugin_settlements() {
+        let mut ledger = ResourceLedger::default();
+        let economy_lending = ResourceOperation::plugin_settlement(PluginSettlementKind::Lending);
+        let economy_contract = ResourceOperation::plugin_settlement(PluginSettlementKind::Contract);
+        let operations = [
+            ResourceOperation::WreckageSalvage,
+            economy_lending,
+            ResourceOperation::StorageTax,
+            ResourceOperation::ControllerPassiveIncome,
+            ResourceOperation::PvEAward,
+            economy_contract,
+            ResourceOperation::UpkeepDeduction,
+        ];
+        for operation in operations {
+            ledger.record_transfer_amounts(29, None, Some(1), "Energy", 1, 1, operation, 0, 0);
+        }
+
+        let snapshot = ledger.finalize_current_tick();
+        let ordered = snapshot
+            .operations
+            .iter()
+            .map(|entry| entry.operation)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered,
+            vec![
+                ResourceOperation::UpkeepDeduction,
+                ResourceOperation::StorageTax,
+                ResourceOperation::PvEAward,
+                ResourceOperation::ControllerPassiveIncome,
+                ResourceOperation::WreckageSalvage,
+                economy_contract,
+                economy_lending,
+            ]
+        );
+        assert!(snapshot.validate_for_commit().is_ok());
+
+        let trace_events = snapshot
+            .operations
+            .iter()
+            .map(ResourceLedgerEntry::tick_trace_event)
+            .map(|event| event.event)
+            .collect::<Vec<_>>();
+        assert!(trace_events[5].contains("PluginSettlement"));
+        assert!(trace_events[5].contains("Economy"));
+        assert!(trace_events[5].contains("Contract"));
     }
 
     #[test]
