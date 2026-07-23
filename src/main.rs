@@ -17,7 +17,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use swarm_engine_api::ids::{BodyPart, PlayerId, RoomId};
 #[cfg(all(test, feature = "mod_special_attacks"))]
@@ -25,10 +25,10 @@ use swarm_engine_plugin_sdk::buffers::SpecialAttackKind;
 
 use swarm_engine::{
     CommandIntent, ExecutorError, PlayerCollectMetrics, PlayerCollectOutput, PlayerExecutor,
-    TickBroadcaster, TickSnapshot, WorldMode, create_world_with_mode,
+    RawPlayerCollectOutput, TickBroadcaster, TickSnapshot, WorldMode, create_world_with_mode,
     sandbox_transport::{
         ActiveDeployment, ActiveDeployments, SandboxBackend, execute_tick_remote, hex_encode,
-        nats_auth_secret_from_env, register_recovered_module_fetch_artifact,
+        nats_auth_secret_from_env,
     },
     sim::{create_local_simulation_world, summarize_local_simulation},
 };
@@ -64,8 +64,14 @@ struct Endpoint {
 
 struct McpHttpState {
     dispatch_tx: mpsc::Sender<McpDispatch>,
+    auth_dispatch_tx: mpsc::Sender<AuthRestDispatch>,
     proxy_verifier: Result<swarm_engine::mcp::GatewayProxyVerifier, String>,
     seen_proxy_nonces: ProxyNonceStore,
+}
+
+struct HttpDispatchSenders {
+    mcp_dispatch_tx: mpsc::Sender<McpDispatch>,
+    auth_dispatch_tx: mpsc::Sender<AuthRestDispatch>,
 }
 
 struct McpDispatch {
@@ -73,6 +79,14 @@ struct McpDispatch {
     principal: swarm_engine::mcp::VerifiedMcpPrincipal,
     request: swarm_engine::JsonRpcRequest,
     response_tx: mpsc::SyncSender<swarm_engine::JsonRpcResponse>,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct AuthRestDispatch {
+    action: swarm_engine::mcp::AuthRestAction,
+    principal_player_id: Option<PlayerId>,
+    params: Value,
+    response_tx: mpsc::SyncSender<Result<Value, swarm_engine::mcp::McpError>>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -284,6 +298,7 @@ fn main() {
     }
     let (mcp_runtime_tx, mcp_runtime_rx) = mpsc::channel();
     let (mcp_dispatch_tx, mcp_dispatch_rx) = mpsc::channel();
+    let (auth_dispatch_tx, auth_dispatch_rx) = mpsc::channel();
     start_health_server(
         health_addr,
         Arc::clone(&healthy),
@@ -358,7 +373,13 @@ fn main() {
         active_deployments.clone(),
         certificate_issuer,
     );
-    if mcp_runtime_tx.send(mcp_dispatch_tx).is_err() {
+    if mcp_runtime_tx
+        .send(HttpDispatchSenders {
+            mcp_dispatch_tx,
+            auth_dispatch_tx,
+        })
+        .is_err()
+    {
         eprintln!("health server unavailable; mcp dispatcher was not installed");
     }
 
@@ -369,6 +390,7 @@ fn main() {
             &mut mcp_server,
             &mut scheduler.world,
             &mcp_dispatch_rx,
+            &auth_dispatch_rx,
             metrics.authoritative_tick(),
         );
         let redb_ok = redb_connected;
@@ -409,6 +431,7 @@ fn dispatch_pending_mcp_requests(
     server: &mut swarm_engine::McpServer,
     world: &mut swarm_engine::world::SwarmWorld,
     dispatch_rx: &mpsc::Receiver<McpDispatch>,
+    auth_dispatch_rx: &mpsc::Receiver<AuthRestDispatch>,
     tick: u64,
 ) {
     while let Ok(dispatch) = dispatch_rx.try_recv() {
@@ -423,6 +446,18 @@ fn dispatch_pending_mcp_requests(
             },
             &dispatch.principal,
             dispatch.request,
+        );
+        let _ = dispatch.response_tx.send(response);
+    }
+    while let Ok(dispatch) = auth_dispatch_rx.try_recv() {
+        if dispatch.cancelled.load(Ordering::Acquire) {
+            continue;
+        }
+        let response = server.call_auth_rest_action(
+            world,
+            dispatch.action,
+            dispatch.principal_player_id,
+            dispatch.params,
         );
         let _ = dispatch.response_tx.send(response);
     }
@@ -694,6 +729,18 @@ fn sandbox_collect_metrics(
     }
 }
 
+fn sandbox_reply_executor_error(status: &str, errors: &[String]) -> Option<ExecutorError> {
+    if status == "ArtifactUnavailable" {
+        Some(ExecutorError::ArtifactUnavailable)
+    } else if status.eq_ignore_ascii_case("timeout") {
+        Some(ExecutorError::Timeout)
+    } else if !errors.is_empty() {
+        Some(ExecutorError::Error(errors.join("; ")))
+    } else {
+        None
+    }
+}
+
 impl PlayerExecutor for SandboxPlayerExecutor {
     fn collect(&mut self, snapshot: TickSnapshot) -> Result<Vec<CommandIntent>, ExecutorError> {
         self.collect_with_metrics(snapshot)
@@ -704,21 +751,51 @@ impl PlayerExecutor for SandboxPlayerExecutor {
         &mut self,
         snapshot: TickSnapshot,
     ) -> Result<PlayerCollectOutput, ExecutorError> {
+        let tick = snapshot.tick;
+        let player_id = snapshot.player_id;
+        self.collect_raw_with_metrics(&[], snapshot)
+            .and_then(|output| {
+                output
+                    .map(|output| PlayerCollectOutput {
+                        intents: output
+                            .commands
+                            .into_iter()
+                            .map(|command| CommandIntent {
+                                sequence: command.sequence,
+                                action: command.action,
+                            })
+                            .collect(),
+                        metrics: output.metrics,
+                    })
+                    .ok_or_else(|| {
+                        ExecutorError::Error(format!(
+                            "missing ABI v2 tick input for player {player_id} tick {tick}"
+                        ))
+                    })
+            })
+    }
+
+    fn collect_raw_with_metrics(
+        &mut self,
+        tick_input_bytes: &[u8],
+        snapshot: TickSnapshot,
+    ) -> Result<Option<RawPlayerCollectOutput>, ExecutorError> {
+        if tick_input_bytes.is_empty() {
+            return Ok(None);
+        }
         match &self.backend {
             SandboxBackend::Remote { nats_client, .. } => {
                 let Some(deployment) = self
                     .active_deployments
                     .active_for_player(snapshot.player_id, snapshot.tick)
                 else {
-                    return Ok(PlayerCollectOutput {
-                        intents: Vec::new(),
+                    return Ok(Some(RawPlayerCollectOutput {
+                        commands: Vec::new(),
                         metrics: PlayerCollectMetrics::default(),
-                    });
+                    }));
                 };
                 let player_id = snapshot.player_id.to_string();
                 let room_id = deployment.room_id.0.to_string();
-                let snapshot_json = serde_json::to_vec(&snapshot)
-                    .map_err(|error| ExecutorError::Error(error.to_string()))?;
                 let reply = self
                     .runtime
                     .block_on(execute_tick_remote(
@@ -726,25 +803,28 @@ impl PlayerExecutor for SandboxPlayerExecutor {
                         snapshot.tick,
                         &player_id,
                         &room_id,
-                        &snapshot_json,
+                        tick_input_bytes,
                         &deployment.module_hash,
                         swarm_engine::MAX_FUEL,
                     ))
                     .map_err(ExecutorError::Error)?;
-                if reply.status.eq_ignore_ascii_case("timeout") {
-                    return Err(ExecutorError::Timeout);
-                }
-                if !reply.errors.is_empty() {
-                    return Err(ExecutorError::Error(reply.errors.join("; ")));
+                if let Some(error) = sandbox_reply_executor_error(&reply.status, &reply.errors) {
+                    if error == ExecutorError::ArtifactUnavailable {
+                        self.active_deployments
+                            .pause_artifact_recovery(deployment.player_id, deployment.room_id);
+                    }
+                    return Err(error);
                 }
                 let metrics = sandbox_collect_metrics(&reply.metrics);
-                let intents = reply
-                    .commands
-                    .into_iter()
-                    .map(serde_json::from_value)
-                    .collect::<Result<Vec<CommandIntent>, _>>()
-                    .map_err(|error| ExecutorError::Error(error.to_string()))?;
-                Ok(PlayerCollectOutput { intents, metrics })
+                let commands = swarm_engine::collect_wasm_tick_result_bytes(
+                    snapshot.player_id,
+                    snapshot.tick,
+                    &reply.tick_result_bytes,
+                )
+                .map_err(|error| {
+                    ExecutorError::Error(format!("invalid TickResult ABI: {error:?}"))
+                })?;
+                Ok(Some(RawPlayerCollectOutput { commands, metrics }))
             }
         }
     }
@@ -1214,7 +1294,7 @@ fn start_health_server(
     addr: String,
     healthy: Arc<AtomicBool>,
     metrics: Arc<metrics::EngineMetrics>,
-    mcp_runtime_rx: mpsc::Receiver<mpsc::Sender<McpDispatch>>,
+    mcp_runtime_rx: mpsc::Receiver<HttpDispatchSenders>,
     mode: WorldMode,
 ) {
     thread::spawn(move || {
@@ -1251,11 +1331,12 @@ fn start_health_server(
 
 fn install_pending_mcp_state(
     mcp_state: &mut Option<McpHttpState>,
-    mcp_runtime_rx: &mpsc::Receiver<mpsc::Sender<McpDispatch>>,
+    mcp_runtime_rx: &mpsc::Receiver<HttpDispatchSenders>,
 ) {
-    while let Ok(dispatch_tx) = mcp_runtime_rx.try_recv() {
+    while let Ok(dispatch_senders) = mcp_runtime_rx.try_recv() {
         *mcp_state = Some(McpHttpState {
-            dispatch_tx,
+            dispatch_tx: dispatch_senders.mcp_dispatch_tx,
+            auth_dispatch_tx: dispatch_senders.auth_dispatch_tx,
             proxy_verifier: swarm_engine::mcp::GatewayProxyVerifier::from_env()
                 .map_err(|error| error.message),
             seen_proxy_nonces: ProxyNonceStore::open(proxy_nonce_store_path()),
@@ -1327,21 +1408,6 @@ fn restore_deployments_from_redb(
             wasm_bytes: artifact.wasm_bytes,
             load_after_tick: manifest.activation_tick,
         };
-        if let Err(error) = register_recovered_module_fetch_artifact(
-            deployment.module_hash,
-            deployment.wasm_bytes.clone(),
-            "redb-recovered-v1",
-        ) {
-            eprintln!(
-                "deploy recovery failed deploy_id={} reason={error}",
-                deployment.deploy_id
-            );
-            let _ = redb_store.mark_deploy_recovery_failed(
-                &deployment.deploy_id,
-                format!("module fetch cache recovery failed: {error}"),
-            );
-            continue;
-        }
         if manifest.status == "active" {
             active_deployments.activate(deployment);
         } else {
@@ -1384,10 +1450,12 @@ fn respond_http(
                 b"method not allowed\n",
             );
         }
+    } else if request_path(&request.path).starts_with("/auth/") {
+        respond_auth_rest(stream, request, mcp_state, mode);
     } else if request.path == "/mcp" {
         respond_mcp(stream, request, mcp_state, mode);
-    } else if let Some(sdk_path) = request.path.strip_prefix("/sdk/") {
-        respond_sdk_file(stream, sdk_output_dir, sdk_path);
+    } else if request_path(&request.path).starts_with("/sdk/") {
+        respond_sdk_file(stream, request, mcp_state, sdk_output_dir);
     } else {
         respond_not_found(stream);
     }
@@ -1460,6 +1528,278 @@ fn read_http_request(stream: &mut TcpStream) -> Option<HttpRequest> {
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn request_path(target: &str) -> &str {
+    target
+        .split_once('?')
+        .map(|(path, _)| path)
+        .unwrap_or(target)
+}
+
+fn request_query(target: &str) -> Option<&str> {
+    target
+        .split_once('?')
+        .map(|(_, query)| query)
+        .filter(|query| !query.is_empty())
+}
+
+fn respond_auth_rest(
+    stream: &mut TcpStream,
+    request: HttpRequest,
+    mcp_state: Option<&mut McpHttpState>,
+    _mode: WorldMode,
+) {
+    let route_path = request_path(&request.path);
+    let Some(action) = swarm_engine::mcp::AuthRestAction::from_route(&request.method, route_path)
+    else {
+        if known_auth_rest_path(route_path) {
+            respond_auth_error(
+                stream,
+                "HTTP/1.1 405 Method Not Allowed",
+                -32601,
+                "method not allowed",
+            );
+        } else {
+            respond_auth_error(
+                stream,
+                "HTTP/1.1 404 Not Found",
+                -32601,
+                "auth route not found",
+            );
+        }
+        return;
+    };
+    let Some(mcp_state) = mcp_state else {
+        respond_auth_error(
+            stream,
+            "HTTP/1.1 503 Service Unavailable",
+            -32000,
+            "auth dispatcher unavailable",
+        );
+        return;
+    };
+    let state = mcp_state;
+    let verifier = match state.proxy_verifier.as_ref() {
+        Ok(verifier) => verifier,
+        Err(error) => {
+            respond_auth_error(stream, "HTTP/1.1 503 Service Unavailable", -32000, error);
+            return;
+        }
+    };
+    let principal = match proxy_principal(&request) {
+        Ok(principal) => principal,
+        Err(error) => {
+            respond_auth_error(stream, "HTTP/1.1 401 Unauthorized", -32001, &error);
+            return;
+        }
+    };
+    if principal.transport != "rest" {
+        respond_auth_error(
+            stream,
+            "HTTP/1.1 401 Unauthorized",
+            -32001,
+            "auth REST routes require rest transport principal",
+        );
+        return;
+    }
+    if auth_rest_route_requires_signed_principal(action) && principal.auth_mode == "unauthenticated"
+    {
+        respond_auth_error(
+            stream,
+            "HTTP/1.1 403 Forbidden",
+            -32003,
+            "signed principal is required",
+        );
+        return;
+    }
+    let tick_header = request.headers.get("x-swarm-tick").cloned();
+    if let Err(error) = proxy_tick(tick_header.as_deref()) {
+        respond_auth_error(stream, "HTTP/1.1 401 Unauthorized", -32001, &error);
+        return;
+    }
+    let request_tick = tick_header.as_deref().unwrap_or("");
+    if let Err(error) = verify_proxy_signature(
+        &request,
+        verifier,
+        &principal,
+        request_tick,
+        &mut state.seen_proxy_nonces,
+    ) {
+        respond_auth_error(stream, "HTTP/1.1 401 Unauthorized", -32001, &error);
+        return;
+    }
+    let params = match auth_rest_params(&request, action) {
+        Ok(params) => params,
+        Err(error) => {
+            respond_auth_error(stream, "HTTP/1.1 400 Bad Request", -32602, &error);
+            return;
+        }
+    };
+    let principal_player_id =
+        auth_rest_route_requires_signed_principal(action).then_some(principal.player_id);
+    let (response_tx, response_rx) = mpsc::sync_channel(1);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    if state
+        .auth_dispatch_tx
+        .send(AuthRestDispatch {
+            action,
+            principal_player_id,
+            params,
+            response_tx,
+            cancelled: Arc::clone(&cancelled),
+        })
+        .is_err()
+    {
+        respond_auth_error(
+            stream,
+            "HTTP/1.1 503 Service Unavailable",
+            -32000,
+            "auth dispatcher unavailable",
+        );
+        return;
+    }
+    match response_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(result)) => respond_json_value(stream, "HTTP/1.1 200 OK", &result),
+        Ok(Err(error)) => respond_auth_mcp_error(stream, error),
+        Err(error) => {
+            cancelled.store(true, Ordering::Release);
+            respond_auth_error(
+                stream,
+                "HTTP/1.1 503 Service Unavailable",
+                -32000,
+                &format!("auth dispatch failed: {error}"),
+            );
+        }
+    }
+}
+
+fn known_auth_rest_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/auth/register/challenge"
+            | "/auth/csr/submit"
+            | "/auth/cert/renew"
+            | "/auth/cert/revoke"
+            | "/auth/cert/list"
+            | "/auth/cert/check"
+            | "/auth/server/trust"
+    )
+}
+
+fn auth_rest_route_requires_signed_principal(action: swarm_engine::mcp::AuthRestAction) -> bool {
+    matches!(
+        action,
+        swarm_engine::mcp::AuthRestAction::RenewCertificate
+            | swarm_engine::mcp::AuthRestAction::RevokeCertificate
+            | swarm_engine::mcp::AuthRestAction::CertList
+            | swarm_engine::mcp::AuthRestAction::CertCheck
+    )
+}
+
+fn auth_rest_params(
+    request: &HttpRequest,
+    action: swarm_engine::mcp::AuthRestAction,
+) -> Result<Value, String> {
+    match action {
+        swarm_engine::mcp::AuthRestAction::CertList if request.method == "GET" => {
+            auth_cert_list_query_params(request_query(&request.path))
+        }
+        swarm_engine::mcp::AuthRestAction::ServerTrust if request.method == "GET" => {
+            Ok(Value::Null)
+        }
+        _ if request.body.is_empty() => Ok(Value::Null),
+        _ => serde_json::from_slice::<Value>(&request.body)
+            .map_err(|error| format!("invalid JSON body: {error}")),
+    }
+}
+
+fn auth_cert_list_query_params(query: Option<&str>) -> Result<Value, String> {
+    let Some(query) = query else {
+        return Ok(Value::Null);
+    };
+    let mut status = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if percent_decode_query_component(key)? == "status" {
+            status = Some(percent_decode_query_component(value)?);
+        }
+    }
+    Ok(match status.filter(|value| !value.trim().is_empty()) {
+        Some(status) => json!({ "status": status }),
+        None => Value::Null,
+    })
+}
+
+fn percent_decode_query_component(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3])
+                    .map_err(|_| "invalid query percent encoding".to_string())?;
+                let byte = u8::from_str_radix(hex, 16)
+                    .map_err(|_| "invalid query percent encoding".to_string())?;
+                decoded.push(byte);
+                index += 3;
+            }
+            b'%' => return Err("invalid query percent encoding".to_string()),
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| "query parameter is not UTF-8".to_string())
+}
+
+fn respond_json_value(stream: &mut TcpStream, status_line: &str, value: &Value) {
+    match serde_json::to_vec(value) {
+        Ok(body) => respond_bytes(stream, status_line, "application/json", &body),
+        Err(error) => respond_auth_error(
+            stream,
+            "HTTP/1.1 500 Internal Server Error",
+            -32603,
+            &error.to_string(),
+        ),
+    }
+}
+
+fn respond_auth_mcp_error(stream: &mut TcpStream, error: swarm_engine::mcp::McpError) {
+    let status_line = match error.code {
+        -32601 => "HTTP/1.1 404 Not Found",
+        -32602 => "HTTP/1.1 400 Bad Request",
+        -32000 => "HTTP/1.1 429 Too Many Requests",
+        _ => "HTTP/1.1 400 Bad Request",
+    };
+    respond_auth_error(stream, status_line, error.code, &error.message);
+}
+
+fn respond_auth_error(stream: &mut TcpStream, status_line: &str, code: i32, message: &str) {
+    respond_json_value(
+        stream,
+        status_line,
+        &json!({"error":{"code":code,"message":message}}),
+    );
+}
+
+fn auth_lifecycle_mcp_method(method: &str) -> bool {
+    matches!(
+        method,
+        "swarm_register_challenge"
+            | "swarm_submit_csr"
+            | "swarm_renew_certificate"
+            | "swarm_revoke_certificate"
+            | "swarm_cert_list"
+            | "swarm_cert_check"
+            | "swarm_get_server_trust"
+    )
 }
 
 fn respond_mcp(
@@ -1559,6 +1899,27 @@ fn respond_mcp(
             return;
         }
     };
+    if auth_lifecycle_mcp_method(&rpc_request.method) {
+        let response = swarm_engine::JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: rpc_request.id,
+            result: None,
+            error: Some(swarm_engine::mcp::McpError {
+                code: -32601,
+                message: format!("unknown MCP tool: {}", rpc_request.method),
+            }),
+        };
+        match serde_json::to_vec(&response) {
+            Ok(body) => respond_bytes(stream, "HTTP/1.1 200 OK", "application/json", &body),
+            Err(error) => respond_bytes(
+                stream,
+                "HTTP/1.1 500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                format!("{error}\n").as_bytes(),
+            ),
+        }
+        return;
+    }
     let (response_tx, response_rx) = mpsc::sync_channel(1);
     let cancelled = Arc::new(AtomicBool::new(false));
     if state
@@ -2122,19 +2483,106 @@ fn respond_metrics(stream: &mut TcpStream, metrics: &metrics::EngineMetrics) {
     );
 }
 
-fn respond_sdk_file(stream: &mut TcpStream, sdk_output_dir: &Path, sdk_path: &str) {
-    let Some(relative_path) = clean_relative_path(sdk_path) else {
+fn respond_sdk_file(
+    stream: &mut TcpStream,
+    request: HttpRequest,
+    mcp_state: Option<&mut McpHttpState>,
+    sdk_output_dir: &Path,
+) {
+    if !request.method.eq_ignore_ascii_case("GET") {
+        respond_bytes(
+            stream,
+            "HTTP/1.1 405 Method Not Allowed",
+            "text/plain; charset=utf-8",
+            b"method not allowed\n",
+        );
+        return;
+    }
+    let Some(mcp_state) = mcp_state else {
+        respond_bytes(
+            stream,
+            "HTTP/1.1 503 Service Unavailable",
+            "text/plain; charset=utf-8",
+            b"sdk unavailable\n",
+        );
+        return;
+    };
+    let verifier = match mcp_state.proxy_verifier.as_ref() {
+        Ok(verifier) => verifier,
+        Err(error) => {
+            respond_bytes(
+                stream,
+                "HTTP/1.1 503 Service Unavailable",
+                "text/plain; charset=utf-8",
+                format!("{error}\n").as_bytes(),
+            );
+            return;
+        }
+    };
+    let principal = match proxy_principal(&request) {
+        Ok(principal) => principal,
+        Err(error) => {
+            respond_bytes(
+                stream,
+                "HTTP/1.1 401 Unauthorized",
+                "text/plain; charset=utf-8",
+                format!("{error}\n").as_bytes(),
+            );
+            return;
+        }
+    };
+    if principal.transport != "rest" || principal.auth_mode == "unauthenticated" {
+        respond_bytes(
+            stream,
+            "HTTP/1.1 401 Unauthorized",
+            "text/plain; charset=utf-8",
+            b"sdk requires signed rest proxy principal\n",
+        );
+        return;
+    }
+    let tick_header = request.headers.get("x-swarm-tick").cloned();
+    if let Err(error) = proxy_tick(tick_header.as_deref()) {
+        respond_bytes(
+            stream,
+            "HTTP/1.1 401 Unauthorized",
+            "text/plain; charset=utf-8",
+            format!("{error}\n").as_bytes(),
+        );
+        return;
+    }
+    if let Err(error) = verify_proxy_signature(
+        &request,
+        verifier,
+        &principal,
+        tick_header.as_deref().unwrap_or(""),
+        &mut mcp_state.seen_proxy_nonces,
+    ) {
+        respond_bytes(
+            stream,
+            "HTTP/1.1 401 Unauthorized",
+            "text/plain; charset=utf-8",
+            format!("{error}\n").as_bytes(),
+        );
+        return;
+    }
+    let Some(sdk_path) = request_path(&request.path).strip_prefix("/sdk/") else {
         respond_not_found(stream);
         return;
     };
-    let mut file_path = sdk_output_dir.join(relative_path);
+    let Some((sdk_root, relative_path)) =
+        resolve_sdk_path(sdk_output_dir, sdk_path, request_query(&request.path))
+    else {
+        respond_not_found(stream);
+        return;
+    };
+    let mut file_path = sdk_root.join(relative_path);
 
     if file_path.is_dir() {
         let index_path = file_path.join("index.html");
         if index_path.is_file() {
             file_path = index_path;
         } else {
-            respond_directory_listing(stream, sdk_output_dir, &file_path);
+            respond_directory_listing(stream, &sdk_root, &file_path);
             return;
         }
     }
@@ -2146,6 +2594,46 @@ fn respond_sdk_file(stream: &mut TcpStream, sdk_output_dir: &Path, sdk_path: &st
         }
         Err(_) => respond_not_found(stream),
     }
+}
+
+fn resolve_sdk_path(
+    sdk_output_dir: &Path,
+    request_path: &str,
+    query: Option<&str>,
+) -> Option<(PathBuf, PathBuf)> {
+    let relative_path = clean_relative_path(request_path)?;
+    let mut components = relative_path.components();
+    let language = components.next()?.as_os_str().to_str()?;
+    let package = match language {
+        "ts" | "typescript" => "sdk-ts",
+        "rust" => "sdk-rust",
+        _ => return None,
+    };
+    let package_path = components.collect::<PathBuf>();
+
+    let requested_hash = query.unwrap_or_default().split('&').find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        matches!(key, "manifest" | "world_hash").then_some(value)
+    });
+    let world_hash = if let Some(hash) = requested_hash {
+        is_world_hash(hash).then_some(hash.to_string())?
+    } else {
+        let mut hashes = std::fs::read_dir(sdk_output_dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|hash| is_world_hash(hash))
+            .filter(|hash| sdk_output_dir.join(hash).join(package).is_dir())
+            .collect::<Vec<_>>();
+        hashes.sort();
+        hashes.pop()?
+    };
+    let sdk_root = sdk_output_dir.join(world_hash).join(package);
+    sdk_root.is_dir().then_some((sdk_root, package_path))
+}
+
+fn is_world_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn clean_relative_path(path: &str) -> Option<PathBuf> {
@@ -2315,8 +2803,52 @@ fn status(ok: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_unavailable_reply_maps_to_explicit_executor_error() {
+        assert_eq!(
+            sandbox_reply_executor_error("ArtifactUnavailable", &[]),
+            Some(ExecutorError::ArtifactUnavailable)
+        );
+    }
     use bevy::prelude::{Plugin, Resource};
     use swarm_engine_api::descriptor::PluginDescriptor;
+
+    #[test]
+    fn sdk_resolver_selects_world_hash_and_language_package_deterministically() {
+        let output = tempfile::tempdir().unwrap();
+        let lower_hash = "1".repeat(64);
+        let higher_hash = "f".repeat(64);
+        fs::create_dir_all(output.path().join(&lower_hash).join("sdk-ts/src")).unwrap();
+        fs::create_dir_all(output.path().join(&higher_hash).join("sdk-ts/src")).unwrap();
+        fs::create_dir_all(output.path().join(&lower_hash).join("sdk-rust/src")).unwrap();
+
+        let (root, path) = resolve_sdk_path(output.path(), "typescript/src", None).unwrap();
+        assert_eq!(root, output.path().join(&higher_hash).join("sdk-ts"));
+        assert_eq!(path, PathBuf::from("src"));
+
+        let query = format!("manifest={lower_hash}");
+        let (root, path) =
+            resolve_sdk_path(output.path(), "ts/src/commands.ts", Some(&query)).unwrap();
+        assert_eq!(root, output.path().join(&lower_hash).join("sdk-ts"));
+        assert_eq!(path, PathBuf::from("src/commands.ts"));
+
+        let query = format!("world_hash={lower_hash}");
+        let (root, path) = resolve_sdk_path(output.path(), "rust", Some(&query)).unwrap();
+        assert_eq!(root, output.path().join(lower_hash).join("sdk-rust"));
+        assert!(path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn sdk_resolver_rejects_unknown_languages_hashes_and_traversal() {
+        let output = tempfile::tempdir().unwrap();
+        let hash = "a".repeat(64);
+        fs::create_dir_all(output.path().join(&hash).join("sdk-ts")).unwrap();
+
+        assert!(resolve_sdk_path(output.path(), "python", None).is_none());
+        assert!(resolve_sdk_path(output.path(), "ts/../secret", None).is_none());
+        assert!(resolve_sdk_path(output.path(), "ts", Some("manifest=not-a-world-hash")).is_none());
+    }
 
     #[derive(Resource)]
     struct TestPluginInstalled;
@@ -2369,8 +2901,10 @@ mod tests {
                 "engine-installer-test".to_string(),
                 swarm_engine::plugins::PluginEntry {
                     version: version.to_string(),
-                    enabled: true,
-                    config: HashMap::new(),
+                    ..swarm_engine::plugins::PluginEntry::trusted_local_build(
+                        "engine-installer-test",
+                        true,
+                    )
                 },
             )]),
         }
@@ -2589,13 +3123,13 @@ mod tests {
                 .spawn_interval,
             300
         );
-        assert_eq!(
+        assert!(
             world
                 .app
                 .world()
-                .resource::<swarm_mod_resource_decay::ResourceDecayConfig>()
-                .decay_rate_ppm,
-            1_000
+                .get_resource::<swarm_mod_resource_decay::ResourceDecayConfig>()
+                .is_none(),
+            "optional resource-decay must remain disabled in the vanilla lock"
         );
         assert!(
             world
@@ -2661,9 +3195,39 @@ mod tests {
         player_id: PlayerId,
         tick_header: &str,
     ) -> HttpRequest {
+        signed_request_for_route(
+            timestamp,
+            nonce,
+            "POST",
+            "/mcp",
+            body,
+            player_id,
+            tick_header,
+            "mcp",
+            "swarm:read swarm:deploy",
+            "app_cert",
+            "cert-1",
+            "fingerprint-1",
+        )
+    }
+
+    fn signed_request_for_route(
+        timestamp: i64,
+        nonce: &str,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        player_id: PlayerId,
+        tick_header: &str,
+        transport: &str,
+        scopes: &str,
+        auth_mode: &str,
+        cert_id: &str,
+        cert_fingerprint: &str,
+    ) -> HttpRequest {
         let mut request = HttpRequest {
-            method: "POST".to_string(),
-            path: "/mcp".to_string(),
+            method: method.to_string(),
+            path: path.to_string(),
             headers: HashMap::new(),
             body: body.to_vec(),
         };
@@ -2677,24 +3241,23 @@ mod tests {
             "x-swarm-principal-player-id".to_string(),
             player_id.to_string(),
         );
-        request.headers.insert(
-            "x-swarm-principal-cert-id".to_string(),
-            "cert-1".to_string(),
-        );
+        request
+            .headers
+            .insert("x-swarm-principal-cert-id".to_string(), cert_id.to_string());
         request.headers.insert(
             "x-swarm-principal-cert-fingerprint".to_string(),
-            "fingerprint-1".to_string(),
+            cert_fingerprint.to_string(),
+        );
+        request.headers.insert(
+            "x-swarm-principal-transport".to_string(),
+            transport.to_string(),
         );
         request
             .headers
-            .insert("x-swarm-principal-transport".to_string(), "mcp".to_string());
-        request.headers.insert(
-            "x-swarm-principal-scopes".to_string(),
-            "swarm:read swarm:deploy".to_string(),
-        );
+            .insert("x-swarm-principal-scopes".to_string(), scopes.to_string());
         request.headers.insert(
             "x-swarm-principal-auth-mode".to_string(),
-            "app_cert".to_string(),
+            auth_mode.to_string(),
         );
         if !tick_header.is_empty() {
             request
@@ -2702,20 +3265,290 @@ mod tests {
                 .insert("x-swarm-tick".to_string(), tick_header.to_string());
         }
         let principal = proxy_principal(&request).unwrap();
-        let body_hash = hex_encode(&Sha256::digest(body));
-        let canonical = format!(
-            "POST\n/mcp\n{timestamp}\n{nonce}\n{player_id}\n{tick_header}\n{}\n{}\n{}\n{}\n{}\n{body_hash}",
-            principal.cert_id,
-            principal.cert_fingerprint,
-            principal.transport,
-            principal.scopes,
-            principal.auth_mode,
-        );
+        let canonical =
+            proxy_signature_canonical(&request, timestamp, nonce, &principal, tick_header);
         request.headers.insert(
             "x-swarm-proxy-signature".to_string(),
             swarm_engine::sandbox_transport::hmac_sha256_hex(b"secret", canonical.as_bytes()),
         );
         request
+    }
+
+    fn signed_rest_request(
+        nonce: &str,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        auth_mode: &str,
+        player_id: PlayerId,
+    ) -> HttpRequest {
+        let (cert_id, fingerprint, scopes) = if auth_mode == "unauthenticated" {
+            ("", "", "")
+        } else {
+            ("cert-rest", "fingerprint-rest", "swarm:auth swarm:read")
+        };
+        signed_request_for_route(
+            current_unix_timestamp().unwrap(),
+            nonce,
+            method,
+            path,
+            body,
+            player_id,
+            "",
+            "rest",
+            scopes,
+            auth_mode,
+            cert_id,
+            fingerprint,
+        )
+    }
+
+    fn test_http_state(
+        nonce_name: &str,
+    ) -> (
+        McpHttpState,
+        mpsc::Receiver<McpDispatch>,
+        mpsc::Receiver<AuthRestDispatch>,
+    ) {
+        let (mcp_tx, mcp_rx) = mpsc::channel();
+        let (auth_tx, auth_rx) = mpsc::channel();
+        (
+            McpHttpState {
+                dispatch_tx: mcp_tx,
+                auth_dispatch_tx: auth_tx,
+                proxy_verifier: Ok(test_proxy_verifier()),
+                seen_proxy_nonces: temp_nonce_store(nonce_name),
+            },
+            mcp_rx,
+            auth_rx,
+        )
+    }
+
+    fn write_http_request(addr: std::net::SocketAddr, request: &HttpRequest) -> String {
+        let mut client = TcpStream::connect(addr).unwrap();
+        write!(
+            client,
+            "{} {} HTTP/1.1\r\nhost: localhost\r\ncontent-length: {}\r\n",
+            request.method,
+            request.path,
+            request.body.len()
+        )
+        .unwrap();
+        for (name, value) in &request.headers {
+            write!(client, "{name}: {value}\r\n").unwrap();
+        }
+        write!(client, "\r\n").unwrap();
+        client.write_all(&request.body).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    fn spawn_one_http_response(
+        state: Option<McpHttpState>,
+    ) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let metrics = Arc::new(metrics::EngineMetrics::default());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut state = state;
+            respond_http(
+                &mut stream,
+                true,
+                &metrics,
+                Path::new("/tmp"),
+                state.as_mut(),
+                WorldMode::Default,
+            );
+        });
+        (addr, handle)
+    }
+
+    fn response_json(response: &str) -> Value {
+        let (_, body) = response.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str(body).unwrap()
+    }
+
+    #[test]
+    fn auth_rest_bootstrap_route_dispatches_without_signed_principal_and_returns_direct_json() {
+        let (state, _mcp_rx, auth_rx) = test_http_state("auth-bootstrap");
+        let (addr, server) = spawn_one_http_response(Some(state));
+        let dispatch = thread::spawn(move || {
+            let dispatch = auth_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(
+                dispatch.action,
+                swarm_engine::mcp::AuthRestAction::RegisterChallenge
+            );
+            assert_eq!(dispatch.principal_player_id, None);
+            assert_eq!(dispatch.params, json!({}));
+            dispatch
+                .response_tx
+                .send(Ok(json!({
+                    "challenge_id": "challenge-1",
+                    "challenge": "proof",
+                    "difficulty_bits": 12,
+                    "expires_at": 1234
+                })))
+                .unwrap();
+        });
+        let request = signed_rest_request(
+            "auth-bootstrap-nonce",
+            "POST",
+            "/auth/register/challenge",
+            b"{}",
+            "unauthenticated",
+            0,
+        );
+
+        let response = write_http_request(addr, &request);
+
+        server.join().unwrap();
+        dispatch.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        let body = response_json(&response);
+        assert_eq!(body["challenge_id"], "challenge-1");
+        assert!(body.get("jsonrpc").is_none());
+    }
+
+    #[test]
+    fn auth_rest_signed_get_converts_query_and_requires_signed_principal() {
+        let (state, _mcp_rx, auth_rx) = test_http_state("auth-list-query");
+        let (addr, server) = spawn_one_http_response(Some(state));
+        let dispatch = thread::spawn(move || {
+            let dispatch = auth_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(dispatch.action, swarm_engine::mcp::AuthRestAction::CertList);
+            assert_eq!(dispatch.principal_player_id, Some(7));
+            assert_eq!(dispatch.params, json!({"status":"revoked cert"}));
+            dispatch
+                .response_tx
+                .send(Ok(json!({"certificates": []})))
+                .unwrap();
+        });
+        let request = signed_rest_request(
+            "auth-list-query-nonce",
+            "GET",
+            "/auth/cert/list?status=revoked+cert",
+            b"",
+            "app_cert",
+            7,
+        );
+
+        let response = write_http_request(addr, &request);
+
+        server.join().unwrap();
+        dispatch.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(response_json(&response), json!({"certificates": []}));
+
+        let (state, _mcp_rx, auth_rx) = test_http_state("auth-list-unauth");
+        let (addr, server) = spawn_one_http_response(Some(state));
+        let request = signed_rest_request(
+            "auth-list-unauth-nonce",
+            "GET",
+            "/auth/cert/list",
+            b"",
+            "unauthenticated",
+            0,
+        );
+
+        let response = write_http_request(addr, &request);
+
+        server.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(auth_rx.try_recv().is_err());
+        assert_eq!(
+            response_json(&response)["error"]["message"],
+            "signed principal is required"
+        );
+    }
+
+    #[test]
+    fn auth_rest_hmac_binds_actual_method_and_path_before_dispatch() {
+        let (state, _mcp_rx, auth_rx) = test_http_state("auth-path-binding");
+        let (addr, server) = spawn_one_http_response(Some(state));
+        let mut request = signed_rest_request(
+            "auth-path-binding-nonce",
+            "POST",
+            "/auth/cert/check",
+            br#"{"certificate_id":"cert-rest"}"#,
+            "app_cert",
+            7,
+        );
+        request.path = "/auth/cert/revoke".to_string();
+
+        let response = write_http_request(addr, &request);
+
+        server.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 Unauthorized"));
+        assert!(auth_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn auth_rest_adapter_errors_are_direct_json_statuses() {
+        let (state, _mcp_rx, auth_rx) = test_http_state("auth-direct-error");
+        let (addr, server) = spawn_one_http_response(Some(state));
+        let dispatch = thread::spawn(move || {
+            let dispatch = auth_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(
+                dispatch.action,
+                swarm_engine::mcp::AuthRestAction::CertCheck
+            );
+            dispatch
+                .response_tx
+                .send(Err(swarm_engine::mcp::McpError {
+                    code: -32602,
+                    message: "bad certificate".to_string(),
+                }))
+                .unwrap();
+        });
+        let request = signed_rest_request(
+            "auth-direct-error-nonce",
+            "POST",
+            "/auth/cert/check",
+            br#"{"certificate_id":"cert-rest"}"#,
+            "app_cert",
+            7,
+        );
+
+        let response = write_http_request(addr, &request);
+
+        server.join().unwrap();
+        dispatch.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        let body = response_json(&response);
+        assert_eq!(body["error"]["code"], -32602);
+        assert_eq!(body["error"]["message"], "bad certificate");
+        assert!(body.get("jsonrpc").is_none());
+    }
+
+    #[test]
+    fn auth_lifecycle_aliases_are_absent_from_mcp_route() {
+        let (state, mcp_rx, _auth_rx) = test_http_state("auth-mcp-alias");
+        let (addr, server) = spawn_one_http_response(Some(state));
+        let request = signed_request_for_route(
+            current_unix_timestamp().unwrap(),
+            "auth-mcp-alias-nonce",
+            "POST",
+            "/mcp",
+            br#"{"jsonrpc":"2.0","id":"alias","method":"swarm_cert_check","params":{"certificate_id":"cert-rest"}}"#,
+            7,
+            "0",
+            "mcp",
+            "swarm:auth swarm:read",
+            "app_cert",
+            "cert-rest",
+            "fingerprint-rest",
+        );
+
+        let response = write_http_request(addr, &request);
+
+        server.join().unwrap();
+        assert!(mcp_rx.try_recv().is_err());
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        let body = response_json(&response);
+        assert_eq!(body["jsonrpc"], "2.0");
+        assert_eq!(body["error"]["code"], -32601);
     }
 
     #[test]

@@ -15,18 +15,20 @@ use reqwest::{
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use wasmparser::{Parser, Payload};
 
 use crate::{
     DeployParams, DeployResult,
-    mcp::{CertCheckParams, CertCheckResult, DeployPayload, encode_base64},
+    mcp::{CertCheckResult, DeployPayload, encode_base64},
 };
+use swarm_engine_api::abi::ABI_VERSION;
 
 type CliResult<T> = Result<T, String>;
 
 const DEPLOY_DOMAIN: &str = "SWARM-DEPLOY-V1";
-const DEFAULT_ENGINE_ABI_VERSION: u32 = 1;
+const REQUEST_SIGNATURE_DOMAIN: &str = "SWARM-REQUEST-V1";
+const DEFAULT_ENGINE_ABI_VERSION: u32 = ABI_VERSION;
 const ENGINE_MAX_WASM_BYTES: usize = 5 * 1024 * 1024;
 const MAX_GATEWAY_RESPONSE_BYTES: usize = 1024 * 1024;
 const TARGET_MANIFEST_SECTION_NAME: &str = "swarm.target_manifest";
@@ -63,9 +65,10 @@ pub fn run(args: &[String], out: &mut dyn Write) -> CliResult<()> {
         resolved.engine_abi_version,
     )?;
     let client = http_client()?;
-    let cert_check = build_signed_cert_check_request(&resolved, &auth, unix_now()?)?;
+    let cert_check_url = gateway_rest_url(&resolved.gateway_url, "/auth/cert/check")?;
+    let cert_check = build_signed_cert_check_request(&cert_check_url, &auth, unix_now()?)?;
     let cert_result: CertCheckResult =
-        post_signed_json_rpc(&client, &resolved.gateway_url, &cert_check)?;
+        post_signed_rest_json(&client, &cert_check_url, &cert_check)?;
     validate_cert_check_result(&cert_result, &auth)?;
     let deploy = build_signed_deploy_request(&resolved, &auth, wasm_bytes, unix_now()?)?;
     let result: DeployResult =
@@ -348,6 +351,12 @@ impl ResolvedDeployOptions {
 #[derive(Debug)]
 struct SignedJsonRpcRequest {
     id: String,
+    body: Vec<u8>,
+    headers: Vec<(&'static str, String)>,
+}
+
+#[derive(Debug)]
+struct SignedRestRequest {
     body: Vec<u8>,
     headers: Vec<(&'static str, String)>,
 }
@@ -834,20 +843,58 @@ fn build_signed_deploy_request(
 }
 
 fn build_signed_cert_check_request(
-    options: &ResolvedDeployOptions,
+    url: &Url,
     auth: &DeployAuth,
     now: Duration,
-) -> CliResult<SignedJsonRpcRequest> {
-    build_signed_json_rpc_request(
-        options,
+) -> CliResult<SignedRestRequest> {
+    build_signed_rest_request(
+        url,
         auth,
-        format!("cert-check-{}", options.version_counter),
-        "swarm_cert_check",
-        CertCheckParams {
-            certificate_id: auth.client_cert_id.clone(),
-        },
+        "POST",
+        "rest",
+        json!({"certificate_id": auth.client_cert_id}),
         now,
     )
+}
+
+fn build_signed_rest_request(
+    url: &Url,
+    auth: &DeployAuth,
+    method: &'static str,
+    transport: &'static str,
+    body_value: Value,
+    now: Duration,
+) -> CliResult<SignedRestRequest> {
+    let body = serde_json::to_vec(&body_value).map_err(|error| error.to_string())?;
+    let timestamp = iso8601_utc(now);
+    let nonce = random_hex_nonce()?;
+    let canonical = canonical_client_request(
+        method,
+        url,
+        transport,
+        &body_value,
+        &auth.client_cert_id,
+        &auth.player_id_header,
+        &timestamp,
+        &nonce,
+    );
+    let request_signature = auth.signing_key.sign(canonical.as_bytes());
+    let certificate_bundle =
+        serde_json::to_string(&auth.certificate_bundle).map_err(|error| error.to_string())?;
+    Ok(SignedRestRequest {
+        body,
+        headers: vec![
+            ("Content-Type", "application/json".to_string()),
+            ("Accept", "application/json".to_string()),
+            ("X-Swarm-Transport", transport.to_string()),
+            ("Swarm-Certificate", certificate_bundle),
+            ("Swarm-Cert-Id", auth.client_cert_id.clone()),
+            ("X-Swarm-Player-Id", auth.player_id_header.clone()),
+            ("Swarm-Timestamp", timestamp),
+            ("Swarm-Nonce", nonce),
+            ("Swarm-Signature", hex_encode(&request_signature.to_bytes())),
+        ],
+    })
 }
 
 fn build_signed_json_rpc_request<T: Serialize>(
@@ -870,11 +917,11 @@ fn build_signed_json_rpc_request<T: Serialize>(
     let nonce = random_hex_nonce()?;
     let canonical = canonical_client_request(
         "POST",
-        options.gateway_url.path(),
+        &options.gateway_url,
+        "mcp",
         &body_value,
         &auth.client_cert_id,
         &auth.player_id_header,
-        "",
         &timestamp,
         &nonce,
     );
@@ -927,6 +974,27 @@ fn post_signed_json_rpc<T: for<'de> Deserialize<'de>>(
     parse_json_rpc_response(&body, &request.id)
 }
 
+fn post_signed_rest_json<T: for<'de> Deserialize<'de>>(
+    client: &Client,
+    url: &Url,
+    request: &SignedRestRequest,
+) -> CliResult<T> {
+    let mut builder = client.post(url.clone());
+    for (name, value) in &request.headers {
+        builder = builder.header(*name, value);
+    }
+    let response = builder
+        .body(request.body.clone())
+        .send()
+        .map_err(|error| format!("gateway request failed: {error}"))?;
+    let status = response.status();
+    let body = read_response_limited(response)?;
+    if !status.is_success() {
+        return Err(format!("gateway returned HTTP {}", status.as_u16()));
+    }
+    serde_json::from_slice(&body).map_err(|error| format!("decode gateway JSON: {error}"))
+}
+
 fn read_response_limited(response: Response) -> CliResult<Vec<u8>> {
     if response
         .content_length()
@@ -970,16 +1038,16 @@ fn parse_json_rpc_response<T: for<'de> Deserialize<'de>>(
 
 fn validate_cert_check_result(result: &CertCheckResult, auth: &DeployAuth) -> CliResult<()> {
     if !result.valid {
-        return Err("swarm_cert_check did not return valid=true".to_string());
+        return Err("auth cert check did not return valid=true".to_string());
     }
     if result.revoked {
-        return Err("swarm_cert_check returned revoked=true".to_string());
+        return Err("auth cert check returned revoked=true".to_string());
     }
     if result.certificate_id != auth.client_cert_id {
-        return Err("swarm_cert_check certificate_id does not match auth certificate".to_string());
+        return Err("auth cert check certificate_id does not match auth certificate".to_string());
     }
     if result.player_id != auth.deploy_player_id {
-        return Err("swarm_cert_check player_id does not match auth certificate".to_string());
+        return Err("auth cert check player_id does not match auth certificate".to_string());
     }
     Ok(())
 }
@@ -1038,26 +1106,56 @@ fn is_loopback_or_localhost(url: &Url) -> bool {
 
 fn canonical_client_request(
     method: &str,
-    path: &str,
+    url: &Url,
+    transport: &str,
     body: &Value,
     cert_id: &str,
     player_id: &str,
-    tick: &str,
     timestamp: &str,
     nonce: &str,
 ) -> String {
     let body_hash = blake3::hash(stable_json(body).as_bytes()).to_hex();
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        REQUEST_SIGNATURE_DOMAIN,
+        transport,
         method.to_ascii_uppercase(),
-        path,
+        url.scheme(),
+        url_authority(url),
+        url_path_and_query(url),
         timestamp,
         nonce,
         cert_id,
         player_id,
-        tick,
         body_hash
     )
+}
+
+fn gateway_rest_url(gateway_url: &Url, path: &str) -> CliResult<Url> {
+    let mut url = gateway_url.clone();
+    url.set_path(path);
+    url.set_query(None);
+    Ok(url)
+}
+
+fn url_authority(url: &Url) -> String {
+    let input = url.as_str();
+    let Some(scheme_end) = input.find("://") else {
+        return String::new();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = input[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|offset| authority_start + offset)
+        .unwrap_or(input.len());
+    input[authority_start..authority_end].to_string()
+}
+
+fn url_path_and_query(url: &Url) -> String {
+    match url.query() {
+        Some(query) => format!("{}?{}", url.path(), query),
+        None => url.path().to_string(),
+    }
 }
 
 fn stable_json(value: &Value) -> String {
@@ -1656,11 +1754,11 @@ mod tests {
         let headers = header_map(&request.request.headers);
         let canonical = canonical_client_request(
             "POST",
-            "/mcp",
+            &options.gateway_url,
+            "mcp",
             &body_value,
             headers["Swarm-Cert-Id"],
             headers["X-Swarm-Player-Id"],
-            "",
             headers["Swarm-Timestamp"],
             headers["Swarm-Nonce"],
         );
@@ -1825,34 +1923,23 @@ mod tests {
         let (mut preflight_stream, _) = listener.accept().unwrap();
         let preflight = read_http_request(&mut preflight_stream);
         let preflight_body = verify_signed_http_request(&preflight, &verifying_key);
-        assert_eq!(preflight_body.get("method").unwrap(), "swarm_cert_check");
-        assert_eq!(
-            preflight_body
-                .get("params")
-                .unwrap()
-                .get("certificate_id")
-                .unwrap(),
-            "cert-base"
-        );
+        assert_eq!(preflight.method, "POST");
+        assert_eq!(preflight.path, "/auth/cert/check");
+        assert_eq!(preflight_body.get("certificate_id").unwrap(), "cert-base");
         let preflight_nonce = preflight.headers["swarm-nonce"].clone();
-        let preflight_id = preflight_body.get("id").cloned().unwrap();
         respond_json(
             &mut preflight_stream,
             json!({
-                "jsonrpc": "2.0",
-                "id": preflight_id,
-                "result": {
-                    "valid": true,
-                    "certificate_id": "cert-base",
-                    "player_id": 7,
-                    "client_public_key": encode_base64(verifying_key.as_bytes()),
-                    "public_key_fingerprint": blake3::hash(verifying_key.as_bytes()).to_hex().to_string(),
-                    "usage": "client_auth",
-                    "scope": "deploy transport:mcp",
-                    "audience": "swarm-client-auth-v1",
-                    "expires_at": 4_102_444_800_u64,
-                    "revoked": false
-                }
+                "valid": true,
+                "certificate_id": "cert-base",
+                "player_id": 7,
+                "client_public_key": encode_base64(verifying_key.as_bytes()),
+                "public_key_fingerprint": blake3::hash(verifying_key.as_bytes()).to_hex().to_string(),
+                "usage": "client_auth",
+                "scope": "deploy transport:mcp transport:rest",
+                "audience": "swarm-client-auth-v1",
+                "expires_at": 4_102_444_800_u64,
+                "revoked": false
             }),
         );
 
@@ -1895,16 +1982,16 @@ mod tests {
 
     fn verify_signed_http_request(request: &HttpRequest, verifying_key: &VerifyingKey) -> Value {
         assert_eq!(request.method, "POST");
-        assert_eq!(request.path, "/mcp");
         let body_value: Value = serde_json::from_slice(&request.body).unwrap();
         let headers = &request.headers;
+        let url = Url::parse(&format!("http://{}{}", headers["host"], request.path)).unwrap();
         let canonical = canonical_client_request(
             "POST",
-            "/mcp",
+            &url,
+            headers["x-swarm-transport"].as_str(),
             &body_value,
             headers["swarm-cert-id"].as_str(),
             headers["x-swarm-player-id"].as_str(),
-            "",
             headers["swarm-timestamp"].as_str(),
             headers["swarm-nonce"].as_str(),
         );

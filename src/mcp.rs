@@ -45,6 +45,7 @@ use crate::visibility::{
     visible_entity_ids_with_positions, visible_positions,
 };
 use crate::world::{SwarmWorld, WorldConfig};
+use swarm_engine_api::abi::ABI_VERSION;
 
 mod mcp_statistics;
 
@@ -65,8 +66,8 @@ const AUTH_CODE_SIGNING_CERT_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 const AUTH_CLIENT_AUDIENCE: &str = "swarm-mcp";
 const AUTH_CODE_SIGNING_AUDIENCE: &str = "swarm-wasm-deploy";
 const DEPLOY_PAYLOAD_SCHEMA: &str = "SWARM-DEPLOY-V1";
-const DEPLOY_VALIDATION_POLICY_VERSION: &str = "raw-wasm-v1";
-const ENGINE_ABI_VERSION: u32 = 1;
+const DEPLOY_VALIDATION_POLICY_VERSION: &str = "raw-wasm-v2";
+const ENGINE_ABI_VERSION: u32 = ABI_VERSION;
 const MAX_TOURNAMENT_ID_LEN: usize = 128;
 const MAX_TOURNAMENT_PLAYERS: usize = 128;
 const MAX_TOURNAMENT_FIXED_TICKS: Tick = 1_000_000;
@@ -422,7 +423,7 @@ struct RateBucket {
 
 #[derive(Debug, Default)]
 pub struct RateLimiter {
-    buckets: HashMap<(PlayerId, CommandSource), RateBucket>,
+    buckets: HashMap<(PlayerId, String), RateBucket>,
 }
 
 impl RateLimiter {
@@ -437,13 +438,35 @@ impl RateLimiter {
         tick: Tick,
     ) -> Result<(), McpError> {
         let limit = rate_limit_for_source(source);
-        let bucket = self
-            .buckets
-            .entry((player_id, source))
-            .or_insert(RateBucket {
-                tokens: limit,
-                last_tick: tick,
-            });
+        self.check_key(player_id, format!("source:{source:?}"), limit, tick)
+    }
+
+    pub fn check_tool(
+        &mut self,
+        player_id: PlayerId,
+        tool: &str,
+        source: CommandSource,
+        tick: Tick,
+    ) -> Result<(), McpError> {
+        self.check_key(
+            player_id,
+            format!("tool:{tool}"),
+            rate_limit_for_tool(tool, source),
+            tick,
+        )
+    }
+
+    fn check_key(
+        &mut self,
+        player_id: PlayerId,
+        key: String,
+        limit: u32,
+        tick: Tick,
+    ) -> Result<(), McpError> {
+        let bucket = self.buckets.entry((player_id, key)).or_insert(RateBucket {
+            tokens: limit,
+            last_tick: tick,
+        });
 
         if tick > bucket.last_tick {
             let elapsed_ticks = tick.saturating_sub(bucket.last_tick);
@@ -477,6 +500,16 @@ fn rate_limit_for_source(source: CommandSource) -> u32 {
         CommandSource::RuleMod => 25,
         CommandSource::Simulate => 50,
         CommandSource::DryRun => 20,
+    }
+}
+
+fn rate_limit_for_tool(tool: &str, source: CommandSource) -> u32 {
+    match tool {
+        "swarm_deploy" | "swarm_tournament_precommit" => 5,
+        "swarm_tournament_create" | "swarm_match_result" => 20,
+        "swarm_dry_run" => 20,
+        "swarm_simulate" => 50,
+        _ => rate_limit_for_source(source),
     }
 }
 
@@ -762,6 +795,32 @@ pub struct ServerTrustResult {
     pub server_ca_certificate: String,
     pub supported_algorithms: Vec<String>,
     pub supported_audiences: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthRestAction {
+    RegisterChallenge,
+    SubmitCsr,
+    RenewCertificate,
+    RevokeCertificate,
+    CertList,
+    CertCheck,
+    ServerTrust,
+}
+
+impl AuthRestAction {
+    pub fn from_route(method: &str, path: &str) -> Option<Self> {
+        match (method, path) {
+            ("POST", "/auth/register/challenge") => Some(Self::RegisterChallenge),
+            ("POST", "/auth/csr/submit") => Some(Self::SubmitCsr),
+            ("POST", "/auth/cert/renew") => Some(Self::RenewCertificate),
+            ("POST", "/auth/cert/revoke") => Some(Self::RevokeCertificate),
+            ("GET", "/auth/cert/list") => Some(Self::CertList),
+            ("POST", "/auth/cert/check") => Some(Self::CertCheck),
+            ("GET", "/auth/server/trust") => Some(Self::ServerTrust),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1555,6 +1614,70 @@ impl McpServer {
         self.handle_json_rpc_as(world, context, principal.principal(), request)
     }
 
+    pub fn call_auth_rest_action(
+        &mut self,
+        world: &mut SwarmWorld,
+        action: AuthRestAction,
+        principal_player_id: Option<PlayerId>,
+        params: Value,
+    ) -> Result<Value, McpError> {
+        match action {
+            AuthRestAction::RegisterChallenge => {
+                let _params: RegisterChallengeParams = parse_empty_params(params)?;
+                serde_json::to_value(self.swarm_register_challenge(world)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            AuthRestAction::SubmitCsr => {
+                let params: SubmitCsrParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_submit_csr(world, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            AuthRestAction::RenewCertificate => {
+                let params: RenewCertificateParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                serde_json::to_value(self.swarm_renew_certificate(world, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            AuthRestAction::RevokeCertificate => {
+                let params: RevokeCertificateParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                let player_id = principal_player_id.ok_or_else(|| {
+                    McpError::invalid_params("authenticated player_id is required")
+                })?;
+                serde_json::to_value(self.swarm_revoke_certificate(world, player_id, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            AuthRestAction::CertList => {
+                let params: CertListParams = if params.is_null() {
+                    CertListParams { status: None }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|error| McpError::invalid_params(error.to_string()))?
+                };
+                let player_id = principal_player_id.ok_or_else(|| {
+                    McpError::invalid_params("authenticated player_id is required")
+                })?;
+                serde_json::to_value(self.swarm_cert_list(world, player_id, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            AuthRestAction::CertCheck => {
+                let params: CertCheckParams = serde_json::from_value(params)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
+                let player_id = principal_player_id.ok_or_else(|| {
+                    McpError::invalid_params("authenticated player_id is required")
+                })?;
+                serde_json::to_value(self.swarm_cert_check(world, player_id, params)?)
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+            AuthRestAction::ServerTrust => {
+                let _params: RegisterChallengeParams = parse_empty_params(params)?;
+                serde_json::to_value(self.swarm_get_server_trust())
+                    .map_err(|error| McpError::invalid_params(error.to_string()))
+            }
+        }
+    }
+
     pub fn call_tool(
         &mut self,
         world: &mut SwarmWorld,
@@ -1577,7 +1700,7 @@ impl McpServer {
         let source = mcp_tool_source(tool).ok_or_else(|| McpError::method_not_found(tool))?;
         authorize_mcp_tool(tool, context.player_id, source, principal)?;
         self.rate_limiter
-            .check(context.player_id, source, context.tick)?;
+            .check_tool(context.player_id, tool, source, context.tick)?;
 
         match tool {
             "swarm_get_snapshot" => serde_json::to_value(swarm_get_snapshot(world, context))
@@ -1710,19 +1833,6 @@ impl McpServer {
                 serde_json::to_value(get_drone_efficiency(world, params)?)
                     .map_err(|error| McpError::invalid_params(error.to_string()))
             }
-            "swarm_sdk_fetch" => {
-                let params: SdkFetchParams = if params.is_null() {
-                    SdkFetchParams {
-                        language: "typescript".to_string(),
-                        package: None,
-                    }
-                } else {
-                    serde_json::from_value(params)
-                        .map_err(|error| McpError::invalid_params(error.to_string()))?
-                };
-                serde_json::to_value(sdk_fetch(params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
             "swarm_simulate" => {
                 let params: SimulateParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
@@ -1757,54 +1867,6 @@ impl McpServer {
                 let params: ResourceReadParams = serde_json::from_value(params)
                     .map_err(|error| McpError::invalid_params(error.to_string()))?;
                 docs_resources_read(params)
-            }
-            "swarm_register_challenge" => {
-                let _params: RegisterChallengeParams = parse_empty_params(params)?;
-                serde_json::to_value(self.swarm_register_challenge(world)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_submit_csr" => {
-                let params: SubmitCsrParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(self.swarm_submit_csr(world, params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_renew_certificate" => {
-                let params: RenewCertificateParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(self.swarm_renew_certificate(world, params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_revoke_certificate" => {
-                let params: RevokeCertificateParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(self.swarm_revoke_certificate(
-                    world,
-                    context.player_id,
-                    params,
-                )?)
-                .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_cert_list" => {
-                let params: CertListParams = if params.is_null() {
-                    CertListParams { status: None }
-                } else {
-                    serde_json::from_value(params)
-                        .map_err(|error| McpError::invalid_params(error.to_string()))?
-                };
-                serde_json::to_value(self.swarm_cert_list(world, context.player_id, params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_cert_check" => {
-                let params: CertCheckParams = serde_json::from_value(params)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))?;
-                serde_json::to_value(self.swarm_cert_check(world, context.player_id, params)?)
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
-            }
-            "swarm_get_server_trust" => {
-                let _params: RegisterChallengeParams = parse_empty_params(params)?;
-                serde_json::to_value(self.swarm_get_server_trust())
-                    .map_err(|error| McpError::invalid_params(error.to_string()))
             }
             "swarm_get_world_config" => Ok(swarm_get_world_config()),
             "swarm_get_world_statistics" => {
@@ -3314,10 +3376,6 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
             "Estimate a drone efficiency percentage from fatigue, health, spawning, and carry state",
         ),
         tool_info(
-            "swarm_sdk_fetch",
-            "Fetch a minimal SDK starter package for bot development",
-        ),
-        tool_info(
             "swarm_dry_run",
             "Dry-run commands without mutating the world",
         ),
@@ -3335,34 +3393,6 @@ fn mcp_tool_infos() -> Vec<ToolInfo> {
         ),
         tool_info("resources/list", "List available resource types"),
         tool_info("resources/read", "Read resource definitions"),
-        tool_info(
-            "swarm_register_challenge",
-            "Create a proof-of-work challenge for CSR certificate registration",
-        ),
-        tool_info(
-            "swarm_submit_csr",
-            "Submit a certificate signing request for application-layer auth",
-        ),
-        tool_info(
-            "swarm_renew_certificate",
-            "Renew an application-layer certificate",
-        ),
-        tool_info(
-            "swarm_revoke_certificate",
-            "Revoke an application-layer certificate",
-        ),
-        tool_info(
-            "swarm_cert_list",
-            "List application-layer certificates for the caller",
-        ),
-        tool_info(
-            "swarm_cert_check",
-            "Check application-layer certificate status",
-        ),
-        tool_info(
-            "swarm_get_server_trust",
-            "Return server trust anchors for application-layer auth",
-        ),
         tool_info(
             "swarm_get_world_config",
             "Get world-level Auth and rules configuration metadata",
@@ -3433,7 +3463,6 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_get_economy"
         | "swarm_get_economy_trend"
         | "swarm_get_drone_efficiency"
-        | "swarm_sdk_fetch"
         | "swarm_get_tick_trace"
         | "swarm_get_engine_stats"
         | "swarm_get_state_checksum"
@@ -3442,13 +3471,6 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
         | "swarm_get_docs"
         | "resources/list"
         | "resources/read"
-        | "swarm_register_challenge"
-        | "swarm_submit_csr"
-        | "swarm_renew_certificate"
-        | "swarm_revoke_certificate"
-        | "swarm_cert_list"
-        | "swarm_cert_check"
-        | "swarm_get_server_trust"
         | "swarm_get_world_config"
         | "swarm_tournament_status"
         | "swarm_list_modules"
@@ -3464,12 +3486,6 @@ fn mcp_tool_source(tool: &str) -> Option<CommandSource> {
 }
 
 fn mcp_tool_auth_mode(tool: &str) -> Option<AuthMode> {
-    if matches!(
-        tool,
-        "swarm_register_challenge" | "swarm_submit_csr" | "swarm_get_server_trust"
-    ) {
-        return Some(AuthMode::Unauthenticated);
-    }
     match mcp_tool_source(tool)? {
         CommandSource::Admin => Some(AuthMode::AdminCertRequired),
         CommandSource::McpDeploy | CommandSource::DryRun | CommandSource::Simulate => {
@@ -4741,7 +4757,7 @@ fn basic_agent_tutorial_sections() -> Vec<DocsSection> {
         ),
         docs_section(
             "6. Dry-run before deploy",
-            "Call swarm_dry_run with candidate CommandIntent objects. Dry-run validates commands and returns accepted/rejection without applying a tick. Treat rejection reasons as compiler errors for behavior: ObjectNotFound, NotOwner, OutOfRange, InsufficientResource, TargetFull, SpawnOnCooldown, or RoomDroneCapReached.",
+            "Call swarm_dry_run with candidate CommandIntent objects. Dry-run validates commands and returns accepted/rejection without applying a tick. Treat rejection reasons as compiler errors for behavior: ObjectNotFound, NotOwner, OutOfRange, InsufficientResource, CapacityExceeded, SpawnOnCooldown, or RoomDroneCapReached.",
         ),
         docs_section(
             "7. Deploy",
@@ -5641,16 +5657,6 @@ fn owner_debug_tool(tool: &str) -> bool {
     )
 }
 
-fn auth_scope_tool(tool: &str) -> bool {
-    matches!(
-        tool,
-        "swarm_renew_certificate"
-            | "swarm_revoke_certificate"
-            | "swarm_cert_list"
-            | "swarm_cert_check"
-    )
-}
-
 fn authorize_mcp_tool(
     tool: &str,
     context_player_id: PlayerId,
@@ -5699,12 +5705,6 @@ fn authorize_mcp_tool(
             }
             _ => Ok(()),
         };
-    }
-    if auth_scope_tool(tool) {
-        if !principal.has_scope(SCOPE_AUTH) {
-            return Err(McpError::invalid_params("swarm:auth scope is required"));
-        }
-        return Ok(());
     }
     match source {
         CommandSource::McpQuery => {
@@ -5921,12 +5921,10 @@ pub struct GetReplayParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayResult {
-    pub from_tick: Tick,
-    pub to_tick: Tick,
-    pub tick_count: u32,
+    pub ticks: Vec<Tick>,
+    pub entities: Vec<crate::tick::EntityChange>,
     pub commands: Vec<crate::command::RawCommand>,
-    pub entity_changes: Vec<crate::tick::EntityChange>,
-    pub message: String,
+    pub events: Vec<Value>,
 }
 
 pub fn swarm_get_replay(
@@ -5970,46 +5968,44 @@ fn swarm_get_replay_as(
         .cloned()
         .collect::<Vec<_>>();
 
-    let mut entity_changes: Vec<crate::tick::EntityChange> = Vec::new();
-    let commands: Vec<crate::command::RawCommand> = Vec::new();
+    let mut ticks = Vec::new();
+    let mut entities = Vec::new();
+    let mut commands = Vec::new();
     let filter_replay = !include_hidden;
 
     for delta in &deltas {
+        if delta.tick < params.from_tick {
+            continue;
+        }
+        ticks.push(delta.tick);
         for change in &delta.entity_changes {
             if filter_replay
                 && !replay_change_visible_to_player(world, change, context.player_id, delta.tick)
             {
                 continue;
             } else {
-                entity_changes.push(change.clone());
+                entities.push(change.clone());
             }
         }
-        // Commands from deltas — RawCommand is serialized in the delta
+        let delta_commands: Vec<RawCommand> =
+            serde_json::from_str(&delta.commands_json).map_err(|error| {
+                McpError::invalid_params(format!(
+                    "invalid replay commands at tick {}: {error}",
+                    delta.tick
+                ))
+            })?;
+        commands.extend(
+            delta_commands
+                .into_iter()
+                .filter(|command| include_hidden || command.player_id == context.player_id),
+        );
     }
 
-    let has_data = !deltas.is_empty();
-    let msg = if has_data {
-        format!(
-            "replay: {} ticks from keyframe@{} ({} deltas, {} entity changes)",
-            params.to_tick - keyframe_tick + 1,
-            keyframe_tick,
-            deltas.len(),
-            entity_changes.len(),
-        )
-    } else {
-        format!(
-            "no replay data for ticks {}-{} (keyframe@{} has no deltas yet)",
-            params.from_tick, params.to_tick, keyframe_tick,
-        )
-    };
-
     Ok(ReplayResult {
-        from_tick: params.from_tick,
-        to_tick: params.to_tick,
-        tick_count: (params.to_tick.saturating_sub(params.from_tick)) as u32,
+        ticks,
+        entities,
         commands,
-        entity_changes,
-        message: msg,
+        events: Vec::new(),
     })
 }
 
@@ -6155,6 +6151,13 @@ mod tests {
     }
 
     const REMOVED_LEGACY_AUTH_TOOLS: &[&str] = &[
+        "swarm_register_challenge",
+        "swarm_submit_csr",
+        "swarm_renew_certificate",
+        "swarm_revoke_certificate",
+        "swarm_cert_list",
+        "swarm_cert_check",
+        "swarm_get_server_trust",
         "swarm_auth_revoke",
         "swarm_auth_login",
         "swarm_auth_logout",
@@ -6171,8 +6174,6 @@ mod tests {
     const EXPECTED_PUBLIC_TOOLS: &[&str] = &[
         "resources/list",
         "resources/read",
-        "swarm_cert_check",
-        "swarm_cert_list",
         "swarm_deploy",
         "swarm_dry_run",
         "swarm_explain_last_tick",
@@ -6195,7 +6196,6 @@ mod tests {
         "swarm_get_room",
         "swarm_get_sandbox_profile",
         "swarm_get_schema",
-        "swarm_get_server_trust",
         "swarm_get_snapshot",
         "swarm_get_state_checksum",
         "swarm_get_structure",
@@ -6214,12 +6214,7 @@ mod tests {
         "swarm_list_structures",
         "swarm_match_result",
         "swarm_profile",
-        "swarm_register_challenge",
-        "swarm_renew_certificate",
-        "swarm_revoke_certificate",
-        "swarm_sdk_fetch",
         "swarm_simulate",
-        "swarm_submit_csr",
         "swarm_tournament_create",
         "swarm_tournament_precommit",
         "swarm_tournament_status",
@@ -6644,6 +6639,22 @@ mod tests {
     }
 
     #[test]
+    fn auth_rest_adapter_exposes_business_logic_without_mcp_dispatch() {
+        let server = McpServer::with_issuer_for_tests(test_signing_key(47), 1_000);
+
+        assert_eq!(mcp_tool_source("swarm_get_server_trust"), None);
+        assert_eq!(mcp_tool_auth_mode("swarm_get_server_trust"), None);
+
+        assert_eq!(
+            AuthRestAction::from_route("GET", "/auth/server/trust"),
+            Some(AuthRestAction::ServerTrust)
+        );
+        let trust = serde_json::to_value(server.swarm_get_server_trust())
+            .expect("server trust remains available to REST adapter");
+        assert_eq!(trust["supported_algorithms"][0], "Ed25519");
+    }
+
+    #[test]
     fn ordinary_mcp_callers_cannot_access_debug_or_replay_visibility() {
         let mut world = create_world();
         let mut server = McpServer::new();
@@ -6930,30 +6941,16 @@ mod tests {
                 )
                 .is_ok()
         );
-        assert_eq!(
-            server
-                .call_tool_as(
-                    &mut world,
-                    context.clone(),
-                    &web,
-                    "swarm_cert_list",
-                    Value::Null,
-                )
-                .unwrap_err()
-                .message,
-            "swarm:auth scope is required"
-        );
-        assert!(
-            server
-                .call_tool_as(
-                    &mut world,
-                    context,
-                    &web_auth,
-                    "swarm_cert_list",
-                    Value::Null,
-                )
-                .is_ok()
-        );
+        let removed_auth = server
+            .call_tool_as(
+                &mut world,
+                context,
+                &web_auth,
+                "swarm_cert_list",
+                Value::Null,
+            )
+            .expect_err("auth lifecycle tools are REST-only");
+        assert_eq!(removed_auth.code, -32601);
     }
 
     #[test]
@@ -7061,9 +7058,10 @@ mod tests {
             7,
             server.now_seconds(),
         );
-        wrong_metadata.metadata = wrong_metadata
-            .metadata
-            .replace("engine_abi_version = \"1\"", "engine_abi_version = \"999\"");
+        wrong_metadata.metadata = wrong_metadata.metadata.replace(
+            &format!("engine_abi_version = \"{ENGINE_ABI_VERSION}\""),
+            "engine_abi_version = \"999\"",
+        );
         wrong_metadata.deploy_payload.metadata_hash =
             blake3_label(blake3::hash(wrong_metadata.metadata.as_bytes()).as_bytes());
         resign_deploy_payload(&mut wrong_metadata, &client_key);
@@ -7401,7 +7399,7 @@ mod tests {
             .copied()
             .collect::<BTreeSet<_>>();
 
-        assert_eq!(tools.len(), 55);
+        assert_eq!(tools.len(), 47);
         assert_eq!(tool_names.len(), tools.len());
         assert_eq!(tool_names, expected);
         assert!(tool_names.contains("swarm_get_drone_efficiency"));
@@ -7418,21 +7416,11 @@ mod tests {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<BTreeSet<_>>();
-        let mut world = create_world();
-        let mut server = McpServer::new();
-        let context = McpContext {
-            player_id: 1,
-            tick: 0,
-        };
 
         for tool in REMOVED_LEGACY_AUTH_TOOLS {
             assert!(!tool_names.contains(tool), "{tool} must not be advertised");
             assert_eq!(mcp_tool_source(tool), None, "{tool} source must be absent");
             assert_eq!(mcp_tool_auth_mode(tool), None, "{tool} auth must be absent");
-            let error = server
-                .call_tool(&mut world, context.clone(), tool, Value::Null)
-                .expect_err("removed tool should not dispatch");
-            assert_eq!(error.code, -32601, "{tool} should be method-not-found");
         }
     }
 
@@ -7449,7 +7437,7 @@ mod tests {
         ];
 
         let tools = mcp_tool_infos();
-        assert_eq!(tools.len(), 55);
+        assert_eq!(tools.len(), 47);
         let tool_names = tools
             .iter()
             .map(|tool| tool.name.as_str())
@@ -8080,7 +8068,7 @@ mod tests {
             state: crate::tick::WorldSnapshot::capture(world.app.world_mut()),
             rejections: vec![crate::command::CommandRejection::new(
                 command.clone(),
-                RejectionReason::TargetFull,
+                RejectionReason::CapacityExceeded,
             )],
             metrics: Default::default(),
             state_checksum: 0,
@@ -8101,14 +8089,9 @@ mod tests {
 
         assert_eq!(explanation.rejected.len(), 1);
         let rejection = &explanation.rejected[0];
-        assert_eq!(rejection.rejection, "InsufficientResource");
-        assert_eq!(rejection.code, "InsufficientResource");
-        assert_eq!(rejection.detail["reason"], json!("InsufficientResource"));
-        assert_eq!(
-            rejection.detail["canonical_reason"],
-            json!("InsufficientResource")
-        );
-        assert_eq!(rejection.detail["internal_reason"], json!("TargetFull"));
+        assert_eq!(rejection.rejection, "CapacityExceeded");
+        assert_eq!(rejection.code, "CapacityExceeded");
+        assert_eq!(rejection.detail["reason"], json!("CapacityExceeded"));
 
         let daily_transfer = crate::command::CommandRejection::new(
             command,
@@ -8879,6 +8862,37 @@ mod tests {
     }
 
     #[test]
+    fn mcp_rate_limiter_isolates_methods_with_the_same_source() {
+        let mut limiter = RateLimiter::new();
+        let player_id = 1;
+        let tick = 20;
+
+        for _ in 0..rate_limit_for_source(CommandSource::McpQuery) {
+            limiter
+                .check_tool(
+                    player_id,
+                    "swarm_get_world_rules",
+                    CommandSource::McpQuery,
+                    tick,
+                )
+                .unwrap();
+        }
+        limiter
+            .check_tool(player_id, "swarm_get_info", CommandSource::McpQuery, tick)
+            .expect("same-source MCP query methods must use independent buckets");
+
+        let limited = limiter
+            .check_tool(
+                player_id,
+                "swarm_get_world_rules",
+                CommandSource::McpQuery,
+                tick,
+            )
+            .expect_err("original method bucket should still be limited");
+        assert!(limited.message.contains("rate limited"));
+    }
+
+    #[test]
     fn rate_limiter_enforces_source_rates_and_refills_next_tick() {
         let mut limiter = RateLimiter::new();
 
@@ -9521,11 +9535,26 @@ mod tests {
             .expect("replay should use delta tick for visibility filtering");
         let replay: ReplayResult = serde_json::from_value(replay).unwrap();
 
-        assert_eq!(replay.entity_changes.len(), 1);
+        assert_eq!(replay.entities.len(), 1);
         assert!(matches!(
-            replay.entity_changes[0],
+            replay.entities[0],
             crate::tick::EntityChange::Modified { entity_id, .. } if entity_id == entity.to_bits()
         ));
+        assert_eq!(
+            serde_json::to_value(&replay)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "commands".to_string(),
+                "entities".to_string(),
+                "events".to_string(),
+                "ticks".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -9570,9 +9599,9 @@ mod tests {
             )
             .expect("read-scoped caller can request replay");
         let ordinary: ReplayResult = serde_json::from_value(ordinary).unwrap();
-        assert_eq!(ordinary.entity_changes.len(), 1);
+        assert_eq!(ordinary.entities.len(), 1);
         assert!(matches!(
-            ordinary.entity_changes[0],
+            ordinary.entities[0],
             crate::tick::EntityChange::Modified { entity_id, .. } if entity_id == visible.to_bits()
         ));
 
@@ -9587,7 +9616,7 @@ mod tests {
             .expect("admin read/debug principal can request unfiltered replay");
         let admin: ReplayResult = serde_json::from_value(admin).unwrap();
         let replay_ids = admin
-            .entity_changes
+            .entities
             .iter()
             .map(|change| match change {
                 crate::tick::EntityChange::Created { entity_id, .. }
