@@ -12,7 +12,16 @@ WORKDIR /app/engine
 COPY mods/ /app/mods/
 COPY engine/ /app/engine/
 RUN cargo build --release --locked --features vanilla_mods
+RUN cargo test --locked --manifest-path sdk-templates/rust/Cargo.toml
 RUN ./target/release/swarm-engine generate-sdk world.toml /app/engine/sdk-output
+RUN set -eu; \
+    found=0; \
+    for manifest in /app/engine/sdk-output/*/sdk-rust/Cargo.toml; do \
+        test -f "$manifest"; \
+        cargo test --manifest-path "$manifest"; \
+        found=1; \
+    done; \
+    test "$found" = 1
 
 FROM debian:trixie-slim AS runtime
 
