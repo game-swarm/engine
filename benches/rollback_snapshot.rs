@@ -7,7 +7,8 @@ use std::hint::black_box;
 
 use bevy::prelude::*;
 use criterion::{Criterion, criterion_group, criterion_main};
-use swarm_engine::components::{Attributes, DroneEnv, EntityFlags, RoomTerrains};
+use swarm_engine::components::{Attributes, DroneEnv, EntityFlags, EventLog, RoomTerrains};
+use swarm_engine::resource_ledger::ResourceLedger;
 use swarm_engine::resources::{PendingGlobalTransfers, PlayerGlobalStorage, PlayerLocalStorage};
 use swarm_engine::systems::{PendingCombat, PendingSpawnQueue, Projectile, RoomDroneCounts};
 use swarm_engine::systems::{PlayerFirstSpawnTick, StartingResourcesGranted};
@@ -28,8 +29,10 @@ fn build_populated_world(n: usize) -> World {
     world.init_resource::<PlayerLocalStorage>();
     world.init_resource::<PlayerGlobalStorage>();
     world.init_resource::<PendingGlobalTransfers>();
+    world.init_resource::<ResourceLedger>();
     world.init_resource::<StartingResourcesGranted>();
     world.init_resource::<PlayerFirstSpawnTick>();
+    world.init_resource::<EventLog>();
 
     for i in 0..n {
         let mut entity = world.spawn_empty();
@@ -114,17 +117,22 @@ fn bench_allocator_determinism(c: &mut Criterion) {
             || {
                 let mut world = build_populated_world(500);
                 let snapshot = WorldSnapshot::capture(&mut world);
-                let total_before = snapshot.entity_total_count;
-                (world, snapshot, total_before)
+                let alive_before = snapshot.entity_alive_count;
+                (world, snapshot, alive_before)
             },
-            |(mut world, snapshot, total_before)| {
-                let _entity_map = snapshot.restore(&mut world);
+            |(mut world, snapshot, alive_before)| {
+                let entity_map = snapshot.restore(&mut world);
+                assert_eq!(
+                    entity_map.len(),
+                    alive_before as usize,
+                    "rollback must remap every captured live entity exactly once"
+                );
+                let live_after_restore = world.iter_entities().count();
                 let next = world.spawn_empty().id();
-                assert!(
-                    next.index().index() <= total_before + 1,
-                    "allocator drifted: expected index <= {}, got {}",
-                    total_before + 1,
-                    next.index().index()
+                assert_eq!(
+                    world.iter_entities().count(),
+                    live_after_restore + 1,
+                    "the allocator must produce exactly one live entity per spawn"
                 );
                 world.entity_mut(next).despawn();
             },
