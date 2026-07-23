@@ -1,12 +1,15 @@
 use bevy::prelude::*;
+use swarm_engine_api::ids::DamageType;
 use swarm_engine_plugin_sdk::buffers::{
     PendingSpecialAttack, SpecialAttackKind, StatusActionIntent,
 };
+use swarm_engine_plugin_sdk::components::SpawningGrace;
 
 /// Resolved intent ready for S22 status_advance_system to process.
 #[derive(Debug, Clone)]
 pub struct ResolvedIntent {
     pub kind: SpecialAttackKind,
+    pub source: Entity,
     pub target: Entity,
     pub amount: u32,
 }
@@ -15,6 +18,35 @@ pub struct ResolvedIntent {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct PendingIntents {
     pub intents: Vec<ResolvedIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeechCombatIntent {
+    pub source: Entity,
+    pub target: Entity,
+    pub base_damage: u32,
+    pub damage_type: DamageType,
+    pub heal_bps: u32,
+    pub sort_key: u64,
+}
+
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingLeechCombat {
+    pub intents: Vec<LeechCombatIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeechResolutionEntry {
+    pub source: Entity,
+    pub target: Entity,
+    pub actual_damage: u32,
+    pub self_heal: u32,
+    pub sort_key: u64,
+}
+
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeechResolution {
+    pub entries: Vec<LeechResolutionEntry>,
 }
 
 /// S14: Special Attack Reducer
@@ -27,20 +59,30 @@ pub struct PendingIntents {
 ///
 /// Does NOT directly modify entity state — only routes intents.
 pub fn special_attack_reducer(
-    mut pending: ResMut<PendingSpecialAttack>,
+    pending: Res<PendingSpecialAttack>,
     mut intents: ResMut<PendingIntents>,
+    mut pending_leech: ResMut<PendingLeechCombat>,
+    spawning_grace: Query<(), With<SpawningGrace>>,
 ) {
+    intents.intents.clear();
+    pending_leech.intents.clear();
     if pending.intents.is_empty() {
         return;
     }
 
-    // 1. Drain all intents
-    let mut raw: Vec<StatusActionIntent> = std::mem::take(&mut pending.intents);
+    // S16-S22b still consume the raw buffer later in this tick. S22 clears it
+    // after all typed buffer producers have run.
+    let mut raw: Vec<StatusActionIntent> = pending
+        .intents
+        .iter()
+        .filter(|intent| !spawning_grace.contains(intent.target))
+        .cloned()
+        .collect();
 
     // 2. Canonical sort: (priority DESC, source identity, target identity)
     raw.sort_by(|a, b| {
-        b.kind
-            .cmp(&a.kind)
+        special_attack_priority(b.kind)
+            .cmp(&special_attack_priority(a.kind))
             .then_with(|| entity_identity(a.source).cmp(&entity_identity(b.source)))
             .then_with(|| entity_identity(a.target).cmp(&entity_identity(b.target)))
     });
@@ -54,6 +96,7 @@ pub fn special_attack_reducer(
         } else {
             acc.push(ResolvedIntent {
                 kind: intent.kind,
+                source: intent.source,
                 target: intent.target,
                 amount: intent.amount,
             });
@@ -62,11 +105,37 @@ pub fn special_attack_reducer(
     });
 
     // 4. Deliver to S22
-    intents.intents = resolved;
+    for (sort_key, intent) in resolved.into_iter().enumerate() {
+        if intent.kind == SpecialAttackKind::Leech {
+            pending_leech.intents.push(LeechCombatIntent {
+                source: intent.source,
+                target: intent.target,
+                base_damage: 15,
+                damage_type: DamageType::Kinetic,
+                heal_bps: 5_000,
+                sort_key: sort_key as u64,
+            });
+        } else {
+            intents.intents.push(intent);
+        }
+    }
 }
 
 fn entity_identity(entity: Entity) -> u64 {
     u64::from(entity.index_u32())
+}
+
+fn special_attack_priority(kind: SpecialAttackKind) -> u8 {
+    match kind {
+        SpecialAttackKind::Hack => 8,
+        SpecialAttackKind::Drain => 7,
+        SpecialAttackKind::Overload => 6,
+        SpecialAttackKind::Debilitate => 5,
+        SpecialAttackKind::Disrupt => 4,
+        SpecialAttackKind::Fortify => 3,
+        SpecialAttackKind::Leech => 2,
+        SpecialAttackKind::Fabricate => 1,
+    }
 }
 
 #[cfg(test)]
@@ -99,6 +168,7 @@ mod tests {
             ],
         });
         app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingLeechCombat::default());
         app.add_systems(Update, special_attack_reducer);
 
         app.update();
@@ -115,6 +185,14 @@ mod tests {
             "Hack > Fortify"
         );
         assert_eq!(intents.intents[0].amount, 10);
+        assert_eq!(intents.intents[0].source, entity(2));
+        assert_eq!(intents.intents[0].target, entity(10));
+        assert_eq!(intents.intents[0].kind, SpecialAttackKind::Hack);
+        assert_eq!(
+            app.world().resource::<PendingSpecialAttack>().intents.len(),
+            2,
+            "S14 must not starve the downstream typed buffer systems"
+        );
     }
 
     #[test]
@@ -139,6 +217,7 @@ mod tests {
             ],
         });
         app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingLeechCombat::default());
         app.add_systems(Update, special_attack_reducer);
 
         app.update();
@@ -175,6 +254,7 @@ mod tests {
             ],
         });
         app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingLeechCombat::default());
         app.add_systems(Update, special_attack_reducer);
 
         app.update();
@@ -206,6 +286,7 @@ mod tests {
             ],
         });
         app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingLeechCombat::default());
         app.add_systems(Update, special_attack_reducer);
 
         app.update();
@@ -219,10 +300,143 @@ mod tests {
     }
 
     #[test]
+    fn reducer_uses_manifest_priority_for_fortify_and_fabricate() {
+        let mut app = App::new();
+        app.insert_resource(PendingSpecialAttack {
+            intents: vec![
+                StatusActionIntent {
+                    kind: SpecialAttackKind::Fabricate,
+                    source: entity(1),
+                    target: entity(10),
+                    owner: 1,
+                    amount: 0,
+                },
+                StatusActionIntent {
+                    kind: SpecialAttackKind::Fortify,
+                    source: entity(2),
+                    target: entity(10),
+                    owner: 1,
+                    amount: 0,
+                },
+            ],
+        });
+        app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingLeechCombat::default());
+        app.add_systems(Update, special_attack_reducer);
+
+        app.update();
+
+        let intents = app.world().resource::<PendingIntents>();
+        assert_eq!(intents.intents.len(), 1);
+        assert_eq!(intents.intents[0].kind, SpecialAttackKind::Fortify);
+    }
+
+    #[test]
+    fn reducer_keeps_leech_out_of_persistent_status_delivery() {
+        let mut app = App::new();
+        app.insert_resource(PendingSpecialAttack {
+            intents: vec![StatusActionIntent {
+                kind: SpecialAttackKind::Leech,
+                source: entity(1),
+                target: entity(10),
+                owner: 1,
+                amount: 15,
+            }],
+        });
+        app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingLeechCombat::default());
+        app.add_systems(Update, special_attack_reducer);
+
+        app.update();
+
+        assert!(app.world().resource::<PendingIntents>().intents.is_empty());
+        let leech = app.world().resource::<PendingLeechCombat>();
+        assert_eq!(
+            leech.intents,
+            vec![LeechCombatIntent {
+                source: entity(1),
+                target: entity(10),
+                base_damage: 15,
+                damage_type: DamageType::Kinetic,
+                heal_bps: 5_000,
+                sort_key: 0,
+            }]
+        );
+        assert_eq!(
+            app.world().resource::<PendingSpecialAttack>().intents.len(),
+            1,
+            "Leech remains available to its downstream combat/buffer route"
+        );
+    }
+
+    #[test]
+    fn reducer_routes_leech_over_fabricate_for_the_same_target() {
+        let mut app = App::new();
+        app.insert_resource(PendingSpecialAttack {
+            intents: vec![
+                StatusActionIntent {
+                    kind: SpecialAttackKind::Fabricate,
+                    source: entity(1),
+                    target: entity(10),
+                    owner: 1,
+                    amount: 0,
+                },
+                StatusActionIntent {
+                    kind: SpecialAttackKind::Leech,
+                    source: entity(2),
+                    target: entity(10),
+                    owner: 1,
+                    amount: 0,
+                },
+            ],
+        });
+        app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingLeechCombat::default());
+        app.add_systems(Update, special_attack_reducer);
+
+        app.update();
+
+        assert!(app.world().resource::<PendingIntents>().intents.is_empty());
+        assert_eq!(
+            app.world().resource::<PendingLeechCombat>().intents[0].source,
+            entity(2)
+        );
+    }
+
+    #[test]
+    fn reducer_rejects_leech_against_spawning_grace() {
+        let mut app = App::new();
+        let source = app.world_mut().spawn_empty().id();
+        let target = app.world_mut().spawn(SpawningGrace { remaining: 1 }).id();
+        app.insert_resource(PendingSpecialAttack {
+            intents: vec![StatusActionIntent {
+                kind: SpecialAttackKind::Leech,
+                source,
+                target,
+                owner: 1,
+                amount: 0,
+            }],
+        });
+        app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingLeechCombat::default());
+        app.add_systems(Update, special_attack_reducer);
+
+        app.update();
+
+        assert!(
+            app.world()
+                .resource::<PendingLeechCombat>()
+                .intents
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn reducer_empty_is_noop() {
         let mut app = App::new();
         app.insert_resource(PendingSpecialAttack::default());
         app.insert_resource(PendingIntents::default());
+        app.insert_resource(PendingLeechCombat::default());
         app.add_systems(Update, special_attack_reducer);
 
         app.update();

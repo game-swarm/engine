@@ -81,7 +81,10 @@ pub use spawn_system::{
     spawn_system,
 };
 pub use spawning_grace_system::{spawning_grace_expiry_system, spawning_grace_system};
-pub use special_attack_reducer::{PendingIntents, ResolvedIntent, special_attack_reducer};
+pub use special_attack_reducer::{
+    LeechCombatIntent, LeechResolution, LeechResolutionEntry, PendingIntents, PendingLeechCombat,
+    ResolvedIntent, special_attack_reducer,
+};
 pub use starting_resources_system::{
     PlayerFirstSpawnTick, StartingResourcesGranted, starting_resources_system,
 };

@@ -59,15 +59,8 @@ fn parse_fixed_multiplier(value: &toml::Value) -> Result<u32, String> {
             }
             u32::try_from(*integer).map_err(|_| "combat.damage_multiplier too large".to_string())
         }
-        toml::Value::Float(float) => {
-            if !float.is_finite() || *float < 0.0 {
-                return Err("combat.damage must be a non-negative finite number".to_string());
-            }
-            let scaled = (*float * DAMAGE_MULTIPLIER_SCALE as f64).round();
-            if scaled > u32::MAX as f64 {
-                return Err("combat.damage is too large".to_string());
-            }
-            Ok(scaled as u32)
+        toml::Value::Float(_) => {
+            Err("combat.damage_multiplier must be an integer fixed-point multiplier".to_string())
         }
         _ => Err("combat.damage_multiplier must be an integer fixed-point multiplier".to_string()),
     }
@@ -143,6 +136,10 @@ pub fn ranged_attack_damage(parts: usize, rules: CombatRules) -> u32 {
 
 pub fn heal_amount(parts: usize) -> u32 {
     parts as u32 * DEFAULT_HEAL_AMOUNT
+}
+
+pub fn leech_self_heal(actual_damage: u32, heal_bps: u32) -> u32 {
+    scale_fixed(actual_damage, heal_bps)
 }
 
 fn body_part_count(drone: &Drone, part: BodyPart) -> usize {
@@ -352,7 +349,7 @@ pub fn heal_system(
     }
 }
 
-pub fn final_damage_multiplier(
+pub fn final_damage_multiplier_bps(
     body: Option<&[BodyPart]>,
     attrs: Option<&Attributes>,
     flags: Option<&EntityFlags>,
@@ -360,23 +357,26 @@ pub fn final_damage_multiplier(
     _body_registry: &BodyPartRegistry,
     damage_registry: &DamageTypeRegistry,
     resistance_registry: &ResistanceRegistry,
-) -> f64 {
+) -> u32 {
     if flags
         .and_then(|flags| flags.0.get(&format!("immune_{damage_type}")))
         .copied()
         .unwrap_or(false)
     {
-        return 0.0;
+        return 0;
     }
-    let component_mult = damage_registry.component_multiplier(damage_type, body)
-        * resistance_registry.component_multiplier(damage_type, body);
-    let attribute_mult = damage_registry.attribute_multiplier(damage_type, attrs)
-        * resistance_registry.attribute_multiplier(damage_type, attrs)
-        * fortify_multiplier(attrs);
-    component_mult * attribute_mult
+    [
+        damage_registry.component_multiplier_bps(damage_type, body),
+        resistance_registry.component_multiplier_bps(damage_type, body),
+        damage_registry.attribute_multiplier_bps(damage_type, attrs),
+        resistance_registry.attribute_multiplier_bps(damage_type, attrs),
+        fortify_multiplier_bps(attrs),
+    ]
+    .into_iter()
+    .fold(DAMAGE_MULTIPLIER_SCALE, scale_fixed)
 }
 
-fn fortify_multiplier(attrs: Option<&Attributes>) -> f64 {
+fn fortify_multiplier_bps(attrs: Option<&Attributes>) -> u32 {
     attrs
         .map(|attrs| {
             if attrs
@@ -384,12 +384,12 @@ fn fortify_multiplier(attrs: Option<&Attributes>) -> f64 {
                 .iter()
                 .any(|attr| attr == "Fortified" || attr.starts_with("Fortified:"))
             {
-                0.5
+                5_000
             } else {
-                1.0
+                DAMAGE_MULTIPLIER_SCALE
             }
         })
-        .unwrap_or(1.0)
+        .unwrap_or(DAMAGE_MULTIPLIER_SCALE)
 }
 
 type CombatDroneItem<'a> = (
@@ -450,7 +450,7 @@ pub fn combat_system(
                 continue;
             }
             let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
-                let multiplier = final_damage_multiplier(
+                let multiplier = final_damage_multiplier_bps(
                     Some(&drone.body),
                     attrs,
                     flags,
@@ -459,14 +459,14 @@ pub fn combat_system(
                     &registries.damage,
                     &registries.resistance,
                 );
-                acc.saturating_add(((*amount as f64) * multiplier).floor() as u32)
+                acc.saturating_add(scale_fixed(*amount, multiplier))
             });
             if total > 0 {
                 outputs.damage.push(*entity, total, "Kinetic");
             }
         } else if let Ok((_structure, attrs, flags)) = structures.get(*entity) {
             let total = damages.iter().fold(0u32, |acc, (dt, amount)| {
-                let multiplier = final_damage_multiplier(
+                let multiplier = final_damage_multiplier_bps(
                     None,
                     attrs,
                     flags,
@@ -475,7 +475,7 @@ pub fn combat_system(
                     &registries.damage,
                     &registries.resistance,
                 );
-                acc.saturating_add(((*amount as f64) * multiplier).floor() as u32)
+                acc.saturating_add(scale_fixed(*amount, multiplier))
             });
             if total > 0 {
                 outputs.damage.push(*entity, total, "Kinetic");
@@ -504,14 +504,47 @@ mod tests {
     use indexmap::IndexMap;
 
     #[test]
-    fn parses_integer_and_float_damage_multiplier() {
+    fn parses_integer_damage_multiplier() {
         let fixed = CombatRules::from_toml_str("[combat]\ndamage_multiplier = 15000\n").unwrap();
         assert_eq!(fixed.damage_multiplier, 15_000);
         assert_eq!(fixed.scale_damage(30), 45);
 
-        let compat_float = CombatRules::from_toml_str("[combat]\ndamage = 0.5\n").unwrap();
-        assert_eq!(compat_float.damage_multiplier, 5_000);
-        assert_eq!(compat_float.scale_damage(25), 12);
+        let half = CombatRules::from_toml_str("[combat]\ndamage = 5000\n").unwrap();
+        assert_eq!(half.damage_multiplier, 5_000);
+        assert_eq!(half.scale_damage(25), 12);
+    }
+
+    #[test]
+    fn rejects_float_damage_multiplier() {
+        let error = CombatRules::from_toml_str("[combat]\ndamage = 0.5\n").unwrap_err();
+
+        assert!(error.contains("integer fixed-point multiplier"));
+    }
+
+    #[test]
+    fn fixed_point_damage_worked_examples_use_flooring_integer_math() {
+        assert_eq!(scale_fixed(15, 10_000), 15);
+        assert_eq!(scale_fixed(15, 5_000), 7);
+        assert_eq!(scale_fixed(25, 15_000), 37);
+        assert_eq!(
+            CombatRules {
+                damage_multiplier: 15_000
+            }
+            .scale_damage(30),
+            45
+        );
+    }
+
+    #[test]
+    fn leech_heal_worked_example_uses_actual_damage_basis_points() {
+        let mitigated_damage = scale_fixed(15, 5_000);
+        let scaled_damage = scale_fixed(mitigated_damage, 10_000);
+        let target_virtual_remaining_hits = 6;
+        let actual_damage = scaled_damage.min(target_virtual_remaining_hits);
+
+        assert_eq!(mitigated_damage, 7);
+        assert_eq!(actual_damage, 6);
+        assert_eq!(leech_self_heal(actual_damage, 5_000), 3);
     }
 
     fn test_drone(body: Vec<BodyPart>) -> Drone {
