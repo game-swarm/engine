@@ -37,21 +37,41 @@ fn shared_dependencies_resolve_to_single_expected_packages() {
     assert_single_package(&metadata, "swarm-engine-api", "0.1.0");
     assert_single_package(&metadata, "swarm-engine-plugin-sdk", "0.1.0");
     assert_single_package(&metadata, "bevy", "0.19.0");
+    assert_declared_git_pin("swarm-engine-api");
+    assert_declared_git_pin("swarm-engine-plugin-sdk");
     assert_source_prefix(
         &metadata,
         "swarm-engine-api",
-        "git+https://github.com/game-swarm/engine-api.git?tag=v0.1.0#",
+        "git+https://github.com/game-swarm/engine-api.git?rev=d29a8f36b6d54ce6dfb5fb81985731110f7c48c8#",
     );
     assert_source_prefix(
         &metadata,
         "swarm-engine-plugin-sdk",
-        "git+https://github.com/game-swarm/engine-api.git?tag=v0.1.0#",
+        "git+https://github.com/game-swarm/engine-api.git?rev=d29a8f36b6d54ce6dfb5fb81985731110f7c48c8#",
     );
     assert_source_prefix(
         &metadata,
         "bevy",
         "registry+https://github.com/rust-lang/crates.io-index",
     );
+}
+
+fn assert_declared_git_pin(package_name: &str) {
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+    )
+    .expect("failed to read engine Cargo.toml");
+    let manifest: toml::Value = toml::from_str(&manifest).expect("invalid engine Cargo.toml");
+    let dependency = &manifest["dependencies"][package_name];
+    assert_eq!(
+        dependency["git"].as_str(),
+        Some("https://github.com/game-swarm/engine-api.git")
+    );
+    assert_eq!(
+        dependency["rev"].as_str(),
+        Some("d29a8f36b6d54ce6dfb5fb81985731110f7c48c8")
+    );
+    assert_eq!(dependency["version"].as_str(), Some("=0.1.0"));
 }
 
 fn assert_single_package(metadata: &Metadata, package_name: &str, expected_version: &str) {

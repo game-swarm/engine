@@ -20,8 +20,8 @@ path = "src/main.rs"
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["serialize"] }
-swarm-engine-api = { git = "https://github.com/game-swarm/engine-api.git", tag = "v0.1.0", version = "=0.1.0" }
-swarm-engine-plugin-sdk = { git = "https://github.com/game-swarm/engine-api.git", tag = "v0.1.0", version = "=0.1.0" }
+swarm-engine-api = { git = "https://github.com/game-swarm/engine-api.git", rev = "d29a8f36b6d54ce6dfb5fb81985731110f7c48c8", version = "=0.1.0" }
+swarm-engine-plugin-sdk = { git = "https://github.com/game-swarm/engine-api.git", rev = "d29a8f36b6d54ce6dfb5fb81985731110f7c48c8", version = "=0.1.0" }
 swarm-mod-combat-core = { path = "../mods/combat-core", version = "=0.1.0", optional = true }
 swarm-mod-depot-storage = { path = "../mods/depot-storage", version = "=0.1.0", optional = true }
 swarm-mod-empire-upkeep = { path = "../mods/empire-upkeep", version = "=0.1.0", optional = true }
