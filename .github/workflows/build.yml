@@ -22,6 +22,9 @@ jobs:
         with:
           path: engine
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
@@ -34,6 +37,9 @@ jobs:
       - name: Check all Engine targets
         working-directory: engine
         run: cargo check --locked --all-targets --features vanilla_mods
+      - name: Install TypeScript SDK dependencies
+        working-directory: engine/sdk-templates/ts
+        run: npm ci
       - name: Test all Engine targets
         working-directory: engine
         run: cargo test --locked --all-targets --features vanilla_mods

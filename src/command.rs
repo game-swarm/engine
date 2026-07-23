@@ -9350,6 +9350,16 @@ mod tests {
         let target = world.spawn_drone(2, 11, 10, vec![BodyPart::Move]);
         let attacker_id = object_id(attacker);
         let target_id = object_id(target);
+        world
+            .app
+            .world_mut()
+            .entity_mut(attacker)
+            .remove::<swarm_engine_plugin_sdk::components::SpawningGrace>();
+        world
+            .app
+            .world_mut()
+            .entity_mut(target)
+            .remove::<swarm_engine_plugin_sdk::components::SpawningGrace>();
 
         give_local_energy(world.app.world_mut(), 1, 100);
         world
@@ -9388,6 +9398,17 @@ mod tests {
             .unwrap();
         world.run_tick_for(1);
 
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<crate::systems::PendingIntents>()
+                .intents
+                .iter()
+                .any(|intent| intent.kind == SpecialAttackKind::Disrupt),
+            "S14 must route Disrupt into PendingIntents"
+        );
+
         let target_ref = world.app.world().entity(target);
         let attrs = &target_ref.get::<Attributes>().unwrap().0;
         assert!(!attrs.iter().any(|attr| attr == "Hacking"));
@@ -9413,6 +9434,11 @@ mod tests {
         let mut world = create_world();
         let drone = world.spawn_drone(1, 10, 10, vec![BodyPart::Tough]);
         let drone_id = object_id(drone);
+        world
+            .app
+            .world_mut()
+            .entity_mut(drone)
+            .remove::<swarm_engine_plugin_sdk::components::SpawningGrace>();
 
         give_local_energy(world.app.world_mut(), 1, 400);
         let mut flags = std::collections::HashMap::new();
